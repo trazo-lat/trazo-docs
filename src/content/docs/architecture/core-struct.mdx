@@ -1,0 +1,260 @@
+---
+title: Core Struct
+description: The central dependency carrier of the Trazo platform — its 11 sub-interfaces, their methods, and the rules governing how Core is used across the codebase.
+---
+
+The `Core` struct is the single point of access for every platform capability. It is constructed once at startup and passed as a pointer into every module, service, and handler. No global state is used; all shared functionality is accessed through `*Core`.
+
+## Definition
+
+```go
+type Core struct {
+    Session    SessionManager    // Request-scoped identity
+    Permission PermissionChecker // Authorization + scope filtering
+    Audit      AuditRecorder     // Change tracking
+    Events     EventBus          // Domain events
+    Modules    ModuleManager     // Module discovery
+    Hooks      HookExecutor      // Extension points
+    Storage    StorageManager    // File storage
+    DB         DatabaseManager   // Database access
+    Config     ConfigProvider    // Configuration
+    Errors     ErrorFactory      // Structured errors
+    Log        LogProvider       // Contextual logging
+}
+```
+
+:::note
+Always pass and store `*Core` (pointer), never a value copy. The interfaces themselves are already reference types, but passing a value copy would break any field that is modified during the request lifecycle.
+:::
+
+## Rules
+
+1. `*Core` is always a pointer.
+2. All request-scoped data is accessed via the context passed to each method, not stored on the struct itself.
+3. Every interface has a corresponding mock implementation for use in unit tests.
+4. Services never import other services directly; they communicate through `Core.Events` or `Core.Hooks`.
+
+---
+
+## SessionManager
+
+Provides access to the identity and context of the current request. All values are derived from the validated JWT and the session record loaded by the auth middleware.
+
+```go
+type SessionManager interface {
+    CurrentUser(ctx context.Context) (*User, error)
+    CurrentTenant(ctx context.Context) (*Tenant, error)
+    CurrentMembership(ctx context.Context) (*Membership, error)
+    CurrentPermissions(ctx context.Context) ([]Permission, error)
+    Current(ctx context.Context) (*SessionInfo, error)
+    RequestID(ctx context.Context) string
+    TraceID(ctx context.Context) string
+}
+```
+
+| Method | Returns | Notes |
+|---|---|---|
+| `CurrentUser` | `*User` | The authenticated platform user |
+| `CurrentTenant` | `*Tenant` | The tenant resolved from the JWT or subdomain |
+| `CurrentMembership` | `*Membership` | The user's membership record for the current tenant |
+| `CurrentPermissions` | `[]Permission` | All permissions granted via the user's role |
+| `Current` | `*SessionInfo` | Composite: user + tenant + membership + permissions |
+| `RequestID` | `string` | Value of the `X-Request-ID` header (generated if absent) |
+| `TraceID` | `string` | Distributed trace identifier for log correlation |
+
+---
+
+## PermissionChecker
+
+Evaluates whether the current session is authorized to perform an action, and translates scope grants into SQL filter clauses.
+
+```go
+type PermissionChecker interface {
+    Can(ctx context.Context, permission string) (bool, error)
+    MustCan(ctx context.Context, permission string) error
+    ResolveScope(ctx context.Context, permission string) (string, error)
+    ApplyScope(ctx context.Context, permission string, q *Query) (*Query, error)
+}
+```
+
+| Method | Behavior |
+|---|---|
+| `Can` | Returns `true` if the permission is granted, `false` otherwise. Non-fatal. |
+| `MustCan` | Returns a `*core.Error` with `AUTHORIZATION.FORBIDDEN` if denied. Use this in services where access must be enforced. |
+| `ResolveScope` | Returns the effective scope string (e.g., `"own"`, `"team"`, `"all"`) for a scoped permission. |
+| `ApplyScope` | Mutates a `*Query` by appending the WHERE clause corresponding to the resolved scope. |
+
+See [Permissions](/architecture/permissions) for the full scope model and SQL filter mappings.
+
+---
+
+## AuditRecorder
+
+Records immutable audit entries for every state-changing operation. Diffs for updates are computed as RFC 6902 JSON Patches.
+
+```go
+type AuditRecorder interface {
+    Record(ctx context.Context, entry AuditEntry) error
+    Create(ctx context.Context, resource string, id string, after any, opts ...AuditOption) error
+    Update(ctx context.Context, resource string, id string, before any, after any, opts ...AuditOption) error
+    Delete(ctx context.Context, resource string, id string, before any, opts ...AuditOption) error
+}
+```
+
+| Method | Use case |
+|---|---|
+| `Create` | Record the initial state of a newly created resource |
+| `Update` | Record a diff between the state before and after a mutation |
+| `Delete` | Record the final state of a resource before it is removed |
+| `Record` | Low-level entry point for custom audit entries |
+
+Options such as `WithMaskedFields` allow PII or sensitive fields to be redacted before storage.
+
+See [Audit Trail](/architecture/audit-trail) for the complete options API and storage schema.
+
+---
+
+## EventBus
+
+Publishes domain events and manages subscriptions. `EmitTx` is the primary emission method — it participates in the caller's database transaction.
+
+```go
+type EventBus interface {
+    Emit(ctx context.Context, event Event) error
+    EmitTx(ctx context.Context, tx *DB, event Event) error
+    Subscribe(name string, handler EventHandler) error
+    SubscribeAll(handler EventHandler) error
+    Start(ctx context.Context) error
+    Stop(ctx context.Context) error
+}
+```
+
+| Method | Behavior |
+|---|---|
+| `Emit` | Publishes an event outside a transaction. Suitable for non-critical notifications. |
+| `EmitTx` | Writes the event to the outbox table within the given transaction. Guaranteed delivery. |
+| `Subscribe` | Registers a handler for a specific event name. |
+| `SubscribeAll` | Registers a handler that receives every event. |
+| `Start` | Launches the outbox processor and worker pool. Called at application startup. |
+| `Stop` | Drains the worker pool and shuts down the processor. Called at shutdown. |
+
+See [Event Outbox](/architecture/event-outbox) for the outbox processor, retry policy, and dead letter queue.
+
+---
+
+## ModuleManager
+
+Provides runtime access to registered modules and their services.
+
+```go
+type ModuleManager interface {
+    Service(name string) (ModuleService, error)
+    Enabled(ctx context.Context, name string) (bool, error)
+}
+```
+
+| Method | Behavior |
+|---|---|
+| `Service` | Returns the `ModuleService` for the named module, or an error if the module is not registered. |
+| `Enabled` | Reports whether the named module is enabled for the current tenant. |
+
+---
+
+## HookExecutor
+
+Runs extension points that allow modules to intercept and augment each other's behavior without direct imports.
+
+```go
+type HookExecutor interface {
+    Execute(ctx context.Context, hook string, data any) (*HookResult, error)
+}
+```
+
+Hooks are registered by name during module initialization. Multiple handlers can be registered for the same hook; `Execute` collects and merges all results.
+
+---
+
+## StorageManager
+
+Abstracts file storage operations behind an interface that can be backed by local disk, S3, GCS, or any compatible object store.
+
+```go
+type StorageManager interface {
+    Upload(ctx context.Context, key string, r io.Reader, opts ...StorageOption) error
+    Download(ctx context.Context, key string) (io.ReadCloser, error)
+    Delete(ctx context.Context, key string) error
+    URL(ctx context.Context, key string, ttl time.Duration) (string, error)
+}
+```
+
+---
+
+## DatabaseManager
+
+Provides access to the database connection and supports transactional operations.
+
+```go
+type DatabaseManager interface {
+    Conn(ctx context.Context) *DB
+    Tx(ctx context.Context, fn func(*DB) error) error
+}
+```
+
+| Method | Behavior |
+|---|---|
+| `Conn` | Returns the current connection for the request context, with `search_path` already set to the tenant schema. |
+| `Tx` | Begins a transaction, passes the transactional `*DB` to `fn`, and commits or rolls back automatically. |
+
+---
+
+## ConfigProvider
+
+Reads configuration values from environment variables and from the declarative `module.yaml` files.
+
+```go
+type ConfigProvider interface {
+    Get(key string) string
+    Tenant(ctx context.Context, key string) (string, error)
+    Module(name string, key string) (string, error)
+    Setting(ctx context.Context, module string, key string) (string, error)
+}
+```
+
+| Method | Source |
+|---|---|
+| `Get` | Global environment variable |
+| `Tenant` | Tenant-specific configuration record |
+| `Module` | Static value from `module.yaml` |
+| `Setting` | Runtime setting stored in the tenant schema, overrides `Module` |
+
+---
+
+## ErrorFactory
+
+Constructs typed `*core.Error` values with the correct HTTP status, error code, and message key.
+
+```go
+type ErrorFactory interface {
+    New(code string, message string, status int) *Error
+    Validation(field string, messageKey string, params ...any) *Error
+    NotFound(resource string) *Error
+    Conflict(resource string) *Error
+    Forbidden() *Error
+}
+```
+
+See [Error System](/architecture/error-system) for error codes, HTTP status mappings, and the API response format.
+
+---
+
+## LogProvider
+
+Returns a context-aware logger that automatically includes the request ID, tenant ID, and trace ID in every log line.
+
+```go
+type LogProvider interface {
+    Logger(ctx context.Context) *ContextLogger
+}
+```
+
+`ContextLogger` wraps a structured logger (e.g., `slog`) and enriches each entry with fields extracted from the context. Use this instead of a package-level logger so that log lines can always be correlated to a specific request and tenant.

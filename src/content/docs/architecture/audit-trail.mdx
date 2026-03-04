@@ -1,0 +1,185 @@
+---
+title: Audit Trail
+description: How Trazo records every state change as an immutable audit entry using RFC 6902 JSON Patch diffs, and how to query the audit log.
+---
+
+Trazo maintains a complete, tamper-evident audit trail for every resource in the system. Every create, update, and delete operation produces an audit entry stored in the tenant schema's `audit_log` table. Update entries store a diff computed as an RFC 6902 JSON Patch, which captures exactly which fields changed, what their previous values were, and what they became.
+
+## AuditRecorder Interface
+
+The audit system is accessed through `Core.Audit`:
+
+```go
+type AuditRecorder interface {
+    Record(ctx context.Context, entry AuditEntry) error
+    Create(ctx context.Context, resource string, id string, after any, opts ...AuditOption) error
+    Update(ctx context.Context, resource string, id string, before any, after any, opts ...AuditOption) error
+    Delete(ctx context.Context, resource string, id string, before any, opts ...AuditOption) error
+}
+```
+
+## Recording Operations
+
+### Create
+
+Call `Create` immediately after inserting a new resource. Pass the full struct as `after`:
+
+```go
+repair, err := r.repo.Insert(ctx, input)
+if err != nil {
+    return nil, err
+}
+
+if err := s.core.Audit.Create(ctx, "repair", repair.ID, repair); err != nil {
+    s.core.Log.Logger(ctx).Error("audit create failed", "err", err)
+}
+
+return repair, nil
+```
+
+### Update
+
+Call `Update` with both the state before the mutation and the state after. The recorder computes the RFC 6902 diff and stores only the patch operations:
+
+```go
+before, err := r.repo.GetByID(ctx, id)
+if err != nil {
+    return nil, err
+}
+
+updated, err := r.repo.Update(ctx, id, input)
+if err != nil {
+    return nil, err
+}
+
+if err := s.core.Audit.Update(ctx, "repair", id, before, updated); err != nil {
+    s.core.Log.Logger(ctx).Error("audit update failed", "err", err)
+}
+
+return updated, nil
+```
+
+The diff for a field change from `"pending"` to `"in_progress"` would produce:
+
+```json
+[
+  { "op": "replace", "path": "/status", "value": "in_progress" }
+]
+```
+
+### Delete
+
+Call `Delete` with the full state of the resource before it is removed:
+
+```go
+existing, err := r.repo.GetByID(ctx, id)
+if err != nil {
+    return nil, err
+}
+
+if err := s.core.Audit.Delete(ctx, "repair", id, existing); err != nil {
+    s.core.Log.Logger(ctx).Error("audit delete failed", "err", err)
+}
+
+return r.repo.Delete(ctx, id)
+```
+
+:::note
+Audit failures are logged but do not cause the parent operation to fail. The business operation has already succeeded by the time `Audit.Create/Update/Delete` is called. Audit errors should be surfaced through alerting, not returned to the caller.
+:::
+
+## Audit Entry Structure
+
+Each row in `audit_log` contains:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID | Unique identifier for the entry |
+| `action` | string | One of: `create`, `update`, `delete` |
+| `resource_type` | string | The resource name (e.g., `repair`, `user`) |
+| `resource_id` | string | The ID of the affected resource |
+| `before` | JSONB | Full snapshot before the change (null for create) |
+| `after` | JSONB | Full snapshot after the change (null for delete) |
+| `patch` | JSONB | RFC 6902 patch operations (null for create/delete) |
+| `session_id` | UUID | The session that performed the action |
+| `request_id` | string | The `X-Request-ID` of the originating request |
+| `actor_id` | UUID | The user (or service principal) who performed the action |
+| `actor_type` | string | `user` or `service_principal` |
+| `ip_address` | string | IP address of the request |
+| `occurred_at` | timestamp | When the action was recorded (UTC) |
+| `metadata` | JSONB | Arbitrary key-value pairs from `WithAuditMetadata` |
+
+## Functional Options
+
+### WithAuditBefore and WithAuditAfter
+
+Override the before/after values when your service's in-memory representation differs from what you want stored in the audit log:
+
+```go
+s.core.Audit.Update(ctx, "repair", id, dbRecord, updated,
+    audit.WithAuditBefore(sanitizedBefore),
+    audit.WithAuditAfter(sanitizedAfter),
+)
+```
+
+### WithAuditMetadata
+
+Attach arbitrary key-value pairs to the entry for contextual information:
+
+```go
+s.core.Audit.Create(ctx, "repair", repair.ID, repair,
+    audit.WithAuditMetadata(map[string]any{
+        "source":     "import",
+        "batch_id":   batchID,
+        "file_name":  fileName,
+    }),
+)
+```
+
+### WithMaskedFields
+
+Specify field paths that should be redacted in the stored snapshots. The value is replaced with `"[REDACTED]"` before writing to the database. Use this for PII, secrets, or any data that should not appear in the audit log:
+
+```go
+s.core.Audit.Update(ctx, "user", user.ID, before, after,
+    audit.WithMaskedFields([]string{
+        "/password_hash",
+        "/phone_number",
+        "/date_of_birth",
+    }),
+)
+```
+
+Masked fields are identified by their JSON Pointer path (RFC 6901). The masking is applied to both `before`, `after`, and the computed `patch`.
+
+## Storage and Isolation
+
+The `audit_log` table lives in the tenant schema, not in the `public` schema. Audit records for one tenant are never accessible to another, and dropping a tenant schema removes all their audit history along with all other tenant data.
+
+The `audit_log` table is append-only. There are no update or delete operations performed on it by the platform. Database-level permissions should enforce this constraint on the application's database role.
+
+## Querying the Audit Log
+
+The audit foundation module exposes a query API:
+
+```
+GET /api/v1/audit
+```
+
+Supported filters:
+
+| Parameter | Description |
+|---|---|
+| `resource_type` | Filter by resource type (e.g., `repair`) |
+| `resource_id` | Filter by the specific resource ID |
+| `action` | Filter by action: `create`, `update`, or `delete` |
+| `actor_id` | Filter by the user who performed the action |
+| `from` | Start of the time range (ISO 8601) |
+| `to` | End of the time range (ISO 8601) |
+| `page` / `per_page` | Pagination |
+
+The response includes the full entry with the `patch` array for updates, allowing clients to render a human-readable change history (e.g., "Status changed from Pending to In Progress").
+
+:::tip
+When building a change history UI, iterate over the `patch` array and use the `path` field to map JSON Pointer paths back to human-readable field labels. Store these label mappings in the module's frontend config to keep them in sync with schema changes.
+:::

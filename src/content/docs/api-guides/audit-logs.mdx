@@ -1,0 +1,373 @@
+---
+title: Audit Logs
+description: Query the Trazo audit log to track every state change, inspect RFC 6902 JSON Patch diffs, and reconstruct resource history.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Every time a resource is created, updated, or deleted in Trazo, an immutable audit entry is written. These entries capture who performed the action, what changed, and when — making it straightforward to meet compliance requirements and diagnose production issues.
+
+The `changes` field in each entry contains an RFC 6902 JSON Patch array describing the exact diff between the previous and current state of the resource.
+
+Audit log access requires the `audit:read` permission.
+
+## List Audit Entries
+
+Retrieve a paginated, filterable list of audit log entries. Combine filters to narrow results to a specific resource, actor, or time window.
+
+**`GET /api/v1/audit`**
+
+| Query parameter | Type | Description |
+|---|---|---|
+| `resource_type` | string | Filter by resource kind, e.g. `repair`, `user`, `tenant` |
+| `resource_id` | string | Filter to entries for a specific resource instance |
+| `action` | string | Filter by action: `create`, `update`, `delete` |
+| `actor_id` | string | Filter to entries performed by a specific user ID |
+| `from` | string | ISO 8601 timestamp — only return entries at or after this time |
+| `to` | string | ISO 8601 timestamp — only return entries before or at this time |
+| `limit` | integer | Maximum results to return (default: `50`, max: `200`) |
+| `offset` | integer | Number of records to skip for pagination (default: `0`) |
+
+**Response**
+
+```json
+{
+  "items": [
+    {
+      "id": "aud_01HQ...",
+      "resource_type": "repair",
+      "resource_id": "rep_01HQ...",
+      "action": "update",
+      "actor_id": "usr_01HQ...",
+      "actor_name": "Jane Doe",
+      "changes": [
+        { "op": "replace", "path": "/status", "value": "completed" },
+        { "op": "replace", "path": "/completed_at", "value": "2024-03-15T14:30:00Z" }
+      ],
+      "metadata": {
+        "ip_address": "203.0.113.42",
+        "user_agent": "Mozilla/5.0 ..."
+      },
+      "occurred_at": "2024-03-15T14:30:05Z"
+    }
+  ],
+  "total": 128,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl "http://localhost:8080/api/v1/audit?resource_type=repair&action=update&from=2024-01-01T00:00:00Z&limit=50" \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+      "net/url"
+  )
+
+  type AuditEntry struct {
+      ID           string           `json:"id"`
+      ResourceType string           `json:"resource_type"`
+      ResourceID   string           `json:"resource_id"`
+      Action       string           `json:"action"`
+      ActorID      string           `json:"actor_id"`
+      ActorName    string           `json:"actor_name"`
+      Changes      []map[string]any `json:"changes"`
+      Metadata     map[string]any   `json:"metadata"`
+      OccurredAt   string           `json:"occurred_at"`
+  }
+
+  type AuditListResponse struct {
+      Items  []AuditEntry `json:"items"`
+      Total  int          `json:"total"`
+      Limit  int          `json:"limit"`
+      Offset int          `json:"offset"`
+  }
+
+  type AuditFilter struct {
+      ResourceType string
+      ResourceID   string
+      Action       string
+      ActorID      string
+      From         string
+      To           string
+      Limit        int
+      Offset       int
+  }
+
+  func listAuditEntries(accessToken string, filter AuditFilter) (*AuditListResponse, error) {
+      params := url.Values{}
+      if filter.ResourceType != "" {
+          params.Set("resource_type", filter.ResourceType)
+      }
+      if filter.ResourceID != "" {
+          params.Set("resource_id", filter.ResourceID)
+      }
+      if filter.Action != "" {
+          params.Set("action", filter.Action)
+      }
+      if filter.ActorID != "" {
+          params.Set("actor_id", filter.ActorID)
+      }
+      if filter.From != "" {
+          params.Set("from", filter.From)
+      }
+      if filter.To != "" {
+          params.Set("to", filter.To)
+      }
+      if filter.Limit > 0 {
+          params.Set("limit", fmt.Sprintf("%d", filter.Limit))
+      }
+      if filter.Offset > 0 {
+          params.Set("offset", fmt.Sprintf("%d", filter.Offset))
+      }
+
+      req, err := http.NewRequest(http.MethodGet,
+          "http://localhost:8080/api/v1/audit?"+params.Encode(), nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result AuditListResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      result, err := listAuditEntries("$ACCESS_TOKEN", AuditFilter{
+          ResourceType: "repair",
+          Action:       "update",
+          From:         "2024-01-01T00:00:00Z",
+          Limit:        50,
+      })
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Found %d audit entries\n", result.Total)
+      for _, entry := range result.Items {
+          fmt.Printf("  [%s] %s %s %s by %s\n",
+              entry.OccurredAt, entry.Action, entry.ResourceType,
+              entry.ResourceID, entry.ActorName)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function listAuditEntries(accessToken, filters = {}) {
+    const params = new URLSearchParams();
+
+    if (filters.resourceType) params.set('resource_type', filters.resourceType);
+    if (filters.resourceId)   params.set('resource_id',   filters.resourceId);
+    if (filters.action)       params.set('action',        filters.action);
+    if (filters.actorId)      params.set('actor_id',      filters.actorId);
+    if (filters.from)         params.set('from',          filters.from);
+    if (filters.to)           params.set('to',            filters.to);
+    if (filters.limit)        params.set('limit',         filters.limit);
+    if (filters.offset)       params.set('offset',        filters.offset);
+
+    const response = await fetch(`http://localhost:8080/api/v1/audit?${params}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (response.status === 403) {
+      throw new Error('Insufficient permissions to access audit logs');
+    }
+    if (!response.ok) {
+      throw new Error('Failed to fetch audit entries');
+    }
+
+    return response.json();
+  }
+
+  // Example: all updates to repair resources since the start of 2024
+  const result = await listAuditEntries(accessToken, {
+    resourceType: 'repair',
+    action: 'update',
+    from: '2024-01-01T00:00:00Z',
+    limit: 50,
+  });
+
+  console.log(`Total matching entries: ${result.total}`);
+  result.items.forEach(entry => {
+    console.log(`[${entry.occurred_at}] ${entry.action} on ${entry.resource_type} by ${entry.actor_name}`);
+  });
+  ```
+  </TabItem>
+</Tabs>
+
+## Understanding the Changes Field
+
+The `changes` array follows the RFC 6902 JSON Patch specification. Each element in the array is a patch operation describing a single field change.
+
+**Supported operations:**
+
+| Operation | Meaning |
+|---|---|
+| `add` | A field was set for the first time (e.g., an optional field was populated) |
+| `replace` | An existing field's value was changed |
+| `remove` | A field was cleared or deleted |
+
+**Example `changes` array:**
+
+```json
+[
+  { "op": "replace", "path": "/status",       "value": "completed" },
+  { "op": "replace", "path": "/completed_at", "value": "2024-03-15T14:30:00Z" },
+  { "op": "add",     "path": "/resolution",   "value": "Replaced faulty component" }
+]
+```
+
+The `path` uses JSON Pointer notation (RFC 6901): `/` separates path segments, and array indices are integers (e.g., `/items/0/name`).
+
+## Reconstructing Resource History
+
+To replay the full history of a resource and understand its state at any point in time, query all audit entries for that resource ordered chronologically, then apply the patch operations in sequence.
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  # 1. Fetch all audit entries for a specific repair, ordered by time
+  curl "http://localhost:8080/api/v1/audit?resource_type=repair&resource_id=rep_01HQ...&limit=200" \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+  )
+
+  // applyPatch applies a single RFC 6902 patch operation to the resource map.
+  // A production implementation should use a library such as github.com/evanphx/json-patch.
+  func applyPatch(resource map[string]any, op map[string]any) {
+      path := op["path"].(string)
+      // Strip leading slash and use as top-level key (simplified for single-depth paths)
+      key := path[1:]
+      switch op["op"] {
+      case "add", "replace":
+          resource[key] = op["value"]
+      case "remove":
+          delete(resource, key)
+      }
+  }
+
+  func reconstructHistory(entries []AuditEntry) []map[string]any {
+      resource := map[string]any{}
+      snapshots := make([]map[string]any, 0, len(entries))
+
+      for _, entry := range entries {
+          for _, change := range entry.Changes {
+              applyPatch(resource, change)
+          }
+          // Deep copy the current state as a snapshot
+          snapshot := make(map[string]any, len(resource))
+          for k, v := range resource {
+              snapshot[k] = v
+          }
+          snapshot["_snapshot_at"] = entry.OccurredAt
+          snapshots = append(snapshots, snapshot)
+      }
+      return snapshots
+  }
+
+  func main() {
+      // Assume entries are fetched and sorted by occurred_at ascending
+      var entries []AuditEntry
+      // ... populate entries ...
+
+      snapshots := reconstructHistory(entries)
+      for _, s := range snapshots {
+          data, _ := json.MarshalIndent(s, "", "  ")
+          fmt.Println(string(data))
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  /**
+   * Reconstruct the state of a resource at each point in its history.
+   * Entries must be ordered by occurred_at ascending.
+   *
+   * For production use, consider a library like fast-json-patch.
+   */
+  function reconstructHistory(entries) {
+    const resource = {};
+    return entries.map(entry => {
+      for (const change of entry.changes) {
+        // Simplified: handles top-level paths only (e.g., /status)
+        const key = change.path.slice(1); // strip leading /
+        if (change.op === 'add' || change.op === 'replace') {
+          resource[key] = change.value;
+        } else if (change.op === 'remove') {
+          delete resource[key];
+        }
+      }
+      return { ...resource, _snapshot_at: entry.occurred_at };
+    });
+  }
+
+  // Fetch all entries for a resource, then reconstruct
+  const { items } = await listAuditEntries(accessToken, {
+    resourceType: 'repair',
+    resourceId: 'rep_01HQ...',
+    limit: 200,
+  });
+
+  // Sort ascending by occurred_at
+  items.sort((a, b) => a.occurred_at.localeCompare(b.occurred_at));
+
+  const history = reconstructHistory(items);
+  history.forEach(snapshot => {
+    console.log(`State at ${snapshot._snapshot_at}:`, snapshot);
+  });
+  ```
+  </TabItem>
+</Tabs>
+
+## Common Errors
+
+| Status | Code | Description |
+|---|---|---|
+| `403` | `INSUFFICIENT_PERMISSIONS` | The authenticated user does not have the `audit:read` permission. Request this permission from a tenant administrator. |
+| `422` | `INVALID_DATE_RANGE` | The `from` timestamp is after the `to` timestamp. |
+| `422` | `VALIDATION_ERROR` | A query parameter has an invalid format (e.g., `from` is not a valid ISO 8601 timestamp). |
+
+**Error response shape:**
+
+```json
+{
+  "code": "INSUFFICIENT_PERMISSIONS",
+  "message": "You do not have permission to access audit logs",
+  "request_id": "req_01HQ..."
+}
+```
+
+## Related
+
+- [Auto-generated API Reference](/reference) — full schemas for all audit endpoints.
+- [Authentication Guide](/api-guides/authentication) — obtaining the access token required for these requests.
+- [Events Guide](/api-guides/events) — querying domain events (distinct from audit entries).

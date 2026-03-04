@@ -1,0 +1,425 @@
+---
+title: Core Types
+description: Complete reference for all Go types defined in types.go — identity, tenant, permission, event, audit, storage, metric, notification, and error types used throughout the Trazo platform.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+All types described on this page are defined in `internal/core/types.go` and are shared across every module and the platform core. Import them via the core package:
+
+```go
+import "github.com/your-org/trazo-core-service/internal/core"
+```
+
+---
+
+## Utility Types
+
+### JSONB
+
+```go
+type JSONB map[string]any
+```
+
+A type alias for arbitrary JSON objects stored in PostgreSQL `JSONB` columns. Used for flexible metadata, theme configuration, and module-specific settings.
+
+---
+
+## Identity and Tenant Types
+
+### Tenant
+
+Represents a single customer organization. Each tenant is isolated in its own PostgreSQL schema.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID primary key |
+| `Name` | `string` | Display name of the organization |
+| `Subdomain` | `string` | Unique URL-safe identifier (e.g., `acme`) |
+| `SchemaName` | `string` | PostgreSQL schema name (e.g., `tenant_acme`) |
+| `LogoURL` | `string` | URL to the tenant's logo asset |
+| `Theme` | `JSONB` | Custom branding tokens (colors, fonts) |
+| `Config` | `JSONB` | Tenant-level feature configuration |
+| `Status` | `string` | `active`, `suspended`, or `deleted` |
+| `CreatedAt` | `time.Time` | Creation timestamp |
+| `UpdatedAt` | `time.Time` | Last modification timestamp |
+
+### User
+
+A platform-level user account. Users are shared across tenants; membership to a specific tenant is captured in `Membership`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID primary key |
+| `Email` | `string` | Unique email address |
+| `Phone` | `string` | Phone number |
+| `Name` | `string` | Display name |
+| `AvatarURL` | `string` | Profile picture URL |
+| `Locale` | `string` | BCP 47 locale code (e.g., `en-US`) |
+| `Timezone` | `string` | IANA timezone (e.g., `America/New_York`) |
+| `PasswordHash` | `string` | bcrypt hash of the password |
+| `Status` | `string` | `active`, `invited`, or `suspended` |
+| `EmailVerified` | `bool` | Whether the email address has been confirmed |
+| `Metadata` | `JSONB` | Arbitrary user-level metadata |
+
+### Membership
+
+Links a `User` to a `Tenant` with a specific `Role`. A user can have memberships in multiple tenants.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID primary key |
+| `TenantID` | `string` | FK to `tenants.id` |
+| `UserID` | `string` | FK to `users.id` |
+| `RoleID` | `string` | FK to `roles.id` |
+| `AuthMethods` | `[]string` | Allowed authentication methods (e.g., `["password", "google"]`) |
+| `ExtraPermissions` | `[]string` | Additional permission keys granted beyond the role |
+| `Identifier` | `string` | Tenant-scoped user identifier (e.g., employee number) |
+| `Status` | `string` | `active` or `suspended` |
+| `Metadata` | `JSONB` | Membership-level metadata |
+
+### Role
+
+A named collection of permission keys assigned to members within a tenant.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID primary key |
+| `TenantID` | `string` | FK to `tenants.id` |
+| `Name` | `string` | Role display name (e.g., `Manager`) |
+| `Description` | `string` | Human-readable description |
+| `Permissions` | `[]string` | List of permission keys granted by this role |
+| `IsSystem` | `bool` | Whether the role is created and managed by the platform |
+| `IsDefault` | `bool` | Whether new members are assigned this role by default |
+
+### ServicePrincipal
+
+A non-human API client (e.g., a webhook processor, a CI job) that authenticates using an API key.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID primary key |
+| `TenantID` | `string` | FK to `tenants.id` |
+| `Name` | `string` | Display name |
+| `APIKeyHash` | `string` | bcrypt hash of the raw API key |
+| `APIKeyPrefix` | `string` | First 8 characters of the key (for display) |
+| `Permissions` | `[]string` | Explicit permission keys granted |
+| `RateLimit` | `int` | Requests per minute limit (0 = unlimited) |
+| `ExpiresAt` | `*time.Time` | Optional expiry; `nil` = never expires |
+| `LastUsedAt` | `*time.Time` | Timestamp of most recent authenticated request |
+| `Status` | `string` | `active` or `revoked` |
+
+### Session
+
+Tracks an authenticated user session with device and geo metadata.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID primary key |
+| `TenantID` | `string` | FK to `tenants.id` |
+| `UserID` | `string` | FK to `users.id` |
+| `StartedAt` | `time.Time` | When the session was created |
+| `EndedAt` | `*time.Time` | When the session ended; `nil` = active |
+| `IPAddress` | `string` | Client IP address |
+| `UserAgent` | `string` | Raw HTTP User-Agent string |
+| `DeviceType` | `string` | `desktop`, `mobile`, or `tablet` |
+| `AuthMethod` | `string` | Authentication method used (e.g., `password`, `google`) |
+| `Status` | `string` | `active` or `ended` |
+| `Country` | `string` | ISO 3166-1 alpha-2 country code |
+| `City` | `string` | City name from geo-IP lookup |
+| `RequestCount` | `int` | Number of requests made during this session |
+
+---
+
+## Permission Types
+
+### Scope
+
+Defines a named data filter that restricts what records a permission grants access to.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Name` | `string` | Scope identifier (e.g., `own`, `team`) |
+| `Description` | `string` | Human-readable explanation |
+| `Filter` | `string` | SQL WHERE fragment with placeholders (e.g., `user_id = :user_id`) |
+| `Priority` | `int` | Evaluation priority; higher values take precedence |
+
+### PermissionDefinition
+
+The declaration of a single permission key as registered by a module.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Key` | `string` | Unique dot-separated key (e.g., `repairs.create`) |
+| `Module` | `string` | Name of the module that owns this permission |
+| `Name` | `string` | Human-readable label |
+| `Description` | `string` | Detailed explanation |
+| `Scope` | `string` | Default scope name for this permission |
+
+### Query
+
+A structured database query produced by the permission system after applying scope filters.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `SQL` | `string` | Full SQL string with placeholders |
+| `Args` | `[]any` | Positional arguments matching `$1`, `$2`, etc. |
+| `Wheres` | `[]WhereClause` | Individual WHERE clause fragments before assembly |
+
+---
+
+## Event Types
+
+### Event
+
+A domain event produced by a module and persisted via the transactional outbox.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID of this event instance |
+| `Name` | `string` | Dot-separated event name (e.g., `repairs.created`) |
+| `Module` | `string` | Name of the module that emitted the event |
+| `TenantID` | `string` | Tenant the event belongs to |
+| `AggregateType` | `string` | Domain entity type (e.g., `repair`) |
+| `AggregateID` | `string` | UUID of the affected entity |
+| `Version` | `int` | Schema version of the event payload |
+| `Payload` | `map[string]any` | Event-specific data |
+| `Metadata` | `map[string]any` | Cross-cutting metadata (request ID, actor, etc.) |
+| `OccurredAt` | `time.Time` | When the event occurred |
+| `Sequence` | `int64` | Monotonically increasing outbox sequence number |
+
+### Subscription
+
+Declares a handler for a specific event.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Event` | `string` | Event name to subscribe to (supports wildcard `*`) |
+| `Versions` | `[]int` | Payload versions this handler supports; empty = all |
+| `Handler` | `func(ctx context.Context, event Event) error` | The handler function |
+| `Async` | `bool` | If `true`, the handler runs in a worker pool goroutine |
+| `Priority` | `int` | Relative handler execution order for the same event |
+
+---
+
+## Audit Types
+
+### Resource
+
+Identifies the entity that was acted upon in an audit entry.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Type` | `string` | Entity type (e.g., `repair`, `user`) |
+| `ID` | `string` | UUID of the entity |
+
+### AuditEntry
+
+A single recorded action for the immutable audit log.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Action` | `string` | Verb describing the operation (e.g., `create`, `update`, `delete`) |
+| `Resource` | `Resource` | The entity that was acted upon |
+| `Before` | `any` | State of the entity before the action (`nil` for create) |
+| `After` | `any` | State of the entity after the action (`nil` for delete) |
+| `Metadata` | `JSONB` | Additional contextual data (IP, user agent, etc.) |
+| `MaskFields` | `[]string` | Field names to redact in the stored diff (e.g., `["password_hash"]`) |
+
+---
+
+## Storage Types
+
+### UploadOptions
+
+Parameters for uploading a file to the storage backend.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Reader` | `io.Reader` | Source of the file bytes |
+| `Filename` | `string` | Original filename (used for Content-Disposition) |
+| `ContentType` | `string` | MIME type (e.g., `image/png`) |
+| `Module` | `string` | Module that owns the file (used for path organization) |
+| `ResourceID` | `string` | UUID of the resource the file is attached to |
+
+### StoredFile
+
+Metadata for a file that has been persisted to the storage backend.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID assigned to the stored file |
+| `Filename` | `string` | Original filename |
+| `ContentType` | `string` | MIME type |
+| `URL` | `string` | Public or pre-signed access URL |
+| `Size` | `int64` | File size in bytes |
+| `CreatedAt` | `time.Time` | Upload timestamp |
+
+---
+
+## Metric Types
+
+### MetricType
+
+```go
+type MetricType string
+
+const (
+    MetricTypeGauge      MetricType = "gauge"
+    MetricTypeTimeseries MetricType = "timeseries"
+    MetricTypeBreakdown  MetricType = "breakdown"
+)
+```
+
+### MetricDefinition
+
+Declares a queryable metric exposed by a module.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Key` | `string` | Unique dot-separated metric key (e.g., `repairs.open_count`) |
+| `Name` | `string` | Human-readable label |
+| `Description` | `string` | Explanation of what the metric measures |
+| `Type` | `MetricType` | `gauge`, `timeseries`, or `breakdown` |
+| `Unit` | `string` | Display unit (e.g., `count`, `USD`, `minutes`) |
+| `Query` | `string` | SQL query that computes the metric value |
+| `Permission` | `string` | Permission key required to read this metric |
+
+### MetricValue
+
+A single computed metric result.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Key` | `string` | Metric key |
+| `Name` | `string` | Metric display name |
+| `Value` | `any` | The computed value (numeric for gauge, slice for timeseries/breakdown) |
+| `Labels` | `map[string]string` | Dimension labels for breakdown and timeseries metrics |
+
+---
+
+## Notification Types
+
+### ChannelType
+
+```go
+type ChannelType string
+
+const (
+    ChannelInApp   ChannelType = "in_app"
+    ChannelEmail   ChannelType = "email"
+    ChannelSlack   ChannelType = "slack"
+    ChannelWebhook ChannelType = "webhook"
+)
+```
+
+### NotificationRule
+
+A tenant-level rule that maps an event to a delivery channel and template.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID primary key |
+| `TenantID` | `string` | FK to `tenants.id` |
+| `Module` | `string` | Module that owns this rule |
+| `EventName` | `string` | Event that triggers delivery |
+| `Channel` | `ChannelType` | Delivery channel |
+| `Template` | `string` | Template name or inline template string |
+| `Config` | `JSONB` | Channel-specific configuration (recipient, webhook URL, etc.) |
+| `Enabled` | `bool` | Whether the rule is active |
+
+### InAppNotification
+
+A notification delivered to a user's in-app notification feed.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ID` | `string` | UUID primary key |
+| `TenantID` | `string` | FK to `tenants.id` |
+| `UserID` | `string` | FK to `users.id` |
+| `Title` | `string` | Short notification title |
+| `Body` | `string` | Full notification body text |
+| `Link` | `string` | Optional deep-link URL |
+| `Read` | `bool` | Whether the user has read the notification |
+| `ReadAt` | `*time.Time` | Timestamp the notification was read; `nil` = unread |
+| `Metadata` | `JSONB` | Additional data for rendering or routing |
+
+---
+
+## Error Type
+
+### Error
+
+Trazo's structured error type. It implements the standard `error` interface and carries HTTP semantics.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Code` | `string` | Machine-readable error code (e.g., `CORE.VALIDATION.REQUIRED_FIELD`) |
+| `Message` | `string` | Human-readable English message |
+| `MessageKey` | `string` | i18n translation key |
+| `Detail` | `string` | Additional context for the developer |
+| `Field` | `string` | Form field name (for validation errors) |
+| `Params` | `map[string]any` | Template parameters for `MessageKey` interpolation |
+| `RequestID` | `string` | Trace ID for correlating logs |
+| `Status` | `int` | HTTP status code |
+| `Cause` | `error` | Wrapped underlying error |
+
+**Methods:**
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `Error` | `() string` | Returns the human-readable message (satisfies `error`) |
+| `Unwrap` | `() error` | Returns the wrapped cause (supports `errors.Is`/`errors.As`) |
+| `HTTPStatus` | `() int` | Returns the HTTP status code |
+| `WithCause` | `(err error) *Error` | Returns a copy with the cause set |
+| `WithRequestID` | `(id string) *Error` | Returns a copy with the request ID set |
+| `WithParams` | `(params map[string]any) *Error` | Returns a copy with i18n params merged |
+
+---
+
+## Module Interface
+
+Every Trazo module must implement the `Module` interface. Nine methods are required; two are optional (indicated by returning `nil` being valid).
+
+```go
+type Module interface {
+    // Name returns the unique lowercase identifier for this module (e.g., "repairs").
+    Name() string
+
+    // Version returns the module's semver string (e.g., "1.0.0").
+    Version() string
+
+    // Dependencies returns the names of modules that must be loaded before this one.
+    Dependencies() []string
+
+    // Setup is called once at startup. Use it to register routes, background workers,
+    // and event subscriptions. The provided Core gives access to all platform services.
+    Setup(ctx context.Context, core Core) error
+
+    // Migrate runs any pending schema migrations for this module against the
+    // provided database connection.
+    Migrate(ctx context.Context, db *pgxpool.Pool) error
+
+    // Permissions returns all PermissionDefinitions this module declares.
+    // These are registered globally so roles can reference them.
+    Permissions() []PermissionDefinition
+
+    // Scopes returns all Scope definitions this module declares.
+    Scopes() []Scope
+
+    // EventSubscriptions returns the Subscriptions this module wants to handle.
+    EventSubscriptions() []Subscription
+
+    // Health returns a non-nil error if the module is unhealthy.
+    // Called by the /healthz endpoint.
+    Health(ctx context.Context) error
+
+    // OnTenantCreated is called after a new tenant is provisioned.
+    // Optional: return nil to no-op.
+    OnTenantCreated(ctx context.Context, tenant Tenant) error
+
+    // OnTenantDeleted is called before a tenant is deleted.
+    // Optional: return nil to no-op.
+    OnTenantDeleted(ctx context.Context, tenant Tenant) error
+}
+```

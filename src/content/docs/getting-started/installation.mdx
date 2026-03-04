@@ -1,0 +1,153 @@
+---
+title: Installation
+description: Clone, build, and configure both Trazo repositories to get the server and CLI running locally.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide walks through cloning both repositories, compiling the binaries, and setting up your initial configuration file.
+
+## Clone the Repositories
+
+Both repos should live side by side in the same parent directory. This makes it easier to use relative paths and keeps a single `trazo.yaml` config accessible from both.
+
+```bash
+mkdir -p ~/trazo && cd ~/trazo
+
+git clone https://github.com/trazo-dev/trazo-core-service.git
+git clone https://github.com/trazo-dev/trazo-cli.git
+```
+
+Your directory structure should look like:
+
+```
+~/trazo/
+├── trazo-core-service/
+└── trazo-cli/
+```
+
+---
+
+## Build `trazo-core-service`
+
+<Steps>
+1. Enter the repo and download dependencies:
+
+   ```bash
+   cd ~/trazo/trazo-core-service
+   go mod download
+   ```
+
+2. Build the server binary:
+
+   ```bash
+   go build -o trazo-server ./cmd/server
+   ```
+
+3. Verify the build:
+
+   ```bash
+   ./trazo-server --help
+   ```
+
+   You should see the server's help output listing available flags such as `--config`, `--port`, and `--log-level`.
+</Steps>
+
+---
+
+## Build `trazo-cli`
+
+<Steps>
+1. Enter the repo and download dependencies:
+
+   ```bash
+   cd ~/trazo/trazo-cli
+   go mod download
+   ```
+
+2. Build the CLI binary:
+
+   ```bash
+   go build -o trazo ./cmd/trazo
+   ```
+
+3. Verify the build:
+
+   ```bash
+   ./trazo --version
+   ```
+
+   Expected output:
+
+   ```
+   trazo version 0.x.x
+   ```
+</Steps>
+
+<Aside type="tip">
+  Add both binaries to your `PATH` so you can invoke them from any directory:
+
+  ```bash
+  # Add to ~/.zshrc or ~/.bashrc
+  export PATH="$PATH:$HOME/trazo/trazo-core-service:$HOME/trazo/trazo-cli"
+  ```
+
+  After reloading your shell, `trazo` and `trazo-server` will be available globally.
+</Aside>
+
+---
+
+## Configure `trazo.yaml`
+
+Both binaries read configuration from `trazo.yaml`. A fully annotated example is provided in `trazo-core-service`.
+
+```bash
+cp ~/trazo/trazo-core-service/trazo.example.yaml ~/trazo/trazo.yaml
+```
+
+<Aside type="caution">
+  The `trazo.yaml` file contains secrets such as `auth.jwt_secret` and database credentials. Never commit it to version control. It is already listed in `.gitignore` in both repos.
+</Aside>
+
+By default both binaries look for `trazo.yaml` in the current working directory. You can point them at a different path using the `--config` flag or the `TRAZO_CONFIG` environment variable:
+
+```bash
+./trazo-server --config /etc/trazo/trazo.yaml
+./trazo --config /etc/trazo/trazo.yaml
+```
+
+See the [Configuration](/getting-started/configuration/) guide for a complete reference of every field.
+
+---
+
+## Quick Verification
+
+Run both binaries to confirm they are working and can read your config:
+
+<Tabs>
+  <TabItem label="CLI">
+    ```bash
+    cd ~/trazo
+    ./trazo-cli/trazo --version
+    ./trazo-cli/trazo --help
+    ```
+  </TabItem>
+  <TabItem label="Server">
+    ```bash
+    cd ~/trazo
+    ./trazo-core-service/trazo-server --help
+    ```
+  </TabItem>
+</Tabs>
+
+If either binary exits with a non-zero code, check that:
+
+- Your `trazo.yaml` exists at the expected path.
+- All required fields (`database.url`, `auth.jwt_secret`) are set.
+- The Go version is 1.24 or newer (`go version`).
+
+---
+
+## Next Steps
+
+With the binaries built and the config in place, continue to [Local Development](/getting-started/local-development/) to spin up a local database and start the server.

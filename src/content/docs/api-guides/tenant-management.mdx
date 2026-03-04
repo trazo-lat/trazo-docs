@@ -1,0 +1,461 @@
+---
+title: Tenant Management
+description: Create, list, retrieve, and update tenants in Trazo. Each tenant gets an isolated PostgreSQL schema.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Trazo is a multi-tenant platform. Each tenant represents an independent organization with its own data, users, and configuration. When a tenant is created, Trazo automatically provisions a dedicated PostgreSQL schema (e.g., `tenant_acme`) ensuring complete data isolation between organizations.
+
+All tenant management endpoints require an authenticated session with the `tenants:write` permission for mutating operations, or `tenants:read` for read-only access.
+
+## Create a Tenant
+
+Provision a new tenant. The `subdomain` field must be globally unique and is used to route requests to the correct tenant context (e.g., `acme.trazo.app`).
+
+**`POST /api/v1/tenants`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Human-readable display name of the organization |
+| `subdomain` | string | yes | URL-safe slug, unique across all tenants |
+
+**Response**
+
+```json
+{
+  "id": "ten_01HQ...",
+  "name": "Acme Corp",
+  "subdomain": "acme",
+  "schema_name": "tenant_acme",
+  "status": "active",
+  "created_at": "2024-03-01T12:00:00Z",
+  "updated_at": "2024-03-01T12:00:00Z"
+}
+```
+
+The `schema_name` field reflects the PostgreSQL schema created for this tenant. This schema is automatically migrated and contains all tenant-specific tables.
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/tenants \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "Acme Corp",
+      "subdomain": "acme"
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type CreateTenantRequest struct {
+      Name      string `json:"name"`
+      Subdomain string `json:"subdomain"`
+  }
+
+  type Tenant struct {
+      ID         string `json:"id"`
+      Name       string `json:"name"`
+      Subdomain  string `json:"subdomain"`
+      SchemaName string `json:"schema_name"`
+      Status     string `json:"status"`
+      CreatedAt  string `json:"created_at"`
+  }
+
+  func createTenant(accessToken, name, subdomain string) (*Tenant, error) {
+      body, _ := json.Marshal(CreateTenantRequest{Name: name, Subdomain: subdomain})
+
+      req, err := http.NewRequest(http.MethodPost, "http://localhost:8080/api/v1/tenants", bytes.NewReader(body))
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+      req.Header.Set("Content-Type", "application/json")
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var tenant Tenant
+      if err := json.NewDecoder(resp.Body).Decode(&tenant); err != nil {
+          return nil, err
+      }
+      return &tenant, nil
+  }
+
+  func main() {
+      tenant, err := createTenant("$ACCESS_TOKEN", "Acme Corp", "acme")
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Created tenant: %s (schema: %s)\n", tenant.Name, tenant.SchemaName)
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function createTenant(accessToken, name, subdomain) {
+    const response = await fetch('http://localhost:8080/api/v1/tenants', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name, subdomain }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message);
+    }
+
+    const tenant = await response.json();
+    console.log(`Created tenant: ${tenant.name} (schema: ${tenant.schema_name})`);
+    return tenant;
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## List Tenants
+
+Retrieve a paginated list of tenants. Use the `status` filter to narrow results to active or suspended tenants.
+
+**`GET /api/v1/tenants`**
+
+| Query parameter | Type | Description |
+|---|---|---|
+| `status` | string | Filter by status: `active`, `suspended`, or `pending` |
+| `limit` | integer | Maximum number of results to return (default: `20`, max: `100`) |
+| `offset` | integer | Number of records to skip for pagination (default: `0`) |
+
+**Response**
+
+```json
+{
+  "items": [
+    {
+      "id": "ten_01HQ...",
+      "name": "Acme Corp",
+      "subdomain": "acme",
+      "schema_name": "tenant_acme",
+      "status": "active",
+      "created_at": "2024-03-01T12:00:00Z"
+    }
+  ],
+  "total": 42,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl "http://localhost:8080/api/v1/tenants?status=active&limit=20&offset=0" \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type TenantListResponse struct {
+      Items  []Tenant `json:"items"`
+      Total  int      `json:"total"`
+      Limit  int      `json:"limit"`
+      Offset int      `json:"offset"`
+  }
+
+  func listTenants(accessToken string) (*TenantListResponse, error) {
+      req, err := http.NewRequest(http.MethodGet,
+          "http://localhost:8080/api/v1/tenants?status=active&limit=20&offset=0", nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result TenantListResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      result, err := listTenants("$ACCESS_TOKEN")
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Found %d tenants\n", result.Total)
+      for _, t := range result.Items {
+          fmt.Printf("  - %s (%s)\n", t.Name, t.Subdomain)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function listTenants(accessToken, { status = 'active', limit = 20, offset = 0 } = {}) {
+    const params = new URLSearchParams({ status, limit, offset });
+    const response = await fetch(`http://localhost:8080/api/v1/tenants?${params}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to list tenants');
+    }
+
+    const data = await response.json();
+    console.log(`Found ${data.total} tenants`);
+    return data;
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Get a Tenant
+
+Retrieve a single tenant by its ID.
+
+**`GET /api/v1/tenants/{id}`**
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl http://localhost:8080/api/v1/tenants/ten_01HQ... \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  func getTenant(accessToken, tenantID string) (*Tenant, error) {
+      req, err := http.NewRequest(http.MethodGet,
+          "http://localhost:8080/api/v1/tenants/"+tenantID, nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      if resp.StatusCode == http.StatusNotFound {
+          return nil, fmt.Errorf("tenant %s not found", tenantID)
+      }
+
+      var tenant Tenant
+      if err := json.NewDecoder(resp.Body).Decode(&tenant); err != nil {
+          return nil, err
+      }
+      return &tenant, nil
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function getTenant(accessToken, tenantId) {
+    const response = await fetch(`http://localhost:8080/api/v1/tenants/${tenantId}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (response.status === 404) {
+      throw new Error(`Tenant ${tenantId} not found`);
+    }
+    if (!response.ok) {
+      throw new Error('Failed to fetch tenant');
+    }
+
+    return response.json();
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Update a Tenant
+
+Partially update a tenant's metadata. Only include fields you want to change — omitted fields are left unchanged.
+
+**`PATCH /api/v1/tenants/{id}`**
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Updated display name |
+| `logo_url` | string | URL to the tenant's logo image |
+| `theme` | object | UI theme overrides (e.g., `{"primary_color": "#FF5733"}`) |
+| `config` | object | Arbitrary tenant-level configuration key-value pairs |
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X PATCH http://localhost:8080/api/v1/tenants/ten_01HQ... \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "Acme Corporation",
+      "logo_url": "https://cdn.example.com/acme-logo.png",
+      "theme": { "primary_color": "#FF5733" },
+      "config": { "max_users": 500, "feature_x_enabled": true }
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "net/http"
+  )
+
+  type UpdateTenantRequest struct {
+      Name    *string        `json:"name,omitempty"`
+      LogoURL *string        `json:"logo_url,omitempty"`
+      Theme   map[string]any `json:"theme,omitempty"`
+      Config  map[string]any `json:"config,omitempty"`
+  }
+
+  func updateTenant(accessToken, tenantID string, update UpdateTenantRequest) (*Tenant, error) {
+      body, _ := json.Marshal(update)
+
+      req, err := http.NewRequest(http.MethodPatch,
+          "http://localhost:8080/api/v1/tenants/"+tenantID,
+          bytes.NewReader(body))
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+      req.Header.Set("Content-Type", "application/json")
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var tenant Tenant
+      if err := json.NewDecoder(resp.Body).Decode(&tenant); err != nil {
+          return nil, err
+      }
+      return &tenant, nil
+  }
+
+  func main() {
+      name := "Acme Corporation"
+      logo := "https://cdn.example.com/acme-logo.png"
+      _, err := updateTenant("$ACCESS_TOKEN", "ten_01HQ...", UpdateTenantRequest{
+          Name:    &name,
+          LogoURL: &logo,
+          Theme:   map[string]any{"primary_color": "#FF5733"},
+          Config:  map[string]any{"max_users": 500},
+      })
+      if err != nil {
+          panic(err)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function updateTenant(accessToken, tenantId, updates) {
+    const response = await fetch(`http://localhost:8080/api/v1/tenants/${tenantId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(updates),
+    });
+
+    if (response.status === 404) {
+      throw new Error(`Tenant ${tenantId} not found`);
+    }
+    if (!response.ok) {
+      throw new Error('Failed to update tenant');
+    }
+
+    return response.json();
+  }
+
+  // Example usage
+  const updated = await updateTenant(accessToken, 'ten_01HQ...', {
+    name: 'Acme Corporation',
+    logo_url: 'https://cdn.example.com/acme-logo.png',
+    theme: { primary_color: '#FF5733' },
+    config: { max_users: 500, feature_x_enabled: true },
+  });
+  ```
+  </TabItem>
+</Tabs>
+
+## Schema Provisioning
+
+When you call `POST /api/v1/tenants`, Trazo performs the following steps synchronously before returning:
+
+1. Inserts the tenant record into the `public.tenants` table.
+2. Creates a new PostgreSQL schema named `tenant_{subdomain}`.
+3. Runs all pending migrations against the new schema.
+
+This ensures the tenant is immediately usable. If schema creation fails, the entire operation is rolled back and a `500` error is returned.
+
+## Common Errors
+
+| Status | Code | Description |
+|---|---|---|
+| `409` | `SUBDOMAIN_TAKEN` | The requested `subdomain` is already in use by another tenant. Choose a different subdomain. |
+| `404` | `TENANT_NOT_FOUND` | No tenant exists with the given ID. |
+| `422` | `VALIDATION_ERROR` | One or more fields failed validation (e.g., subdomain contains invalid characters). |
+| `403` | `FORBIDDEN` | The authenticated user does not have `tenants:write` permission. |
+
+**Error response shape:**
+
+```json
+{
+  "code": "SUBDOMAIN_TAKEN",
+  "message": "The subdomain 'acme' is already taken",
+  "request_id": "req_01HQ..."
+}
+```
+
+## Related
+
+- [Auto-generated API Reference](/reference) — full schemas for all tenant endpoints.
+- [Authentication Guide](/api-guides/authentication) — obtaining the access token required for these requests.
+- [User Management Guide](/api-guides/user-management) — managing users within a tenant.

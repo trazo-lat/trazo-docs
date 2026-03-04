@@ -1,0 +1,593 @@
+---
+title: Notifications
+description: List and mark notifications, and configure notification rules that trigger across in-app, email, Slack, and webhook channels.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The Trazo notification system delivers messages to users when domain events occur. It has two distinct layers:
+
+- **Notifications** — the individual messages delivered to a specific user (e.g., "Repair #123 was completed").
+- **Notification Rules** — tenant-level configuration that maps domain events to channels and templates, determining when and how notifications are generated.
+
+## List Notifications
+
+Retrieve the notifications for the currently authenticated user. Use the `read` filter to show only unread items.
+
+**`GET /api/v1/notifications`**
+
+| Query parameter | Type | Description |
+|---|---|---|
+| `read` | boolean | `false` returns only unread notifications; `true` returns only read ones; omit for all |
+| `limit` | integer | Maximum results to return (default: `20`, max: `100`) |
+| `offset` | integer | Number of records to skip (default: `0`) |
+
+**Response**
+
+```json
+{
+  "items": [
+    {
+      "id": "notif_01HQ...",
+      "title": "Repair #123 completed",
+      "body": "The screen replacement for iPhone 14 has been marked as completed.",
+      "channel": "in_app",
+      "read": false,
+      "read_at": null,
+      "metadata": {
+        "resource_type": "repair",
+        "resource_id": "rep_01HQ..."
+      },
+      "created_at": "2024-03-15T14:30:00Z"
+    }
+  ],
+  "total": 8,
+  "unread_count": 3
+}
+```
+
+The `unread_count` field always reflects the total number of unread notifications for the user, regardless of the current `limit`/`offset` applied. Use it to render notification badge counts.
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  # Fetch only unread notifications
+  curl "http://localhost:8080/api/v1/notifications?read=false&limit=20" \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type Notification struct {
+      ID        string         `json:"id"`
+      Title     string         `json:"title"`
+      Body      string         `json:"body"`
+      Channel   string         `json:"channel"`
+      Read      bool           `json:"read"`
+      ReadAt    *string        `json:"read_at"`
+      Metadata  map[string]any `json:"metadata"`
+      CreatedAt string         `json:"created_at"`
+  }
+
+  type NotificationListResponse struct {
+      Items       []Notification `json:"items"`
+      Total       int            `json:"total"`
+      UnreadCount int            `json:"unread_count"`
+  }
+
+  func listNotifications(accessToken string, onlyUnread bool, limit, offset int) (*NotificationListResponse, error) {
+      url := fmt.Sprintf(
+          "http://localhost:8080/api/v1/notifications?read=%v&limit=%d&offset=%d",
+          !onlyUnread, limit, offset)
+      if onlyUnread {
+          url = fmt.Sprintf(
+              "http://localhost:8080/api/v1/notifications?read=false&limit=%d&offset=%d",
+              limit, offset)
+      }
+
+      req, err := http.NewRequest(http.MethodGet, url, nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result NotificationListResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      result, err := listNotifications("$ACCESS_TOKEN", true, 20, 0)
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Unread notifications: %d\n", result.UnreadCount)
+      for _, n := range result.Items {
+          fmt.Printf("  [%s] %s\n", n.CreatedAt, n.Title)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function listNotifications(accessToken, { read = false, limit = 20, offset = 0 } = {}) {
+    const params = new URLSearchParams({ read, limit, offset });
+    const response = await fetch(`http://localhost:8080/api/v1/notifications?${params}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch notifications');
+    }
+
+    const data = await response.json();
+    console.log(`Unread count: ${data.unread_count}`);
+    return data;
+  }
+
+  // Fetch unread notifications and display a badge
+  const { items, unread_count } = await listNotifications(accessToken, { read: false });
+  document.querySelector('#badge').textContent = unread_count;
+  ```
+  </TabItem>
+</Tabs>
+
+## Mark a Notification as Read
+
+Mark a single notification as read. Returns `204 No Content` on success. Only the owner of the notification may mark it read.
+
+**`POST /api/v1/notifications/{id}/read`**
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/notifications/notif_01HQ.../read \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "fmt"
+      "net/http"
+  )
+
+  func markNotificationRead(accessToken, notificationID string) error {
+      req, err := http.NewRequest(http.MethodPost,
+          fmt.Sprintf("http://localhost:8080/api/v1/notifications/%s/read", notificationID),
+          nil)
+      if err != nil {
+          return err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return err
+      }
+      defer resp.Body.Close()
+
+      if resp.StatusCode == http.StatusNotFound {
+          return fmt.Errorf("notification %s not found", notificationID)
+      }
+      // 204 No Content on success
+      return nil
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function markNotificationRead(accessToken, notificationId) {
+    const response = await fetch(
+      `http://localhost:8080/api/v1/notifications/${notificationId}/read`,
+      {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}` },
+      }
+    );
+
+    if (response.status === 404) {
+      throw new Error(`Notification ${notificationId} not found`);
+    }
+    if (response.status !== 204) {
+      throw new Error('Failed to mark notification as read');
+    }
+  }
+
+  // Mark read and update the UI
+  await markNotificationRead(accessToken, 'notif_01HQ...');
+  // Refresh the unread count
+  const { unread_count } = await listNotifications(accessToken, { read: false, limit: 1 });
+  document.querySelector('#badge').textContent = unread_count;
+  ```
+  </TabItem>
+</Tabs>
+
+## List Notification Rules
+
+Retrieve all notification rules configured for the tenant. Rules define which events trigger notifications and how they are delivered.
+
+**`GET /api/v1/notification-rules`**
+
+**Response**
+
+```json
+{
+  "items": [
+    {
+      "id": "rule_01HQ...",
+      "module": "repairs",
+      "event_name": "repairs.completed",
+      "channel": "email",
+      "template": "repair_completed",
+      "config": {
+        "recipients": ["manager@acme.com"],
+        "subject": "Repair completed: {{.Title}}"
+      },
+      "enabled": true,
+      "created_at": "2024-03-01T12:00:00Z"
+    }
+  ],
+  "total": 5
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl http://localhost:8080/api/v1/notification-rules \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type NotificationRule struct {
+      ID        string         `json:"id"`
+      Module    string         `json:"module"`
+      EventName string         `json:"event_name"`
+      Channel   string         `json:"channel"`
+      Template  string         `json:"template"`
+      Config    map[string]any `json:"config"`
+      Enabled   bool           `json:"enabled"`
+      CreatedAt string         `json:"created_at"`
+  }
+
+  type RuleListResponse struct {
+      Items []NotificationRule `json:"items"`
+      Total int                `json:"total"`
+  }
+
+  func listNotificationRules(accessToken string) (*RuleListResponse, error) {
+      req, err := http.NewRequest(http.MethodGet,
+          "http://localhost:8080/api/v1/notification-rules", nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result RuleListResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      rules, err := listNotificationRules("$ACCESS_TOKEN")
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Configured rules: %d\n", rules.Total)
+      for _, r := range rules.Items {
+          status := "disabled"
+          if r.Enabled {
+              status = "enabled"
+          }
+          fmt.Printf("  [%s] %s -> %s via %s (%s)\n",
+              status, r.EventName, r.Template, r.Channel, r.ID)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function listNotificationRules(accessToken) {
+    const response = await fetch('http://localhost:8080/api/v1/notification-rules', {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch notification rules');
+    }
+
+    const data = await response.json();
+    console.log(`Configured rules: ${data.total}`);
+    return data;
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Create a Notification Rule
+
+Configure a new rule that maps a domain event to a notification channel. When the specified event fires, Trazo will render the template and deliver it via the chosen channel.
+
+**`POST /api/v1/notification-rules`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `module` | string | yes | Bounded context that owns the event, e.g. `repairs` |
+| `event_name` | string | yes | Full event name to listen for, e.g. `repairs.completed` |
+| `channel` | string | yes | Delivery channel: `in_app`, `email`, `slack`, or `webhook` |
+| `template` | string | yes | Template identifier used to render the notification body |
+| `config` | object | yes | Channel-specific configuration (see below) |
+| `enabled` | boolean | no | Whether the rule is active immediately (default: `true`) |
+
+### Channel Configuration
+
+Each channel requires a different `config` structure:
+
+**`in_app`** — no additional config required; the notification appears in the user's inbox.
+
+```json
+{ "config": {} }
+```
+
+**`email`**
+
+```json
+{
+  "config": {
+    "recipients": ["manager@acme.com"],
+    "subject": "Repair completed: {{.Title}}"
+  }
+}
+```
+
+**`slack`**
+
+```json
+{
+  "config": {
+    "webhook_url": "https://hooks.slack.com/services/T.../B.../...",
+    "channel": "#repairs"
+  }
+}
+```
+
+**`webhook`**
+
+```json
+{
+  "config": {
+    "url": "https://api.example.com/hooks/trazo",
+    "secret": "whsec_...",
+    "headers": { "X-Source": "trazo" }
+  }
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  # Create an email rule for the repairs.completed event
+  curl -X POST http://localhost:8080/api/v1/notification-rules \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "module": "repairs",
+      "event_name": "repairs.completed",
+      "channel": "email",
+      "template": "repair_completed",
+      "config": {
+        "recipients": ["manager@acme.com"],
+        "subject": "Repair completed: {{.Title}}"
+      },
+      "enabled": true
+    }'
+
+  # Create a Slack rule for the same event
+  curl -X POST http://localhost:8080/api/v1/notification-rules \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "module": "repairs",
+      "event_name": "repairs.created",
+      "channel": "slack",
+      "template": "repair_created_slack",
+      "config": {
+        "webhook_url": "https://hooks.slack.com/services/T.../B.../...",
+        "channel": "#repairs"
+      },
+      "enabled": true
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type CreateRuleRequest struct {
+      Module    string         `json:"module"`
+      EventName string         `json:"event_name"`
+      Channel   string         `json:"channel"`
+      Template  string         `json:"template"`
+      Config    map[string]any `json:"config"`
+      Enabled   bool           `json:"enabled"`
+  }
+
+  func createNotificationRule(accessToken string, req CreateRuleRequest) (*NotificationRule, error) {
+      body, _ := json.Marshal(req)
+
+      httpReq, err := http.NewRequest(http.MethodPost,
+          "http://localhost:8080/api/v1/notification-rules",
+          bytes.NewReader(body))
+      if err != nil {
+          return nil, err
+      }
+      httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+      httpReq.Header.Set("Content-Type", "application/json")
+
+      resp, err := http.DefaultClient.Do(httpReq)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var rule NotificationRule
+      if err := json.NewDecoder(resp.Body).Decode(&rule); err != nil {
+          return nil, err
+      }
+      return &rule, nil
+  }
+
+  func main() {
+      rule, err := createNotificationRule("$ACCESS_TOKEN", CreateRuleRequest{
+          Module:    "repairs",
+          EventName: "repairs.completed",
+          Channel:   "email",
+          Template:  "repair_completed",
+          Config: map[string]any{
+              "recipients": []string{"manager@acme.com"},
+              "subject":    "Repair completed: {{.Title}}",
+          },
+          Enabled: true,
+      })
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Created rule: %s (channel: %s)\n", rule.ID, rule.Channel)
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function createNotificationRule(accessToken, rule) {
+    const response = await fetch('http://localhost:8080/api/v1/notification-rules', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(rule),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message);
+    }
+
+    const created = await response.json();
+    console.log(`Created rule: ${created.id} (channel: ${created.channel})`);
+    return created;
+  }
+
+  // Example: email rule for repair completions
+  const rule = await createNotificationRule(accessToken, {
+    module: 'repairs',
+    event_name: 'repairs.completed',
+    channel: 'email',
+    template: 'repair_completed',
+    config: {
+      recipients: ['manager@acme.com'],
+      subject: 'Repair completed: {{.Title}}',
+    },
+    enabled: true,
+  });
+
+  // Example: webhook rule for all repair events
+  const webhookRule = await createNotificationRule(accessToken, {
+    module: 'repairs',
+    event_name: 'repairs.created',
+    channel: 'webhook',
+    template: 'repair_created_webhook',
+    config: {
+      url: 'https://api.example.com/hooks/trazo',
+      secret: 'whsec_...',
+      headers: { 'X-Source': 'trazo' },
+    },
+    enabled: true,
+  });
+  ```
+  </TabItem>
+</Tabs>
+
+## Available Channels
+
+| Channel | Description |
+|---|---|
+| `in_app` | Delivers a notification to the user's in-app inbox, visible via the `GET /api/v1/notifications` endpoint |
+| `email` | Sends a formatted email via the tenant's configured mail provider |
+| `slack` | Posts a message to a Slack channel via an Incoming Webhook URL |
+| `webhook` | Makes an HTTP POST to an external URL, signed with an HMAC-SHA256 signature using the configured `secret` |
+
+Webhook deliveries include an `X-Trazo-Signature` header for payload verification:
+
+```
+X-Trazo-Signature: sha256=<hmac_hex_digest>
+```
+
+## Common Errors
+
+| Status | Code | Description |
+|---|---|---|
+| `404` | `NOTIFICATION_NOT_FOUND` | No notification exists with the given ID for the current user. |
+| `404` | `RULE_NOT_FOUND` | No notification rule exists with the given ID. |
+| `422` | `INVALID_CHANNEL` | The `channel` value is not one of `in_app`, `email`, `slack`, `webhook`. |
+| `422` | `VALIDATION_ERROR` | A required field is missing or has an invalid value (e.g., missing `recipients` for an `email` channel). |
+| `403` | `FORBIDDEN` | The authenticated user does not have permission to manage notification rules. |
+
+**Error response shape:**
+
+```json
+{
+  "code": "NOTIFICATION_NOT_FOUND",
+  "message": "Notification 'notif_01HQ...' not found",
+  "request_id": "req_01HQ..."
+}
+```
+
+## Related
+
+- [Auto-generated API Reference](/reference) — full schemas for all notification endpoints.
+- [Events Guide](/api-guides/events) — the domain events that trigger notification rules.
+- [Authentication Guide](/api-guides/authentication) — obtaining the access token required for these requests.

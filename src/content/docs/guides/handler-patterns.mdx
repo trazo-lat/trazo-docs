@@ -1,0 +1,381 @@
+---
+title: Handler Patterns
+description: Conventions for writing Huma HTTP handlers in Trazo modules, covering route registration, request and response types, error mapping, and list endpoints.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Handlers are the HTTP boundary between the outside world and the service layer. In Trazo, handlers are thin: they bind and validate HTTP input, delegate to the service, and map errors to HTTP responses. Business logic never lives in a handler.
+
+All handlers use [Huma v2](https://huma.rocks/) for input binding and OpenAPI schema generation.
+
+---
+
+## Handler Struct
+
+Each module defines a single `Handler` struct that holds a reference to the service. The handler is constructed in `module.go`'s `Init` method.
+
+```go
+// internal/modules/domain/repairs/handler.go
+package repairs
+
+import (
+    "context"
+    "errors"
+    "net/http"
+
+    "github.com/danielgtaylor/huma/v2"
+    "github.com/trazo-dev/trazo-core-service/internal/core"
+)
+
+type Handler struct {
+    service *RepairsService
+}
+
+func NewHandler(service *RepairsService) *Handler {
+    return &Handler{service: service}
+}
+```
+
+---
+
+## Route Registration
+
+All routes are registered in `RegisterRoutes`, which receives the `huma.API` instance. This method is called by the module's `RegisterRoutes` implementation.
+
+```go
+func (h *Handler) RegisterRoutes(api huma.API) {
+    huma.Register(api, huma.Operation{
+        OperationID: "list-repairs",
+        Method:      http.MethodGet,
+        Path:        "/api/v1/repairs",
+        Summary:     "List Repairs",
+        Tags:        []string{"Repairs"},
+    }, h.listRepairs)
+
+    huma.Register(api, huma.Operation{
+        OperationID: "get-repair",
+        Method:      http.MethodGet,
+        Path:        "/api/v1/repairs/{id}",
+        Summary:     "Get Repair",
+        Tags:        []string{"Repairs"},
+    }, h.getRepair)
+
+    huma.Register(api, huma.Operation{
+        OperationID: "create-repair",
+        Method:      http.MethodPost,
+        Path:        "/api/v1/repairs",
+        Summary:     "Create Repair",
+        Tags:        []string{"Repairs"},
+    }, h.createRepair)
+
+    huma.Register(api, huma.Operation{
+        OperationID: "update-repair",
+        Method:      http.MethodPatch,
+        Path:        "/api/v1/repairs/{id}",
+        Summary:     "Update Repair",
+        Tags:        []string{"Repairs"},
+    }, h.updateRepair)
+
+    huma.Register(api, huma.Operation{
+        OperationID: "delete-repair",
+        Method:      http.MethodDelete,
+        Path:        "/api/v1/repairs/{id}",
+        Summary:     "Delete Repair",
+        Tags:        []string{"Repairs"},
+    }, h.deleteRepair)
+
+    huma.Register(api, huma.Operation{
+        OperationID: "transition-repair",
+        Method:      http.MethodPost,
+        Path:        "/api/v1/repairs/{id}/transitions/{action}",
+        Summary:     "Transition Repair Status",
+        Tags:        []string{"Repairs"},
+    }, h.transitionRepair)
+}
+```
+
+<Aside type="note">
+  `OperationID` values must be globally unique across all modules. Use the format `<verb>-<module>` (e.g., `create-repair`, `list-repairs`). Duplicate `OperationID` values will panic at startup.
+</Aside>
+
+---
+
+## Request and Response Types
+
+Huma uses struct types to define input binding, validation, and OpenAPI schema generation. Define one request type and one response type per endpoint.
+
+### Struct Layout Rules
+
+- Path parameters: top-level struct fields named to match the path template (e.g., `ID` for `{id}`).
+- Query parameters: top-level struct fields tagged with `query`.
+- Request body: nested under a `Body` field.
+- Response body: nested under a `Body` field.
+
+### Create Endpoint
+
+```go
+type CreateRepairRequest struct {
+    Body struct {
+        VehicleID   string  `json:"vehicle_id"   required:"true" doc:"UUID of the vehicle being repaired"`
+        Description string  `json:"description"                  doc:"Summary of the reported issue"`
+        AssignedTo  *string `json:"assigned_to"                  doc:"UUID of the technician to assign"`
+    }
+}
+
+type RepairResponse struct {
+    Body Repair
+}
+
+func (h *Handler) createRepair(ctx context.Context, req *CreateRepairRequest) (*RepairResponse, error) {
+    repair, err := h.service.Create(ctx, CreateRepairInput{
+        Description: req.Body.Description,
+        AssignedTo:  parseOptionalUUID(req.Body.AssignedTo),
+    })
+    if err != nil {
+        return nil, mapError(err)
+    }
+    return &RepairResponse{Body: *repair}, nil
+}
+```
+
+### Get by ID Endpoint
+
+```go
+type GetRepairRequest struct {
+    ID string `path:"id" doc:"Repair UUID"`
+}
+
+func (h *Handler) getRepair(ctx context.Context, req *GetRepairRequest) (*RepairResponse, error) {
+    repair, err := h.service.GetByID(ctx, req.ID)
+    if err != nil {
+        return nil, mapError(err)
+    }
+    return &RepairResponse{Body: *repair}, nil
+}
+```
+
+### Update Endpoint
+
+Use pointer fields in the body to distinguish between "field not provided" and "field set to zero value".
+
+```go
+type UpdateRepairRequest struct {
+    ID   string `path:"id"`
+    Body struct {
+        Description *string `json:"description" doc:"Updated issue description"`
+        AssignedTo  *string `json:"assigned_to" doc:"Reassign to a different technician UUID"`
+    }
+}
+
+func (h *Handler) updateRepair(ctx context.Context, req *UpdateRepairRequest) (*RepairResponse, error) {
+    repair, err := h.service.Update(ctx, req.ID, UpdateRepairInput{
+        Description: req.Body.Description,
+        AssignedTo:  parseOptionalUUID(req.Body.AssignedTo),
+    })
+    if err != nil {
+        return nil, mapError(err)
+    }
+    return &RepairResponse{Body: *repair}, nil
+}
+```
+
+### Delete Endpoint
+
+```go
+type DeleteRepairRequest struct {
+    ID string `path:"id"`
+}
+
+func (h *Handler) deleteRepair(ctx context.Context, req *DeleteRepairRequest) (*struct{}, error) {
+    if err := h.service.Delete(ctx, req.ID); err != nil {
+        return nil, mapError(err)
+    }
+    return &struct{}{}, nil
+}
+```
+
+---
+
+## List Endpoint with Query Parameters
+
+List endpoints expose filtering and pagination via query parameters.
+
+```go
+type ListRepairsRequest struct {
+    Status string `query:"status"  doc:"Filter by status value"`
+    Limit  int    `query:"limit"   default:"20" minimum:"1" maximum:"100" doc:"Page size"`
+    Offset int    `query:"offset"  default:"0"  minimum:"0"               doc:"Number of records to skip"`
+}
+
+type ListRepairsResponse struct {
+    Body struct {
+        Data   []Repair `json:"data"`
+        Total  int      `json:"total"`
+        Limit  int      `json:"limit"`
+        Offset int      `json:"offset"`
+    }
+}
+
+func (h *Handler) listRepairs(ctx context.Context, req *ListRepairsRequest) (*ListRepairsResponse, error) {
+    repairs, total, err := h.service.List(ctx, ListFilter{
+        Status: req.Status,
+        Limit:  req.Limit,
+        Offset: req.Offset,
+    })
+    if err != nil {
+        return nil, mapError(err)
+    }
+
+    resp := &ListRepairsResponse{}
+    resp.Body.Data = repairs
+    resp.Body.Total = total
+    resp.Body.Limit = req.Limit
+    resp.Body.Offset = req.Offset
+    return resp, nil
+}
+```
+
+<Aside type="tip">
+  Huma validates `minimum`, `maximum`, and `default` constraints automatically from struct tags. You do not need to validate these in the service layer.
+</Aside>
+
+---
+
+## Transition Endpoint
+
+Status transitions pass the action name via a path parameter and an optional request body.
+
+```go
+type TransitionRepairRequest struct {
+    ID     string `path:"id"`
+    Action string `path:"action" doc:"Transition action name (e.g., start, complete, cancel)"`
+    Body   *struct {
+        Reason          *string `json:"reason"           doc:"Reason for the transition (required for cancel)"`
+        ResolutionNotes *string `json:"resolution_notes" doc:"Final notes (required for complete)"`
+    }
+}
+
+func (h *Handler) transitionRepair(ctx context.Context, req *TransitionRepairRequest) (*RepairResponse, error) {
+    input := TransitionInput{}
+    if req.Body != nil {
+        input.Reason = req.Body.Reason
+        input.ResolutionNotes = req.Body.ResolutionNotes
+    }
+
+    repair, err := h.service.Transition(ctx, req.ID, req.Action, input)
+    if err != nil {
+        return nil, mapError(err)
+    }
+    return &RepairResponse{Body: *repair}, nil
+}
+```
+
+---
+
+## Error Mapping
+
+All service errors are `*core.Error` values. The `mapError` helper converts them to Huma errors so the client receives a structured JSON error response with the correct HTTP status code.
+
+```go
+func mapError(err error) error {
+    var coreErr *core.Error
+    if !errors.As(err, &coreErr) {
+        // Unexpected error — do not leak internal details
+        return huma.NewError(http.StatusInternalServerError, "internal server error")
+    }
+    return huma.NewError(coreErr.HTTPStatus(), coreErr.Message)
+}
+```
+
+The resulting JSON response for a 422 validation error looks like:
+
+```json
+{
+    "title": "Unprocessable Entity",
+    "status": 422,
+    "detail": "vehicle_id: required"
+}
+```
+
+For a 403 authorization error:
+
+```json
+{
+    "title": "Forbidden",
+    "status": 403,
+    "detail": "permission denied: repairs.create"
+}
+```
+
+<Aside type="caution">
+  Always use `errors.As`, not `errors.Is` or a direct type assertion, when unwrapping `*core.Error`. The error may be wrapped in additional context layers by the service or repository.
+</Aside>
+
+---
+
+## Parsing Helpers
+
+Handlers often need to convert string query/path values to typed values. Keep these helpers in a `helpers.go` file within the package.
+
+```go
+// internal/modules/domain/repairs/helpers.go
+package repairs
+
+import "github.com/google/uuid"
+
+func parseOptionalUUID(s *string) *uuid.UUID {
+    if s == nil || *s == "" {
+        return nil
+    }
+    id, err := uuid.Parse(*s)
+    if err != nil {
+        return nil
+    }
+    return &id
+}
+```
+
+<Aside type="note">
+  UUID format validation is the responsibility of the handler (or Huma's schema validation via `format:"uuid"` tag). If the UUID is malformed, reject it at the boundary before the value ever reaches the service layer.
+</Aside>
+
+---
+
+## Response Envelope
+
+All list endpoints return a consistent envelope shape:
+
+```json
+{
+    "data": [...],
+    "total": 142,
+    "limit": 20,
+    "offset": 0
+}
+```
+
+Single-resource endpoints return the resource directly as the body:
+
+```json
+{
+    "id": "...",
+    "vehicle_id": "...",
+    "status": "pending",
+    ...
+}
+```
+
+---
+
+## Handler Checklist
+
+Before submitting a new handler for review, verify the following:
+
+- Every route has a unique `OperationID`.
+- Request body uses `required:"true"` tags for mandatory fields.
+- Pointer fields are used for optional update fields.
+- All errors pass through `mapError`.
+- No business logic is present in the handler — only mapping and delegation.
+- List endpoints expose `limit`, `offset`, and relevant filter parameters.
+- Path parameters match the path template exactly (case-sensitive).

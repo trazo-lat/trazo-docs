@@ -1,0 +1,152 @@
+---
+title: Prerequisites
+description: Software and tools you need to install before setting up Trazo locally.
+---
+
+import { Aside, Badge, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Before cloning and running Trazo, make sure the following tools are available on your machine.
+
+## Required
+
+### Go 1.24+
+
+Both `trazo-core-service` and `trazo-cli` are written in Go 1.24. Earlier versions are not supported.
+
+<Tabs>
+  <TabItem label="Linux / macOS">
+    ```bash
+    # Using the official installer
+    # Download from https://go.dev/dl/ then:
+    tar -C /usr/local -xzf go1.24.linux-amd64.tar.gz
+    export PATH=$PATH:/usr/local/go/bin
+
+    # Verify
+    go version
+    # go version go1.24.x linux/amd64
+    ```
+  </TabItem>
+  <TabItem label="Homebrew (macOS)">
+    ```bash
+    brew install go
+    go version
+    ```
+  </TabItem>
+  <TabItem label="asdf / mise">
+    ```bash
+    # asdf
+    asdf plugin add golang
+    asdf install golang 1.24.0
+    asdf global golang 1.24.0
+
+    # mise
+    mise use --global go@1.24
+    ```
+  </TabItem>
+</Tabs>
+
+---
+
+### PostgreSQL 15+
+
+Trazo uses PostgreSQL-specific features for schema-per-tenant isolation (e.g., `CREATE SCHEMA`, `search_path` switching). PostgreSQL 15 or newer is required.
+
+<Aside type="tip">
+  For local development you do **not** need to install PostgreSQL manually. The `trazo db local` command starts a pre-configured PostgreSQL 15 container for you via Docker. Install PostgreSQL directly only if you prefer a native setup or are configuring a staging/production environment.
+</Aside>
+
+<Tabs>
+  <TabItem label="Docker (recommended for dev)">
+    No installation needed — covered in the [Local Development](/getting-started/local-development/) guide.
+  </TabItem>
+  <TabItem label="Linux (apt)">
+    ```bash
+    sudo apt install postgresql-15
+    psql --version
+    ```
+  </TabItem>
+  <TabItem label="Homebrew (macOS)">
+    ```bash
+    brew install postgresql@15
+    brew services start postgresql@15
+    psql --version
+    ```
+  </TabItem>
+</Tabs>
+
+---
+
+### Docker
+
+The `trazo db local` CLI command uses Docker to start and manage a PostgreSQL container named `trazo-local-db`. Docker Engine 24+ or Docker Desktop is sufficient.
+
+<Tabs>
+  <TabItem label="Linux">
+    Follow the [official Docker Engine install guide](https://docs.docker.com/engine/install/) for your distribution, then verify:
+    ```bash
+    docker --version
+    docker run --rm hello-world
+    ```
+  </TabItem>
+  <TabItem label="macOS / Windows">
+    Install [Docker Desktop](https://www.docker.com/products/docker-desktop/), then verify:
+    ```bash
+    docker --version
+    ```
+  </TabItem>
+</Tabs>
+
+---
+
+### Git
+
+Used to clone the repositories.
+
+```bash
+git --version
+# git version 2.x.x
+```
+
+Most systems ship with Git pre-installed. If not, install it via your package manager (`apt install git`, `brew install git`, etc.).
+
+---
+
+## Optional
+
+### Node.js 20+ <Badge text="Docs site only" variant="note" />
+
+Only required if you want to run or contribute to this documentation site (`trazo-docs`). The API server and CLI have no Node.js dependency.
+
+```bash
+node --version   # v20.x.x or higher
+npm --version
+```
+
+Recommended: use [nvm](https://github.com/nvm-sh/nvm) or [mise](https://mise.jdx.dev/) to manage Node versions.
+
+---
+
+### Atlas <Badge text="Optional" variant="note" />
+
+[Atlas](https://atlasgo.io/) is the migration engine Trazo uses under the hood. The `trazo migrate` CLI subcommands wrap Atlas automatically, so you rarely need to invoke Atlas directly. Install it if you want to inspect or author migrations manually outside of the CLI.
+
+```bash
+# Linux / macOS
+curl -sSf https://atlasgo.sh | sh
+atlas version
+```
+
+---
+
+## Summary
+
+| Tool | Version | Required |
+|---|---|---|
+| Go | 1.24+ | Yes |
+| PostgreSQL | 15+ | Yes (or via Docker) |
+| Docker | 24+ | Yes (for `trazo db local`) |
+| Git | any | Yes |
+| Node.js | 20+ | No (docs site only) |
+| Atlas | latest | No (CLI handles it) |
+
+Once everything is in place, continue to [Installation](/getting-started/installation/).

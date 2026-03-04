@@ -1,0 +1,565 @@
+---
+title: User Management
+description: Register users, manage profiles, list accounts, and handle password changes through the Trazo API.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Users are scoped to a tenant. Each user belongs to exactly one tenant and carries a set of roles that determine their permissions within that tenant's data. All endpoints in this guide require an authenticated session — read operations need `users:read` and mutating operations need `users:write`.
+
+## Register a User
+
+Create a new user account. The `email` must be unique within the tenant.
+
+**`POST /api/v1/users`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `email` | string | yes | User's email address (must be unique within the tenant) |
+| `password` | string | yes | Plain-text password (min 8 characters); stored as a bcrypt hash |
+| `name` | string | yes | Full display name |
+| `phone` | string | no | E.164 formatted phone number (e.g., `+14155552671`) |
+
+**Response**
+
+```json
+{
+  "id": "usr_01HQ...",
+  "email": "jane@acme.com",
+  "name": "Jane Doe",
+  "phone": "+14155552671",
+  "status": "active",
+  "locale": "en",
+  "timezone": "UTC",
+  "created_at": "2024-03-01T12:00:00Z",
+  "updated_at": "2024-03-01T12:00:00Z"
+}
+```
+
+Note: the `password` field is never returned in any response.
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/users \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "email": "jane@acme.com",
+      "password": "s3cur3P@ss!",
+      "name": "Jane Doe",
+      "phone": "+14155552671"
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type CreateUserRequest struct {
+      Email    string `json:"email"`
+      Password string `json:"password"`
+      Name     string `json:"name"`
+      Phone    string `json:"phone,omitempty"`
+  }
+
+  type User struct {
+      ID        string `json:"id"`
+      Email     string `json:"email"`
+      Name      string `json:"name"`
+      Phone     string `json:"phone"`
+      Status    string `json:"status"`
+      Locale    string `json:"locale"`
+      Timezone  string `json:"timezone"`
+      CreatedAt string `json:"created_at"`
+  }
+
+  func createUser(accessToken string, req CreateUserRequest) (*User, error) {
+      body, _ := json.Marshal(req)
+
+      httpReq, err := http.NewRequest(http.MethodPost, "http://localhost:8080/api/v1/users", bytes.NewReader(body))
+      if err != nil {
+          return nil, err
+      }
+      httpReq.Header.Set("Authorization", "Bearer "+accessToken)
+      httpReq.Header.Set("Content-Type", "application/json")
+
+      resp, err := http.DefaultClient.Do(httpReq)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var user User
+      if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+          return nil, err
+      }
+      return &user, nil
+  }
+
+  func main() {
+      user, err := createUser("$ACCESS_TOKEN", CreateUserRequest{
+          Email:    "jane@acme.com",
+          Password: "s3cur3P@ss!",
+          Name:     "Jane Doe",
+          Phone:    "+14155552671",
+      })
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Created user: %s (id: %s)\n", user.Name, user.ID)
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function createUser(accessToken, { email, password, name, phone }) {
+    const response = await fetch('http://localhost:8080/api/v1/users', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ email, password, name, phone }),
+    });
+
+    if (response.status === 409) {
+      throw new Error('A user with this email already exists');
+    }
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message);
+    }
+
+    const user = await response.json();
+    console.log(`Created user: ${user.name} (id: ${user.id})`);
+    return user;
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## List Users
+
+Retrieve a paginated list of users within the tenant. Results are ordered by `created_at` descending by default.
+
+**`GET /api/v1/users`**
+
+| Query parameter | Type | Description |
+|---|---|---|
+| `status` | string | Filter by status: `active`, `inactive`, or `suspended` |
+| `limit` | integer | Maximum results to return (default: `20`, max: `100`) |
+| `offset` | integer | Number of records to skip (default: `0`) |
+
+**Response**
+
+```json
+{
+  "items": [
+    {
+      "id": "usr_01HQ...",
+      "email": "jane@acme.com",
+      "name": "Jane Doe",
+      "status": "active",
+      "created_at": "2024-03-01T12:00:00Z"
+    }
+  ],
+  "total": 15,
+  "limit": 20,
+  "offset": 0
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl "http://localhost:8080/api/v1/users?status=active&limit=20" \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type UserListResponse struct {
+      Items  []User `json:"items"`
+      Total  int    `json:"total"`
+      Limit  int    `json:"limit"`
+      Offset int    `json:"offset"`
+  }
+
+  func listUsers(accessToken, status string, limit, offset int) (*UserListResponse, error) {
+      url := fmt.Sprintf("http://localhost:8080/api/v1/users?status=%s&limit=%d&offset=%d",
+          status, limit, offset)
+
+      req, err := http.NewRequest(http.MethodGet, url, nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result UserListResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      result, err := listUsers("$ACCESS_TOKEN", "active", 20, 0)
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Found %d active users\n", result.Total)
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function listUsers(accessToken, { status = 'active', limit = 20, offset = 0 } = {}) {
+    const params = new URLSearchParams({ status, limit, offset });
+    const response = await fetch(`http://localhost:8080/api/v1/users?${params}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to list users');
+    }
+
+    return response.json();
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Get a User
+
+Retrieve a single user's full profile by their ID.
+
+**`GET /api/v1/users/{id}`**
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl http://localhost:8080/api/v1/users/usr_01HQ... \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  func getUser(accessToken, userID string) (*User, error) {
+      req, err := http.NewRequest(http.MethodGet,
+          "http://localhost:8080/api/v1/users/"+userID, nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      if resp.StatusCode == http.StatusNotFound {
+          return nil, fmt.Errorf("user %s not found", userID)
+      }
+
+      var user User
+      if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+          return nil, err
+      }
+      return &user, nil
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function getUser(accessToken, userId) {
+    const response = await fetch(`http://localhost:8080/api/v1/users/${userId}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (response.status === 404) {
+      throw new Error(`User ${userId} not found`);
+    }
+    if (!response.ok) {
+      throw new Error('Failed to fetch user');
+    }
+
+    return response.json();
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Update User Profile
+
+Partially update a user's profile fields. Only the fields provided in the request body are changed.
+
+**`PATCH /api/v1/users/{id}`**
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Updated full name |
+| `phone` | string | E.164 formatted phone number |
+| `locale` | string | BCP 47 language tag (e.g., `en`, `es`, `pt-BR`) |
+| `timezone` | string | IANA timezone identifier (e.g., `America/New_York`) |
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X PATCH http://localhost:8080/api/v1/users/usr_01HQ... \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "Jane Smith",
+      "locale": "pt-BR",
+      "timezone": "America/Sao_Paulo"
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "net/http"
+  )
+
+  type UpdateUserRequest struct {
+      Name     *string `json:"name,omitempty"`
+      Phone    *string `json:"phone,omitempty"`
+      Locale   *string `json:"locale,omitempty"`
+      Timezone *string `json:"timezone,omitempty"`
+  }
+
+  func updateUser(accessToken, userID string, update UpdateUserRequest) (*User, error) {
+      body, _ := json.Marshal(update)
+
+      req, err := http.NewRequest(http.MethodPatch,
+          "http://localhost:8080/api/v1/users/"+userID,
+          bytes.NewReader(body))
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+      req.Header.Set("Content-Type", "application/json")
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var user User
+      if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+          return nil, err
+      }
+      return &user, nil
+  }
+
+  func main() {
+      name := "Jane Smith"
+      locale := "pt-BR"
+      tz := "America/Sao_Paulo"
+      _, err := updateUser("$ACCESS_TOKEN", "usr_01HQ...", UpdateUserRequest{
+          Name:     &name,
+          Locale:   &locale,
+          Timezone: &tz,
+      })
+      if err != nil {
+          panic(err)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function updateUser(accessToken, userId, updates) {
+    const response = await fetch(`http://localhost:8080/api/v1/users/${userId}`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(updates),
+    });
+
+    if (response.status === 404) {
+      throw new Error(`User ${userId} not found`);
+    }
+    if (!response.ok) {
+      throw new Error('Failed to update user');
+    }
+
+    return response.json();
+  }
+
+  // Example: update locale and timezone
+  const updated = await updateUser(accessToken, 'usr_01HQ...', {
+    name: 'Jane Smith',
+    locale: 'pt-BR',
+    timezone: 'America/Sao_Paulo',
+  });
+  ```
+  </TabItem>
+</Tabs>
+
+## Change Password
+
+Allow a user to change their own password. The `current_password` is required to prevent unauthorized changes even if an access token is stolen. This endpoint does not require elevated permissions beyond owning the account.
+
+**`POST /api/v1/users/{id}/change-password`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `current_password` | string | yes | The user's current plain-text password |
+| `new_password` | string | yes | The desired new password (min 8 characters) |
+
+Returns `204 No Content` on success. All existing sessions are invalidated after a password change.
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/users/usr_01HQ.../change-password \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "current_password": "s3cur3P@ss!",
+      "new_password": "n3wS3cur3P@ss!"
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type ChangePasswordRequest struct {
+      CurrentPassword string `json:"current_password"`
+      NewPassword     string `json:"new_password"`
+  }
+
+  func changePassword(accessToken, userID, currentPassword, newPassword string) error {
+      body, _ := json.Marshal(ChangePasswordRequest{
+          CurrentPassword: currentPassword,
+          NewPassword:     newPassword,
+      })
+
+      req, err := http.NewRequest(http.MethodPost,
+          fmt.Sprintf("http://localhost:8080/api/v1/users/%s/change-password", userID),
+          bytes.NewReader(body))
+      if err != nil {
+          return err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+      req.Header.Set("Content-Type", "application/json")
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return err
+      }
+      defer resp.Body.Close()
+
+      if resp.StatusCode == http.StatusUnauthorized {
+          return fmt.Errorf("current password is incorrect")
+      }
+      // 204 No Content on success
+      return nil
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function changePassword(accessToken, userId, currentPassword, newPassword) {
+    const response = await fetch(
+      `http://localhost:8080/api/v1/users/${userId}/change-password`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          current_password: currentPassword,
+          new_password: newPassword,
+        }),
+      }
+    );
+
+    if (response.status === 401) {
+      throw new Error('Current password is incorrect');
+    }
+    if (response.status === 404) {
+      throw new Error('User not found');
+    }
+    if (response.status !== 204) {
+      throw new Error('Failed to change password');
+    }
+    // Success — user must log in again with new password
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Common Errors
+
+| Status | Code | Description |
+|---|---|---|
+| `409` | `EMAIL_EXISTS` | A user with the given email already exists in this tenant. |
+| `404` | `USER_NOT_FOUND` | No user exists with the given ID within the current tenant. |
+| `401` | `WRONG_PASSWORD` | The `current_password` provided to `change-password` is incorrect. |
+| `422` | `VALIDATION_ERROR` | A field failed validation, such as a password shorter than 8 characters or an invalid phone format. |
+| `403` | `FORBIDDEN` | The authenticated user does not have permission to modify this user's account. |
+
+**Error response shape:**
+
+```json
+{
+  "code": "EMAIL_EXISTS",
+  "message": "A user with email 'jane@acme.com' already exists",
+  "request_id": "req_01HQ..."
+}
+```
+
+## Related
+
+- [Auto-generated API Reference](/reference) — full schemas for all user endpoints.
+- [Authentication Guide](/api-guides/authentication) — logging in and managing sessions.
+- [Tenant Management Guide](/api-guides/tenant-management) — the tenant context that users belong to.

@@ -1,0 +1,398 @@
+---
+title: Authentication
+description: Learn how to authenticate with the Trazo API using JWT tokens, refresh tokens, and session management.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The Trazo API uses JWT-based authentication. Every request to a protected endpoint must include a valid `Authorization: Bearer <access_token>` header. Access tokens are short-lived (15 minutes), and a refresh token (valid for 7 days) is provided to obtain new access tokens without re-authenticating.
+
+## Login
+
+Authenticate a user by exchanging credentials for a token pair. The `tenant_id` field scopes the session to a specific tenant's data.
+
+**`POST /api/v1/auth/login`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `email` | string | yes | The user's email address |
+| `password` | string | yes | The user's plain-text password |
+| `tenant_id` | string | yes | UUID of the tenant to authenticate against |
+
+**Response**
+
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "dGhpcyBpcyBhIHJlZnJlc2ggdG9rZW4...",
+  "expires_in": 900,
+  "token_type": "Bearer"
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{
+      "email": "user@example.com",
+      "password": "password123",
+      "tenant_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type LoginRequest struct {
+      Email    string `json:"email"`
+      Password string `json:"password"`
+      TenantID string `json:"tenant_id"`
+  }
+
+  type TokenResponse struct {
+      AccessToken  string `json:"access_token"`
+      RefreshToken string `json:"refresh_token"`
+      ExpiresIn    int    `json:"expires_in"`
+      TokenType    string `json:"token_type"`
+  }
+
+  func login(email, password, tenantID string) (*TokenResponse, error) {
+      body, _ := json.Marshal(LoginRequest{
+          Email:    email,
+          Password: password,
+          TenantID: tenantID,
+      })
+
+      resp, err := http.Post(
+          "http://localhost:8080/api/v1/auth/login",
+          "application/json",
+          bytes.NewReader(body),
+      )
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var tokens TokenResponse
+      if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
+          return nil, err
+      }
+      return &tokens, nil
+  }
+
+  func main() {
+      tokens, err := login("user@example.com", "password123", "a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+      if err != nil {
+          panic(err)
+      }
+      fmt.Println("Access token:", tokens.AccessToken)
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function login(email, password, tenantId) {
+    const response = await fetch('http://localhost:8080/api/v1/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, tenant_id: tenantId }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message);
+    }
+
+    const tokens = await response.json();
+    // Store tokens securely (e.g., httpOnly cookies or secure storage)
+    return tokens;
+  }
+
+  const tokens = await login(
+    'user@example.com',
+    'password123',
+    'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+  );
+  console.log('Access token:', tokens.access_token);
+  console.log('Expires in:', tokens.expires_in, 'seconds');
+  ```
+  </TabItem>
+</Tabs>
+
+## Refresh Token
+
+When an access token expires, exchange the refresh token for a new token pair. The old refresh token is invalidated after use (token rotation).
+
+**`POST /api/v1/auth/refresh`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `refresh_token` | string | yes | A valid, unexpired refresh token |
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/auth/refresh \
+    -H "Content-Type: application/json" \
+    -d '{
+      "refresh_token": "dGhpcyBpcyBhIHJlZnJlc2ggdG9rZW4..."
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "net/http"
+  )
+
+  type RefreshRequest struct {
+      RefreshToken string `json:"refresh_token"`
+  }
+
+  func refreshTokens(refreshToken string) (*TokenResponse, error) {
+      body, _ := json.Marshal(RefreshRequest{RefreshToken: refreshToken})
+
+      resp, err := http.Post(
+          "http://localhost:8080/api/v1/auth/refresh",
+          "application/json",
+          bytes.NewReader(body),
+      )
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var tokens TokenResponse
+      if err := json.NewDecoder(resp.Body).Decode(&tokens); err != nil {
+          return nil, err
+      }
+      return &tokens, nil
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function refreshTokens(refreshToken) {
+    const response = await fetch('http://localhost:8080/api/v1/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+
+    if (!response.ok) {
+      // Refresh token is invalid or expired — redirect to login
+      throw new Error('Session expired. Please log in again.');
+    }
+
+    return response.json(); // { access_token, refresh_token, expires_in, token_type }
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Logout
+
+Invalidate the current session on the server. After logout, the Bearer token is no longer accepted and the associated refresh token is revoked.
+
+**`POST /api/v1/auth/logout`**
+
+Requires `Authorization: Bearer <access_token>` header. Returns `204 No Content` on success.
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/auth/logout \
+    -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "net/http"
+  )
+
+  func logout(accessToken string) error {
+      req, err := http.NewRequest(http.MethodPost, "http://localhost:8080/api/v1/auth/logout", nil)
+      if err != nil {
+          return err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return err
+      }
+      defer resp.Body.Close()
+      // 204 No Content on success
+      return nil
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function logout(accessToken) {
+    const response = await fetch('http://localhost:8080/api/v1/auth/logout', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (response.status !== 204) {
+      throw new Error('Logout failed');
+    }
+    // Clear locally stored tokens
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Get Current User
+
+Retrieve the profile and permissions of the authenticated user. This is useful for populating a user dashboard or checking role-based access on the client side.
+
+**`GET /api/v1/auth/me`**
+
+Requires `Authorization: Bearer <access_token>` header.
+
+**Response**
+
+```json
+{
+  "id": "usr_01HQ...",
+  "email": "user@example.com",
+  "name": "Jane Doe",
+  "tenant_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "roles": ["admin"],
+  "permissions": ["repairs:read", "repairs:write", "users:read"],
+  "locale": "en",
+  "timezone": "America/New_York",
+  "created_at": "2024-03-01T12:00:00Z"
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl http://localhost:8080/api/v1/auth/me \
+    -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type UserProfile struct {
+      ID          string   `json:"id"`
+      Email       string   `json:"email"`
+      Name        string   `json:"name"`
+      TenantID    string   `json:"tenant_id"`
+      Roles       []string `json:"roles"`
+      Permissions []string `json:"permissions"`
+      Locale      string   `json:"locale"`
+      Timezone    string   `json:"timezone"`
+  }
+
+  func getCurrentUser(accessToken string) (*UserProfile, error) {
+      req, err := http.NewRequest(http.MethodGet, "http://localhost:8080/api/v1/auth/me", nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var profile UserProfile
+      if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+          return nil, err
+      }
+      return &profile, nil
+  }
+
+  func main() {
+      profile, err := getCurrentUser("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...")
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Logged in as: %s (%s)\n", profile.Name, profile.Email)
+      fmt.Printf("Permissions: %v\n", profile.Permissions)
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function getCurrentUser(accessToken) {
+    const response = await fetch('http://localhost:8080/api/v1/auth/me', {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch user profile');
+    }
+
+    const user = await response.json();
+    console.log(`Logged in as: ${user.name} (${user.email})`);
+    console.log('Permissions:', user.permissions);
+    return user;
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Token Lifetimes
+
+| Token | Lifetime | Notes |
+|---|---|---|
+| Access token | 15 minutes | Include in `Authorization` header on every request |
+| Refresh token | 7 days | Single-use; rotated on each refresh |
+
+Implement a proactive refresh strategy: schedule a token refresh shortly before the access token expires (e.g., at the 13-minute mark) rather than waiting for a `401` response.
+
+## Common Errors
+
+| Status | Code | Description |
+|---|---|---|
+| `401` | `INVALID_CREDENTIALS` | The email/password combination is incorrect, or the `tenant_id` does not match the user's account. |
+| `401` | `TOKEN_EXPIRED` | The access token has expired. Use the refresh token to obtain a new one. |
+| `401` | `INVALID_TOKEN` | The token is malformed or has been tampered with. |
+| `401` | `REFRESH_TOKEN_EXPIRED` | The refresh token has expired or was already used. The user must log in again. |
+| `403` | `FORBIDDEN` | The authenticated user does not have permission to access the requested resource. |
+
+**Error response shape:**
+
+```json
+{
+  "code": "TOKEN_EXPIRED",
+  "message": "The access token has expired",
+  "request_id": "req_01HQ..."
+}
+```
+
+## Related
+
+- [Auto-generated API Reference](/reference) — full request/response schemas for all auth endpoints.
+- [User Management Guide](/api-guides/user-management) — creating and updating user accounts.

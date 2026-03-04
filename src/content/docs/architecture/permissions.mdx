@@ -1,0 +1,158 @@
+---
+title: Permission and Scope System
+description: How Trazo models authorization using structured permission strings, built-in scopes, and SQL filter injection via ApplyScope.
+---
+
+Trazo uses a structured permission system built around human-readable permission strings and a scope model that translates access levels directly into SQL WHERE clauses. Permissions are declared in `module.yaml`, synced to the database, and checked at runtime through `Core.Permission`.
+
+## Permission String Format
+
+```
+<module>.<action>[.<scope>]
+```
+
+Examples:
+
+| Permission string | Meaning |
+|---|---|
+| `repairs.read.all` | Read all repair records |
+| `repairs.read.assigned` | Read only repairs assigned to the current user |
+| `repairs.read.team` | Read repairs assigned to any member of the current user's team |
+| `repairs.create` | Create a new repair (no scope — create is unscoped) |
+| `repairs.complete` | Mark a repair as complete (no scope) |
+| `inventory.update.own` | Update only inventory items created by the current user |
+
+### Scoped vs. Unscoped Actions
+
+**Scoped actions** (typically `read`, `update`, `delete`) carry a scope suffix because the set of records accessible depends on the user's relationship to each record.
+
+**Unscoped actions** (typically `create`, `complete`, `publish`, or other lifecycle transitions) apply to the operation itself, not to a filtered set of records. They have no scope suffix.
+
+```yaml
+# module.yaml
+permissions:
+  - action: read
+    scoped: true     # → repairs.read.<scope>
+  - action: create
+    scoped: false    # → repairs.create
+  - action: complete
+    scoped: false    # → repairs.complete
+```
+
+## Built-in Scopes
+
+| Scope | SQL Filter Generated | Description |
+|---|---|---|
+| `all` | *(no filter)* | Full access; all records are visible |
+| `own` | `created_by = :user_id` | Only records created by the current user |
+| `created` | `created_by = :user_id` | Alias for `own`; used for semantic clarity in some modules |
+| `assigned` | `assigned_to = :user_id` | Only records currently assigned to the current user |
+| `team` | `assigned_to IN (:user_team_ids)` | Records assigned to any member of the user's teams |
+
+Scopes are ordered by permissiveness. If a user's role grants `repairs.read.team`, they can read team records but not all records. If the role grants `repairs.read.all`, the filter is omitted entirely.
+
+## Resolution Flow
+
+When `Core.Permission.ResolveScope` is called, the platform evaluates the user's effective permissions in this order:
+
+```
+User
+  └── Membership (in current tenant)
+        └── Role
+              └── Permissions (list of granted strings)
+                    └── Filter by: module.action.*
+                          └── Select highest-priority matching scope
+```
+
+Scope priority (highest to lowest): `all` > `team` > `assigned` > `own` > `created`.
+
+If the user has no matching permission, `ResolveScope` returns an error and `MustCan` returns a `FORBIDDEN` error.
+
+## Checking Permissions in Services
+
+### Non-fatal check
+
+Use `Can` when you want to branch behavior based on access rather than blocking the request:
+
+```go
+func (s *RepairsService) List(ctx context.Context, input ListInput) ([]Repair, error) {
+    canReadAll, err := s.core.Permission.Can(ctx, "repairs.read.all")
+    if err != nil {
+        return nil, err
+    }
+
+    if canReadAll {
+        // fetch all without scope filter
+    } else {
+        // apply scope filter
+    }
+}
+```
+
+### Enforced check
+
+Use `MustCan` when the action must be permitted or the request should be rejected:
+
+```go
+func (s *RepairsService) Delete(ctx context.Context, id string) error {
+    if err := s.core.Permission.MustCan(ctx, "repairs.delete"); err != nil {
+        return err // *core.Error with AUTHORIZATION.FORBIDDEN
+    }
+    // ...
+}
+```
+
+:::tip
+`MustCan` is the preferred pattern in services. It returns a typed `*core.Error` that maps correctly to HTTP 403 without any additional error handling in the handler.
+:::
+
+## Applying Scope to Queries
+
+`ApplyScope` resolves the user's effective scope for a permission and appends the corresponding WHERE clause to a `*Query` object:
+
+```go
+func (r *RepairsRepository) List(ctx context.Context, q *query.Query) ([]Repair, error) {
+    q, err := r.core.Permission.ApplyScope(ctx, "repairs.read", q)
+    if err != nil {
+        return nil, err
+    }
+
+    sql, args, err := q.ToSQL()
+    if err != nil {
+        return nil, err
+    }
+
+    var repairs []Repair
+    return repairs, r.db.SelectContext(ctx, &repairs, sql, args...)
+}
+```
+
+When the resolved scope is `assigned`, `ApplyScope` appends:
+
+```sql
+AND assigned_to = $1   -- $1 = current user's ID
+```
+
+When the scope is `all`, `ApplyScope` returns the query unchanged.
+
+`*Query` is a thin wrapper around squirrel's `SelectBuilder` that carries parameter bindings. Repositories build the base query (table, columns, joins, ordering) and pass it to `ApplyScope` before execution.
+
+## Custom Scopes
+
+Domain modules can register custom scopes by implementing the `ScopeProvider` interface during `Init`. A custom scope must provide:
+
+1. A unique name (e.g., `region`).
+2. A SQL fragment with named parameters (e.g., `region_id = :user_region_id`).
+3. A resolver function that extracts the parameter values from the current session.
+
+Custom scopes appear in `module.yaml` alongside the built-in ones and are available for role configuration through the same API.
+
+## Role Configuration
+
+Roles are created per-tenant and assigned a set of permission strings. The platform does not expose raw permission strings in the role management UI; instead, it presents the declared permissions from `module.yaml` and their available scopes as structured options.
+
+When a role is saved, the effective permission list is stored in the tenant schema's `permissions` table and loaded into the session on the next authentication.
+
+:::note
+Permission strings are synced from `module.yaml` to the database using `trazo sync permissions`. After adding or removing a permission declaration, always run the sync command before deploying. Roles referencing deleted permissions will have those entries stripped during the sync.
+:::

@@ -1,0 +1,205 @@
+---
+title: Error System
+description: How Trazo structures errors using typed core.Error values, error codes, HTTP status mapping, and the API response format.
+---
+
+Trazo uses a structured error system that guarantees consistent, informative error responses at the HTTP boundary while preventing internal implementation details from leaking to API consumers. All errors produced by the platform are typed `*core.Error` values created through `Core.Errors`.
+
+## The core.Error Type
+
+```go
+type Error struct {
+    Code       string         // e.g., "CORE.VALIDATION.REQUIRED_FIELD"
+    Message    string         // Human-readable message (English, for logs)
+    MessageKey string         // i18n key for client-side translation
+    Detail     string         // Additional context for the developer
+    Field      string         // The input field that caused the error (for validation)
+    Params     map[string]any // Template parameters for MessageKey interpolation
+    RequestID  string         // X-Request-ID of the originating request
+    Status     int            // HTTP status code
+    Cause      error          // Original wrapped error (never serialized to JSON)
+}
+```
+
+The `Cause` field holds the underlying Go error for logging purposes. It is never included in the JSON response sent to the client.
+
+## Error Factory
+
+Errors are constructed through `Core.Errors` to ensure that the `RequestID` and correct status codes are always set:
+
+```go
+type ErrorFactory interface {
+    New(code string, message string, status int) *Error
+    Validation(field string, messageKey string, params ...any) *Error
+    NotFound(resource string) *Error
+    Conflict(resource string) *Error
+    Forbidden() *Error
+}
+```
+
+### Usage in services
+
+```go
+func (s *RepairsService) GetByID(ctx context.Context, id string) (*Repair, error) {
+    repair, err := s.repo.GetByID(ctx, id)
+    if err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return nil, s.core.Errors.NotFound("repair")
+        }
+        return nil, s.core.Errors.New(
+            "CORE.INTERNAL.DATABASE",
+            "database error",
+            http.StatusInternalServerError,
+        ).WithCause(err)
+    }
+    return repair, nil
+}
+```
+
+## Error Code Format
+
+```
+CATEGORY.SUBCATEGORY.DETAIL
+```
+
+All built-in codes are namespaced under `CORE`. Domain modules should use their module name as the prefix (e.g., `REPAIRS.WORKFLOW.INVALID_TRANSITION`).
+
+## Built-in Error Codes
+
+### Authentication
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `CORE.AUTHENTICATION.INVALID_TOKEN` | 401 | JWT signature is invalid or malformed |
+| `CORE.AUTHENTICATION.EXPIRED_TOKEN` | 401 | JWT has passed its expiry time |
+
+### Authorization
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `CORE.AUTHORIZATION.FORBIDDEN` | 403 | The user lacks the required permission |
+| `CORE.AUTHORIZATION.NO_SCOPE` | 403 | The user has no scope grant for a scoped permission |
+
+### Validation
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `CORE.VALIDATION.REQUIRED_FIELD` | 400 | A required input field is missing or empty |
+| `CORE.VALIDATION.INVALID_INPUT` | 400 | An input field has an invalid value or format |
+
+### Not Found
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `CORE.NOT_FOUND.TENANT` | 404 | The requested tenant does not exist |
+| `CORE.NOT_FOUND.USER` | 404 | The requested user does not exist |
+
+### Conflict
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `CORE.CONFLICT.DUPLICATE` | 409 | A unique constraint was violated |
+
+### Internal
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `CORE.INTERNAL.DATABASE` | 500 | An unexpected database error occurred |
+| `CORE.INTERNAL.UNEXPECTED` | 500 | An unclassified internal error occurred |
+
+## HTTP Status Mapping
+
+The handler's `mapError()` function maps `*core.Error` values to HTTP responses:
+
+```go
+func mapError(err error) huma.StatusError {
+    var coreErr *core.Error
+    if !errors.As(err, &coreErr) {
+        // Non-core errors are never exposed. Sanitize to generic 500.
+        return huma.NewError(http.StatusInternalServerError, "an unexpected error occurred")
+    }
+    return huma.NewError(coreErr.Status, coreErr.Message)
+}
+```
+
+Non-`core.Error` errors — raw `sql` errors, `io` errors, library errors — are never forwarded to the client. They are logged internally and replaced with a generic 500 response. This prevents stack traces, SQL queries, or internal service names from appearing in API responses.
+
+## Type Checkers
+
+Helper functions allow code to inspect error types without string matching on codes:
+
+```go
+func IsNotFound(err error) bool
+func IsValidation(err error) bool
+func IsForbidden(err error) bool
+func IsConflict(err error) bool
+func IsAuthentication(err error) bool
+```
+
+These use `errors.As` internally and are safe to call on any error value, including nil.
+
+## API Response Format
+
+All error responses share the same JSON envelope:
+
+```json
+{
+  "error": {
+    "code": "CORE.VALIDATION.REQUIRED_FIELD",
+    "message": "The field 'assigned_to' is required.",
+    "message_key": "error.validation.required_field",
+    "field": "assigned_to",
+    "params": {},
+    "request_id": "01HXYZ..."
+  },
+  "errors": []
+}
+```
+
+For operations that can produce multiple validation errors simultaneously (e.g., form submissions), the `errors` array is populated instead of the top-level `error` field:
+
+```json
+{
+  "error": null,
+  "errors": [
+    {
+      "code": "CORE.VALIDATION.REQUIRED_FIELD",
+      "message": "The field 'title' is required.",
+      "message_key": "error.validation.required_field",
+      "field": "title",
+      "params": {},
+      "request_id": "01HXYZ..."
+    },
+    {
+      "code": "CORE.VALIDATION.INVALID_INPUT",
+      "message": "The field 'priority' must be one of: low, medium, high.",
+      "message_key": "error.validation.invalid_input",
+      "field": "priority",
+      "params": { "allowed": ["low", "medium", "high"] },
+      "request_id": "01HXYZ..."
+    }
+  ]
+}
+```
+
+The `message_key` field is intended for client-side i18n. Clients should translate using the key and `params`, falling back to `message` if the key is not found in their locale bundle.
+
+## Handler Pattern
+
+The canonical handler pattern for error handling is:
+
+```go
+func (h *RepairsHandler) handleGet(ctx context.Context, input *GetRepairInput) (*GetRepairOutput, error) {
+    repair, err := h.service.GetByID(ctx, input.ID)
+    if err != nil {
+        return nil, mapError(err)
+    }
+    return &GetRepairOutput{Body: repair}, nil
+}
+```
+
+Handlers do not inspect error types or write their own status codes. All of that logic lives in `mapError`. Services return `*core.Error`; handlers translate it to a Huma error.
+
+:::caution
+Never return raw Go errors from a handler. Always pass errors through `mapError`. If a handler returns a raw `error`, Huma will render it as a 500 with the full error string, potentially leaking internal implementation details.
+:::

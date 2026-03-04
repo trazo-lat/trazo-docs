@@ -1,0 +1,192 @@
+---
+title: Your First Tenant
+description: Register a user, create a tenant, authenticate, and verify tenant schema isolation using the Trazo REST API.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This walkthrough uses `curl` to exercise the Trazo API end-to-end: creating a user, provisioning a tenant, authenticating, and confirming that tenant schema isolation is working. Make sure the server is running on `localhost:8080` before you begin.
+
+<Aside type="tip">
+  All examples use `jq` to pretty-print JSON responses. Install it with `apt install jq` or `brew install jq`, or simply omit the `| jq` pipe if you prefer raw output.
+</Aside>
+
+---
+
+<Steps>
+
+1. ## Register a User
+
+   Create the first platform user. This user will later become the owner of the tenant.
+
+   ```bash
+   curl -s -X POST http://localhost:8080/api/v1/users \
+     -H "Content-Type: application/json" \
+     -d '{
+       "email": "alice@example.com",
+       "password": "SuperSecret123!",
+       "name": "Alice"
+     }' | jq
+   ```
+
+   Response `201 Created`:
+
+   ```json
+   {
+     "id": "usr_01J9...",
+     "email": "alice@example.com",
+     "name": "Alice",
+     "created_at": "2026-03-03T10:05:00Z"
+   }
+   ```
+
+   Save the returned `id` — you will need it when associating the user with the tenant.
+
+2. ## Create a Tenant
+
+   Provisioning a tenant creates a dedicated PostgreSQL schema (`tenant_<subdomain>`) and seeds it with the modules listed under `tenant.default_modules` in your config.
+
+   ```bash
+   curl -s -X POST http://localhost:8080/api/v1/tenants \
+     -H "Content-Type: application/json" \
+     -d '{
+       "name": "Acme Auto Repair",
+       "subdomain": "acme"
+     }' | jq
+   ```
+
+   Response `201 Created`:
+
+   ```json
+   {
+     "id": "ten_02K1...",
+     "name": "Acme Auto Repair",
+     "subdomain": "acme",
+     "schema": "tenant_acme",
+     "status": "active",
+     "created_at": "2026-03-03T10:06:00Z"
+   }
+   ```
+
+   Save the `id` value (`ten_02K1...`) as `TENANT_ID` for the next steps.
+
+   <Aside type="note">
+     The `subdomain` must be unique across the platform. It is used as both the URL identifier and the PostgreSQL schema name suffix (`tenant_acme`).
+   </Aside>
+
+3. ## Log In
+
+   Exchange credentials for an access token scoped to the tenant. Pass the `tenant_id` so the server resolves the correct schema and permission set.
+
+   ```bash
+   curl -s -X POST http://localhost:8080/api/v1/auth/login \
+     -H "Content-Type: application/json" \
+     -d '{
+       "email": "alice@example.com",
+       "password": "SuperSecret123!",
+       "tenant_id": "ten_02K1..."
+     }' | jq
+   ```
+
+   Response `200 OK`:
+
+   ```json
+   {
+     "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+     "refresh_token": "dGhpcyBpcyBhIHJlZnJlc2ggdG9rZW4...",
+     "expires_in": 900
+   }
+   ```
+
+   Export the access token for the remaining steps:
+
+   ```bash
+   export TOKEN="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+   ```
+
+4. ## Check Your Identity
+
+   Confirm the token is valid and inspect the claims resolved by the server: user ID, tenant ID, and active permissions.
+
+   ```bash
+   curl -s http://localhost:8080/api/v1/auth/me \
+     -H "Authorization: Bearer $TOKEN" | jq
+   ```
+
+   Response `200 OK`:
+
+   ```json
+   {
+     "user": {
+       "id": "usr_01J9...",
+       "email": "alice@example.com",
+       "name": "Alice"
+     },
+     "tenant": {
+       "id": "ten_02K1...",
+       "name": "Acme Auto Repair",
+       "subdomain": "acme"
+     },
+     "permissions": [
+       "users:read",
+       "users:write",
+       "audit:read"
+     ]
+   }
+   ```
+
+5. ## Verify the Tenant Schema
+
+   The CLI can confirm that the tenant's schema was created and that its module migrations are up to date.
+
+   ```bash
+   trazo db status
+   ```
+
+   ```
+   Container:   trazo-local-db  [running]
+   Database:    platform
+
+   Platform schema:
+     migrations applied: 8/8
+
+   Tenant schemas:
+     tenant_acme
+       status:     active
+       modules:    users, audit
+       migrations: 4/4
+   ```
+
+   You can also connect directly to verify with `psql`:
+
+   ```bash
+   psql "postgres://platform:platform@localhost:5432/platform" \
+     -c "\dn" | grep tenant
+   ```
+
+   ```
+    tenant_acme | platform
+   ```
+
+</Steps>
+
+---
+
+## What Happened Under the Hood
+
+When you called `POST /api/v1/tenants`, the platform:
+
+1. Inserted a row in the `platform.tenants` table.
+2. Executed `CREATE SCHEMA tenant_acme`.
+3. Applied migrations for each module listed in `tenant.default_modules` (`users`, `audit`) into `tenant_acme`.
+4. Emitted a `tenant.created` domain event to the outbox, which the background worker will deliver to any registered subscribers.
+
+Every subsequent authenticated request for this tenant sets `search_path = tenant_acme, platform` on the connection before executing queries, ensuring complete data isolation.
+
+---
+
+## Next Steps
+
+- Explore the full [API Reference](/api/) to see all available endpoints.
+- Read the [Configuration](/getting-started/configuration/) guide to understand how to tune the server for staging and production.
+- Learn how to build your own feature module in [Creating a Module](/guides/creating-a-module/).

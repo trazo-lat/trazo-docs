@@ -1,0 +1,208 @@
+---
+title: Module System
+description: How Trazo modules are structured, the required and optional interfaces they must implement, and the role of module.yaml in code generation and runtime behavior.
+---
+
+Every piece of functionality in Trazo — whether it is a core platform capability or a domain-specific feature — is packaged as a module. All modules implement the same interface, follow the same file layout, and are registered in the same module registry. This uniformity means that adding a new domain area to the platform does not require modifying any framework code.
+
+## Module Types
+
+| Type | Description | Lifecycle |
+|---|---|---|
+| `foundation` | Core platform capabilities that every tenant requires | Always enabled; cannot be disabled |
+| `domain` | Business-specific features shipped with the platform | Enabled or disabled per tenant |
+| `custom` | Tenant-specific extensions developed for a single customer | Enabled only for the owning tenant |
+
+Foundation modules include: `users`, `tenants`, `auth`, `audit`, `events`, `notifications`.
+
+## The Module Interface
+
+Every module must implement these 9 methods:
+
+```go
+type Module interface {
+    // Identity
+    Name()    string
+    Version() string
+    Type()    ModuleType  // foundation | domain | custom
+
+    // Assets
+    Config()     []byte    // contents of the embedded module.yaml
+    Migrations() embed.FS  // embedded SQL migration files
+
+    // Lifecycle
+    Init(core *Core) error
+    RegisterRoutes(router chi.Router)
+    Service() ModuleService
+    Shutdown(ctx context.Context) error
+}
+```
+
+| Method | Called when | Purpose |
+|---|---|---|
+| `Init` | Application startup | Receive `*Core`, wire dependencies, start background workers |
+| `RegisterRoutes` | After all modules are initialized | Mount HTTP handlers onto the router |
+| `Service` | On demand via `Core.Modules.Service(name)` | Return the module's public service interface |
+| `Shutdown` | Application shutdown signal | Gracefully stop background workers and flush state |
+
+:::note
+`Init` is called once per process, not once per request. Store `*Core` on your module struct during `Init`, then use it from your service and handler methods.
+:::
+
+## Optional Interfaces
+
+Modules can implement additional interfaces to opt into platform features without any central registration change.
+
+### EventSubscriber
+
+Implement this to declare which domain events the module listens to. The platform calls `Subscriptions()` during startup and registers the handlers automatically.
+
+```go
+type EventSubscriber interface {
+    Subscriptions() []EventSubscription
+}
+
+type EventSubscription struct {
+    Event    string
+    Version  int
+    Handler  EventHandler
+    Async    bool
+    Priority int
+}
+```
+
+### MetricsProvider
+
+Implement this to expose module-level Prometheus metrics. The platform will call `Metrics()` and register the returned collectors with the global registry.
+
+```go
+type MetricsProvider interface {
+    Metrics() []prometheus.Collector
+}
+```
+
+## File Structure Convention
+
+All modules follow the same directory layout. This is enforced by the code generator in `trazo-cli`.
+
+```
+modules/<type>/<name>/
+├── module.yaml       # Declarative configuration
+├── module.go         # Module interface implementation
+├── service.go        # Business logic
+├── handler.go        # HTTP handlers (Huma)
+├── repository.go     # Data access (sqlx + squirrel)
+├── models.go         # Domain types and DTOs
+├── migrations/
+│   ├── 001_create_<name>.sql
+│   └── 002_add_index.sql
+└── <name>_test.go    # Unit and integration tests
+```
+
+| File | Responsibility |
+|---|---|
+| `module.go` | Implements the `Module` interface. Wires together service, handler, and repository. |
+| `service.go` | Contains all business logic. Calls `Core` for permissions, auditing, and events. |
+| `handler.go` | Huma handler functions. Validates input, calls service, maps errors. |
+| `repository.go` | All SQL queries via `sqlx` and `squirrel`. No business logic here. |
+| `models.go` | Struct definitions for database rows, service inputs/outputs, and API DTOs. |
+
+## module.yaml
+
+The `module.yaml` file is the authoritative, declarative description of a module. It drives both compile-time code generation and runtime behavior.
+
+```yaml
+name: repairs
+version: 1
+type: domain
+display_name: Repairs
+description: Manages repair work orders and their lifecycle.
+
+permissions:
+  - action: read
+    scoped: true
+  - action: create
+    scoped: false
+  - action: update
+    scoped: true
+  - action: delete
+    scoped: true
+  - action: complete
+    scoped: false
+
+settings:
+  - key: default_priority
+    type: string
+    default: "medium"
+    description: Default priority assigned to new repair orders.
+
+routes:
+  prefix: /api/v1/repairs
+  auth: required
+
+notifications:
+  - event: repairs.created
+    default_channel: in_app
+  - event: repairs.completed
+    default_channel: email
+```
+
+### What module.yaml drives
+
+**Code generation (`trazo generate`):**
+- Generates permission constants in Go (e.g., `repairs.PermissionRead`, `repairs.PermissionCreate`).
+- Generates the `ModuleService` interface stub for the module.
+- Scaffolds handler and repository boilerplate.
+
+**Permission and scope sync (`trazo sync permissions`):**
+- Reads all `module.yaml` files and upserts the permission definitions into the database.
+- Ensures the permission registry is always in sync with the declared module permissions.
+
+**Runtime behavior:**
+- `Core.Config.Module(name, key)` reads the `settings` section.
+- The notification system uses the `notifications` section to provision default `NotificationRule` records when the module is enabled for a tenant.
+- The route prefix from `routes.prefix` is used by the router registration.
+
+:::tip
+Always define permissions in `module.yaml` rather than as ad-hoc strings in service code. The code generator will produce typed constants, which prevents typos and makes permission refactoring a compile-time operation.
+:::
+
+## Module Registration
+
+Modules are registered in the application's main entry point:
+
+```go
+func main() {
+    app := trazo.New()
+
+    app.RegisterModules(
+        // Foundation modules (always enabled)
+        auth.New(),
+        users.New(),
+        tenants.New(),
+        audit.New(),
+        events.New(),
+        notifications.New(),
+
+        // Domain modules (enabled per tenant)
+        repairs.New(),
+        inventory.New(),
+    )
+
+    app.Run()
+}
+```
+
+During startup, the platform calls `Init` on each module in registration order, then calls `RegisterRoutes` on each module after all `Init` calls complete. This ordering ensures that a module can safely call `Core.Modules.Service("users")` in its `RegisterRoutes` method because the users module is guaranteed to already be initialized.
+
+## Inter-module Communication
+
+Modules should not import each other's packages directly. Cross-module interaction uses two mechanisms:
+
+1. **Domain events via `Core.Events`**: Emit an event in module A, subscribe to it in module B. This keeps modules decoupled and allows the event delivery to be traced through the outbox.
+
+2. **Hooks via `Core.Hooks`**: Module A defines a hook point; module B registers a handler for it during `Init`. The caller receives all handler results aggregated into a `*HookResult`.
+
+:::caution
+If you find yourself importing another module's package to call its service directly, stop and use events or hooks instead. Direct imports between domain modules create tight coupling and make it impossible to enable/disable modules independently.
+:::

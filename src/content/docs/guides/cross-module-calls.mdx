@@ -1,0 +1,399 @@
+---
+title: Cross-Module Calls
+description: Patterns for communication between Trazo modules, including direct service calls via the contracts system and event-based decoupling via the transactional outbox.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Modules in Trazo are isolated units. They do not import each other's packages directly. Instead, two patterns are available for cross-module communication: direct service calls via the contracts system, and indirect communication via domain events.
+
+Choosing the right pattern is a key design decision:
+
+| Pattern | When to Use |
+|---|---|
+| Direct service call | You need the result synchronously (e.g., validate a foreign key, fetch related data) |
+| Domain events | The dependent action can happen asynchronously or in a different transaction |
+
+---
+
+## Direct Service Calls via the Module Registry
+
+The platform's `core.Modules` interface provides service discovery at runtime. Any module can look up another module's service by name:
+
+```go
+rawService := s.core.Modules.Service("vehicles")
+```
+
+`Service` returns `any`. You must type-assert it to the interface your module expects.
+
+```go
+vehiclesSvc, ok := rawService.(vehicles.VehiclesService)
+if !ok {
+    return nil, fmt.Errorf("vehicles module does not implement VehiclesService")
+}
+
+vehicle, err := vehiclesSvc.GetByID(ctx, input.VehicleID.String())
+if err != nil {
+    return nil, err
+}
+```
+
+<Aside type="caution">
+  If you call `core.Modules.Service("vehicles")` and the `vehicles` module is not registered, the call returns `nil`. Always check for `nil` before type-asserting, and decide at design time whether the dependency is required or optional.
+</Aside>
+
+---
+
+## The Contracts System
+
+The contracts system makes cross-module dependencies explicit, type-safe, and validated at startup rather than at runtime under production load.
+
+### How It Works
+
+1. The **producer** module declares the interface it exports in `internal/contracts/<name>.go`.
+2. The **consumer** module type-asserts the interface in its `Init()` method.
+3. Required dependencies are resolved at startup; missing ones fail fast.
+4. Optional dependencies store `nil` and are checked before use.
+
+### Step 1: Declare the Producer Interface
+
+The producing module (e.g., `vehicles`) creates a contract file that other modules import:
+
+```go
+// internal/contracts/vehicles.go
+package contracts
+
+import (
+    "context"
+)
+
+// VehicleRecord is a minimal view of a vehicle for cross-module use.
+// It avoids exposing the full internal Vehicle struct to consumers.
+type VehicleRecord struct {
+    ID       string
+    TenantID string
+    PlateNo  string
+    OwnerID  string
+}
+
+// VehiclesService is the interface the vehicles module exposes to the platform.
+// The vehicles module's service struct must implement this interface.
+type VehiclesService interface {
+    GetByID(ctx context.Context, id string) (*VehicleRecord, error)
+    Exists(ctx context.Context, id string) (bool, error)
+}
+```
+
+<Aside type="tip">
+  Use minimal DTO types (like `VehicleRecord`) in contracts rather than exposing the module's full internal model. This reduces coupling: the internal model can change freely as long as the contract DTO remains stable.
+</Aside>
+
+The `vehicles` module ensures its service struct satisfies the interface (a compile-time assertion):
+
+```go
+// internal/modules/domain/vehicles/service.go
+package vehicles
+
+import "github.com/trazo-dev/trazo-core-service/internal/contracts"
+
+// Compile-time interface check
+var _ contracts.VehiclesService = (*VehiclesService)(nil)
+
+type VehiclesService struct {
+    core *core.Core
+    repo *Repository
+}
+
+func (s *VehiclesService) GetByID(ctx context.Context, id string) (*contracts.VehicleRecord, error) {
+    v, err := s.repo.GetByID(ctx, id)
+    if err != nil {
+        return nil, err
+    }
+    return &contracts.VehicleRecord{
+        ID:       v.ID.String(),
+        TenantID: v.TenantID.String(),
+        PlateNo:  v.PlateNo,
+        OwnerID:  v.OwnerID.String(),
+    }, nil
+}
+
+func (s *VehiclesService) Exists(ctx context.Context, id string) (bool, error) {
+    _, err := s.repo.GetByID(ctx, id)
+    if err != nil {
+        return false, nil // Not found is not an error for Exists
+    }
+    return true, nil
+}
+```
+
+Also declare the contract in `module.yaml`:
+
+```yaml
+contracts:
+  produces:
+    - VehiclesService
+```
+
+---
+
+### Step 2: Resolve the Contract in the Consumer
+
+The consuming module (`repairs`) resolves the dependency during `Init()`:
+
+```go
+// internal/modules/domain/repairs/module.go
+package repairs
+
+import (
+    "fmt"
+
+    "github.com/trazo-dev/trazo-core-service/internal/contracts"
+    "github.com/trazo-dev/trazo-core-service/internal/core"
+)
+
+type RepairsModule struct {
+    core    *core.Core
+    service *RepairsService
+    handler *Handler
+}
+
+func (m *RepairsModule) Init(c *core.Core) error {
+    m.core = c
+
+    // Resolve required dependency: vehicles module
+    rawVehicles := c.Modules.Service("vehicles")
+    if rawVehicles == nil {
+        return fmt.Errorf("repairs module requires the vehicles module, but it is not registered")
+    }
+    vehiclesSvc, ok := rawVehicles.(contracts.VehiclesService)
+    if !ok {
+        return fmt.Errorf("vehicles module does not implement contracts.VehiclesService")
+    }
+
+    // Resolve optional dependency: notifications module
+    var notifySvc contracts.NotificationsService
+    if rawNotify := c.Modules.Service("notifications"); rawNotify != nil {
+        notifySvc, _ = rawNotify.(contracts.NotificationsService) // nil if wrong type
+    }
+
+    repo := NewRepository(c)
+    m.service = NewService(c, repo, vehiclesSvc, notifySvc)
+    m.handler = NewHandler(m.service)
+
+    return nil
+}
+```
+
+And declare the dependency in `module.yaml`:
+
+```yaml
+dependencies:
+  - vehicles
+
+contracts:
+  produces:
+    - RepairsService
+  consumes:
+    - VehiclesService
+```
+
+---
+
+### Step 3: Use the Dependency in the Service
+
+```go
+// internal/modules/domain/repairs/service.go
+package repairs
+
+import (
+    "context"
+
+    "github.com/trazo-dev/trazo-core-service/internal/contracts"
+    "github.com/trazo-dev/trazo-core-service/internal/core"
+)
+
+type RepairsService struct {
+    core        *core.Core
+    repo        *Repository
+    vehiclesSvc contracts.VehiclesService           // required
+    notifySvc   contracts.NotificationsService      // optional, may be nil
+}
+
+func NewService(
+    c *core.Core,
+    repo *Repository,
+    vehiclesSvc contracts.VehiclesService,
+    notifySvc contracts.NotificationsService,
+) *RepairsService {
+    return &RepairsService{
+        core:        c,
+        repo:        repo,
+        vehiclesSvc: vehiclesSvc,
+        notifySvc:   notifySvc,
+    }
+}
+
+func (s *RepairsService) Create(ctx context.Context, input CreateRepairInput) (*Repair, error) {
+    // Step 1 — Validate
+    if input.VehicleID == uuid.Nil {
+        return nil, s.core.Errors.Validation("vehicle_id", "required")
+    }
+
+    // Step 2 — Check permission
+    s.core.Permission.MustCan(ctx, "repairs.create")
+
+    // Validate that the vehicle exists and belongs to this tenant
+    exists, err := s.vehiclesSvc.Exists(ctx, input.VehicleID.String())
+    if err != nil {
+        return nil, err
+    }
+    if !exists {
+        return nil, s.core.Errors.NotFound("vehicle", input.VehicleID.String())
+    }
+
+    // ... rest of the 5-step pattern
+
+    // Optional: notify if notifications module is available
+    if s.notifySvc != nil {
+        _ = s.notifySvc.Notify(ctx, contracts.Notification{
+            UserID:  repair.AssignedTo.String(),
+            Message: "A new repair has been assigned to you.",
+        })
+    }
+
+    return repair, nil
+}
+```
+
+---
+
+## Event-Based Decoupling
+
+When the responding module does not need a synchronous result, use domain events. Events are emitted inside the database transaction via the transactional outbox and processed asynchronously by subscribers.
+
+### Emitting an Event
+
+```go
+// In repairs service — emit event after creating a repair
+err = s.core.DB.Tx(ctx, func(tx core.Tx) error {
+    repair, err = s.repo.CreateTx(ctx, tx, input)
+    if err != nil {
+        return err
+    }
+
+    return s.core.Events.EmitTx(ctx, tx, core.Event{
+        Name:          "repairs.created",
+        AggregateType: "repair",
+        AggregateID:   repair.ID.String(),
+        Payload: map[string]any{
+            "repair":      repair,
+            "assigned_to": repair.AssignedTo,
+        },
+    })
+})
+```
+
+### Subscribing to an Event
+
+Another module subscribes by declaring the event in its `module.yaml`:
+
+```yaml
+events:
+  subscribes:
+    - repairs.created
+```
+
+And registering the handler in its `Init()`:
+
+```go
+func (m *NotificationsModule) Init(c *core.Core) error {
+    c.Events.Subscribe("repairs.created", m.handleRepairCreated)
+    return nil
+}
+
+func (m *NotificationsModule) handleRepairCreated(ctx context.Context, event core.Event) error {
+    payload, ok := event.Payload.(map[string]any)
+    if !ok {
+        return nil
+    }
+
+    assignedTo, _ := payload["assigned_to"].(string)
+    if assignedTo == "" {
+        return nil
+    }
+
+    return m.service.SendNotification(ctx, contracts.Notification{
+        UserID:  assignedTo,
+        Message: "A new repair has been assigned to you.",
+    })
+}
+```
+
+<Aside type="note">
+  Event handlers must be idempotent. The outbox processor retries events on failure. If your handler sends an email or pushes a notification, use an idempotency key (the event ID is available via `event.ID`) to prevent duplicate delivery.
+</Aside>
+
+---
+
+## Direct Calls vs Events: Decision Guide
+
+```
+Does the caller need the result before returning?
+├── Yes → Direct service call via contracts
+└── No
+    ├── Can the action fail without failing the caller?
+    │   ├── Yes → Domain event
+    │   └── No  → Direct service call inside the same transaction
+    └── Does the action belong to a different bounded context?
+        ├── Yes → Domain event
+        └── No  → Consider whether it should be in the same module
+```
+
+### Direct Call: When the Result Matters Synchronously
+
+```go
+// Validating a foreign key before inserting — needs synchronous result
+exists, err := s.vehiclesSvc.Exists(ctx, input.VehicleID.String())
+if err != nil || !exists {
+    return nil, s.core.Errors.Validation("vehicle_id", "not_found")
+}
+```
+
+### Event: When the Side Effect Is Optional or Asynchronous
+
+```go
+// Sending a notification after repair creation — can fail without failing the repair
+return s.core.Events.EmitTx(ctx, tx, core.Event{
+    Name:    "repairs.created",
+    Payload: map[string]any{"repair": repair},
+})
+```
+
+---
+
+## Testing Cross-Module Dependencies
+
+In unit tests, inject the contract interface via the service constructor using a mock implementation:
+
+```go
+func TestRepairsService_Create_VehicleNotFound(t *testing.T) {
+    bundle := testutil.NewMockCore(t)
+
+    mockVehicles := &mockVehiclesService{}
+    mockVehicles.On("Exists", mock.Anything, vehicleID.String()).Return(false, nil)
+
+    svc := repairs.NewService(bundle.Core, repo, mockVehicles, nil)
+
+    _, err := svc.Create(ctx, repairs.CreateRepairInput{
+        VehicleID:   vehicleID,
+        Description: "Test",
+    })
+
+    assert.Error(t, err)
+    var coreErr *core.Error
+    assert.True(t, errors.As(err, &coreErr))
+    assert.Equal(t, 404, coreErr.HTTPStatus())
+}
+```
+
+This keeps unit tests isolated from the `vehicles` module entirely — no database, no server, no module registration required.

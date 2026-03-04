@@ -1,0 +1,131 @@
+---
+title: DB Commands
+description: Reference for trazo db subcommands — starting and stopping the local PostgreSQL Docker container, testing connectivity, inspecting database state, and switching tenant schema contexts.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The `trazo db` command group manages the local PostgreSQL Docker container used during development and provides utilities for inspecting and interacting with the database.
+
+## `trazo db local`
+
+Start a local PostgreSQL instance inside Docker. On the first run the container image is pulled and the container **`trazo-local-db`** is created. Subsequent runs start the existing container.
+
+```bash
+trazo db local
+```
+
+**Output:**
+
+```
+[trazo] Starting container trazo-local-db...
+[trazo] PostgreSQL ready on localhost:5432
+```
+
+### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--stop` | bool | `false` | Stop the running `trazo-local-db` container instead of starting it |
+| `--port` | int | `5432` | Map the container's PostgreSQL port to this host port |
+
+```bash
+# Stop the local database container
+trazo db local --stop
+
+# Start on a non-default port
+trazo db local --port 5433
+```
+
+<Aside type="caution">
+Changing `--port` only affects the host-side port mapping. Update `database.url` in your `trazo.yaml` (or set `TRAZO_DATABASE_URL`) to match the new port so the server and CLI can connect.
+</Aside>
+
+## `trazo db ping`
+
+Test that the CLI can reach the configured database. Useful for validating connection strings in CI or after changing configuration.
+
+```bash
+trazo db ping
+```
+
+**Success output:**
+
+```
+[trazo] Connected to database at localhost:5432 (latency: 2ms)
+```
+
+**Failure output:**
+
+```
+[trazo] ERROR: could not connect to database: dial tcp 127.0.0.1:5432: connect: connection refused
+```
+
+The command exits with a non-zero code on failure, making it safe to use in shell scripts and CI pipelines:
+
+```bash
+trazo db ping && echo "Database is reachable"
+```
+
+## `trazo db status`
+
+Display a summary of the current database: connection info, schema list, and the tables present in each schema.
+
+```bash
+trazo db status
+```
+
+**Example output:**
+
+```
+Database: postgres://trazo@localhost:5432/trazo_dev
+Schemas  : public, tenant_acme, tenant_globex
+─────────────────────────────────────────────
+Schema: public
+  users               (1,203 rows)
+  tenants             (2 rows)
+  memberships         (48 rows)
+  roles               (6 rows)
+  sessions            (312 rows)
+  service_principals  (1 row)
+
+Schema: tenant_acme
+  events_outbox       (0 rows)
+  audit_log           (87 rows)
+  ...
+```
+
+## `trazo db connect`
+
+Open an interactive `psql` session connected to the configured database. The session inherits all `psql` features including tab completion and `\dt`, `\d`, and `\copy` meta-commands.
+
+```bash
+trazo db connect
+```
+
+The CLI resolves the connection string from `trazo.yaml` (or environment variables) and passes it directly to `psql`. Ensure `psql` is installed and on your `PATH`.
+
+## `trazo db switch <tenant>`
+
+Switch the CLI's active schema context to the specified tenant's schema. Once switched, subsequent `trazo db connect` sessions and other schema-aware commands will target that tenant's schema by default.
+
+```bash
+trazo db switch acme
+```
+
+The `<tenant>` argument accepts either the tenant's **subdomain** or its **schema name** (e.g., `tenant_acme`).
+
+**Example:**
+
+```bash
+# Switch to tenant "acme" and open a psql session scoped to its schema
+trazo db switch acme
+trazo db connect
+# Inside psql:
+# SET search_path = tenant_acme;  (already set by the CLI)
+# \dt
+```
+
+<Aside type="tip">
+Use `trazo db status` to list all available tenant schemas before switching.
+</Aside>

@@ -1,0 +1,91 @@
+---
+title: Trazo Documentation
+description: Build multi-tenant SaaS applications with schema-per-tenant isolation, pluggable modules, and a full audit trail.
+template: splash
+hero:
+  tagline: A multi-tenant SaaS platform for service-oriented businesses — built in Go with schema-per-tenant PostgreSQL isolation, pluggable domain modules, and enterprise-grade observability.
+  actions:
+    - text: Get Started
+      link: /getting-started/introduction/
+      icon: right-arrow
+      variant: primary
+    - text: Architecture
+      link: /architecture/overview/
+      icon: open-book
+      variant: minimal
+    - text: API Reference
+      link: /api/
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## Why Trazo?
+
+<CardGrid>
+  <Card title="Schema-per-Tenant" icon="seti:db">
+    Every tenant gets its own PostgreSQL schema — complete data isolation with no row-level filtering leaks. Back up, restore, or migrate tenants independently.
+  </Card>
+  <Card title="Pluggable Modules" icon="puzzle">
+    Foundation, domain, and custom module types. Each module owns its routes, services, repositories, migrations, and event subscriptions. Add business logic without touching the core.
+  </Card>
+  <Card title="Full Audit Trail" icon="document">
+    Every state change is recorded with RFC 6902 JSON Patch diffs. Query history by resource, actor, action, or time range. Mask sensitive fields automatically.
+  </Card>
+  <Card title="Event-Driven" icon="rocket">
+    Transactional outbox pattern guarantees event delivery. Subscribe to domain events synchronously or asynchronously. Dead letter queue for failed processing.
+  </Card>
+  <Card title="Permission Scoping" icon="approve-check-circle">
+    Fine-grained permissions with SQL-level scope enforcement. Built-in scopes: all, own, assigned, team, created. Scopes translate directly to WHERE clauses.
+  </Card>
+  <Card title="CLI Tooling" icon="terminal">
+    `trazo` CLI handles local development, database management, migrations, and module validation. One command to spin up a local PostgreSQL instance.
+  </Card>
+</CardGrid>
+
+## Quick Links
+
+<CardGrid>
+  <LinkCard
+    title="5-Minute Quickstart"
+    description="Install, run locally, create your first tenant"
+    href="/getting-started/installation/"
+  />
+  <LinkCard
+    title="Core Architecture"
+    description="Understand the Core struct and 11 sub-interfaces"
+    href="/architecture/core-struct/"
+  />
+  <LinkCard
+    title="Build a Module"
+    description="Step-by-step guide to creating a domain module"
+    href="/guides/creating-a-module/"
+  />
+  <LinkCard
+    title="API Guides"
+    description="Authentication, tenants, users — with curl, Go, and JS examples"
+    href="/api-guides/authentication/"
+  />
+</CardGrid>
+
+## Two-Repo Architecture
+
+Trazo is split into two Go repositories:
+
+| Repository | Purpose | Key Tech |
+|------------|---------|----------|
+| `trazo-core-service` | API server, Core struct, domain modules | Go 1.24, Huma v2, chi, sqlx, squirrel |
+| `trazo-cli` | Database management, migrations, module tooling | Go 1.24, Cobra, Docker SDK |
+
+Both share the same `trazo.yaml` configuration format and connect to the same PostgreSQL instance.
+
+## What's Inside
+
+- **Getting Started** — Install, configure, and create your first tenant in minutes
+- **Architecture** — Deep dives into schema isolation, the module system, permissions, events, audit, and error handling
+- **Module Development** — Patterns for services, handlers, repositories, testing, and migrations
+- **API Reference** — Auto-generated from the OpenAPI spec with every endpoint, request/response schema, and status code
+- **API Guides** — Hand-written tutorials with multi-language examples for each API area
+- **CLI Reference** — Every `trazo` command with flags and examples
+- **Reference** — Lookup tables for types, interfaces, error codes, database schema, and configuration

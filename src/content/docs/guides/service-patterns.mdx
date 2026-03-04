@@ -1,0 +1,447 @@
+---
+title: Service Patterns
+description: The canonical 5-step service pattern used across all Trazo modules, with full examples for Create, Update, and Delete operations.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The service layer is where all business logic lives in Trazo. Every service method follows a strict 5-step pattern that guarantees consistency across the platform: validation, authorization, hooks, transactional persistence, and post-transaction side effects.
+
+This structure is not a suggestion — it is the contract the platform relies on for audit trails, event delivery guarantees, and extensibility. Deviating from it leads to missing audit records, events that fire without a committed transaction, or permission checks that never run.
+
+---
+
+## The 5-Step Pattern
+
+```go
+func (s *RepairsService) Create(ctx context.Context, input CreateRepairInput) (*Repair, error) {
+    // Step 1 — Validate
+    if input.VehicleID == uuid.Nil {
+        return nil, s.core.Errors.Validation("vehicle_id", "required")
+    }
+    if input.Description == "" {
+        return nil, s.core.Errors.Validation("description", "required")
+    }
+
+    // Step 2 — Check permission
+    s.core.Permission.MustCan(ctx, "repairs.create")
+
+    // Step 3 — Execute before hook
+    hookResult, err := s.core.Hooks.Execute(ctx, "repairs.before_create", input)
+    if err != nil {
+        return nil, err
+    }
+    if hookResult != nil {
+        if modified, ok := hookResult.(CreateRepairInput); ok {
+            input = modified
+        }
+    }
+
+    // Step 4 — Database transaction
+    var repair *Repair
+    err = s.core.DB.Tx(ctx, func(tx core.Tx) error {
+        var txErr error
+        repair, txErr = s.repo.CreateTx(ctx, tx, input)
+        if txErr != nil {
+            return txErr
+        }
+
+        return s.core.Events.EmitTx(ctx, tx, core.Event{
+            Name:          "repairs.created",
+            AggregateType: "repair",
+            AggregateID:   repair.ID.String(),
+            Payload:       map[string]any{"repair": repair},
+        })
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    // Step 5 — Post-transaction side effects (fire-and-forget)
+    s.core.Audit.Create(ctx, core.AuditEntry{
+        Action:   "repairs.created",
+        Resource: core.Resource{Type: "repair", ID: repair.ID.String()},
+    }, core.WithAuditAfter(repair))
+
+    s.core.Log.Logger(ctx).WithModule("repairs").WithAction("create").
+        Info("repair created", map[string]any{"id": repair.ID})
+
+    return repair, nil
+}
+```
+
+---
+
+## Step 1: Validate
+
+Validation is always first, before any I/O. This ensures you never reach the database with obviously invalid input.
+
+```go
+// Field-level validation
+if input.VehicleID == uuid.Nil {
+    return nil, s.core.Errors.Validation("vehicle_id", "required")
+}
+
+// Format validation
+if len(input.Description) > 2000 {
+    return nil, s.core.Errors.Validation("description", "max_length:2000")
+}
+
+// Cross-field validation
+if input.ScheduledAt != nil && input.ScheduledAt.Before(time.Now()) {
+    return nil, s.core.Errors.Validation("scheduled_at", "must_be_future")
+}
+```
+
+`s.core.Errors.Validation(field, code)` returns a `*core.Error` with HTTP status 422 and a structured body the client can use to highlight specific form fields.
+
+<Aside type="tip">
+  Do not query the database in Step 1. Validation is for structural and format checks only. Cross-entity consistency checks (e.g., "does this vehicle exist and belong to this tenant?") belong in Step 4 inside the transaction.
+</Aside>
+
+---
+
+## Step 2: Check Permission
+
+Permission checks run before any side effects. If the user is not authorized, no hook fires and no database row is read.
+
+```go
+// Panics with a 403 core.Error if the permission is not held
+s.core.Permission.MustCan(ctx, "repairs.create")
+```
+
+For read operations where scope matters, `MustCan` simply checks that the user holds *any* variant of the permission (e.g., `repairs.read.all` or `repairs.read.own`). The repository then calls `ApplyScope` to add the appropriate WHERE clause.
+
+```go
+// In a list service method
+s.core.Permission.MustCan(ctx, "repairs.read")
+// Scope is applied in the repository via ApplyScope, not here
+return s.repo.List(ctx, filter)
+```
+
+<Aside type="note">
+  `MustCan` panics with a structured `*core.Error` that the Huma middleware recovers and returns as a 403 response. You do not need to check the return value — if the method returns, the check passed.
+</Aside>
+
+---
+
+## Step 3: Execute Before Hook
+
+Hooks allow other modules or tenant-level customizations to intercept an operation before it hits the database.
+
+```go
+hookResult, err := s.core.Hooks.Execute(ctx, "repairs.before_create", input)
+if err != nil {
+    // A hook vetoed the operation — propagate the error
+    return nil, err
+}
+
+// Apply hook modifications if any
+if hookResult != nil {
+    if modified, ok := hookResult.(CreateRepairInput); ok {
+        input = modified
+    }
+}
+```
+
+If no handlers are registered for the hook name, `Execute` returns `nil, nil` and is a no-op. A hook handler can:
+
+- Return `nil` to allow the operation to proceed unchanged.
+- Return a modified copy of the input struct to alter the operation.
+- Return an error to abort the operation entirely (the error propagates to the caller).
+
+<Aside type="tip">
+  Always declare hooks in `module.yaml` under the `hooks` key. The CLI uses these declarations to generate documentation and validate that hook names follow the `<module>.<hook_name>` convention.
+</Aside>
+
+---
+
+## Step 4: Database Transaction
+
+All database writes and event emission happen inside a single transaction. `core.DB.Tx` begins a transaction, calls your closure, and commits on success or rolls back on any error.
+
+```go
+var repair *Repair
+err = s.core.DB.Tx(ctx, func(tx core.Tx) error {
+    var txErr error
+
+    // Primary write
+    repair, txErr = s.repo.CreateTx(ctx, tx, input)
+    if txErr != nil {
+        return txErr
+    }
+
+    // Secondary write in the same transaction
+    txErr = s.vehicleRepo.UpdateLastRepairTx(ctx, tx, input.VehicleID, repair.ID)
+    if txErr != nil {
+        return txErr
+    }
+
+    // Event emission inside the transaction (transactional outbox)
+    return s.core.Events.EmitTx(ctx, tx, core.Event{
+        Name:          "repairs.created",
+        AggregateType: "repair",
+        AggregateID:   repair.ID.String(),
+        Payload:       map[string]any{"repair": repair},
+    })
+})
+if err != nil {
+    return nil, err
+}
+```
+
+`Events.EmitTx` writes to an outbox table in the same transaction, so the event cannot be lost if the process crashes before an in-memory bus would have delivered it. See [Event Outbox](/architecture/event-outbox/) for the delivery model.
+
+<Aside type="caution">
+  Never capture mutable state from the closure's outer scope and modify it from inside the closure. Only the designated output variable (here, `repair`) should be assigned inside the transaction closure, and it should be assigned last, after all writes succeed.
+</Aside>
+
+---
+
+## Step 5: Post-Transaction Side Effects
+
+After the transaction commits, record the audit entry and emit structured logs. These are fire-and-forget — they must not be able to roll back the committed transaction.
+
+```go
+// Audit recording (asynchronous, non-blocking)
+s.core.Audit.Create(ctx, core.AuditEntry{
+    Action:   "repairs.created",
+    Resource: core.Resource{Type: "repair", ID: repair.ID.String()},
+}, core.WithAuditAfter(repair))
+
+// Structured logging
+s.core.Log.Logger(ctx).
+    WithModule("repairs").
+    WithAction("create").
+    Info("repair created", map[string]any{"id": repair.ID})
+```
+
+The `core.WithAuditAfter(repair)` option attaches a JSON snapshot of the new state to the audit record. For updates, use `core.WithAuditBefore(before)` and `core.WithAuditAfter(after)` together to record the diff.
+
+---
+
+## Update Variant
+
+The Update pattern adds a before-state fetch for the audit diff, and wraps the entire operation so the `before` state cannot be stale when the record reaches the audit entry.
+
+```go
+func (s *RepairsService) Update(ctx context.Context, id string, input UpdateRepairInput) (*Repair, error) {
+    // Step 1 — Validate
+    if input.Description != nil && len(*input.Description) > 2000 {
+        return nil, s.core.Errors.Validation("description", "max_length:2000")
+    }
+
+    // Step 2 — Check permission
+    s.core.Permission.MustCan(ctx, "repairs.update")
+
+    // Step 3 — Before hook
+    _, err := s.core.Hooks.Execute(ctx, "repairs.before_update", input)
+    if err != nil {
+        return nil, err
+    }
+
+    // Step 4 — Transaction: fetch before state, then update
+    var before, after *Repair
+    err = s.core.DB.Tx(ctx, func(tx core.Tx) error {
+        var txErr error
+
+        // Fetch the current state inside the transaction to lock the row
+        before, txErr = s.repo.GetByIDTx(ctx, tx, id)
+        if txErr != nil {
+            return txErr
+        }
+
+        after, txErr = s.repo.UpdateTx(ctx, tx, id, input)
+        if txErr != nil {
+            return txErr
+        }
+
+        return s.core.Events.EmitTx(ctx, tx, core.Event{
+            Name:          "repairs.updated",
+            AggregateType: "repair",
+            AggregateID:   after.ID.String(),
+            Payload:       map[string]any{"before": before, "after": after},
+        })
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    // Step 5 — Post-transaction side effects
+    s.core.Audit.Create(ctx, core.AuditEntry{
+        Action:   "repairs.updated",
+        Resource: core.Resource{Type: "repair", ID: after.ID.String()},
+    }, core.WithAuditBefore(before), core.WithAuditAfter(after))
+
+    s.core.Log.Logger(ctx).WithModule("repairs").WithAction("update").
+        Info("repair updated", map[string]any{"id": after.ID})
+
+    return after, nil
+}
+```
+
+<Aside type="tip">
+  Fetching `before` inside the transaction (using a `SELECT ... FOR UPDATE` or plain `SELECT` on the same `tx`) ensures the snapshot is consistent with the row state at the moment of the update, not an earlier read that could be stale.
+</Aside>
+
+---
+
+## Delete Variant
+
+Trazo uses soft deletes. The Delete method sets `deleted_at` rather than removing the row, and records a tombstone audit entry.
+
+```go
+func (s *RepairsService) Delete(ctx context.Context, id string) error {
+    // Step 1 — Validate
+    if id == "" {
+        return s.core.Errors.Validation("id", "required")
+    }
+
+    // Step 2 — Check permission
+    s.core.Permission.MustCan(ctx, "repairs.delete")
+
+    // Step 3 — Before hook
+    _, err := s.core.Hooks.Execute(ctx, "repairs.before_delete", map[string]any{"id": id})
+    if err != nil {
+        return err
+    }
+
+    // Step 4 — Transaction
+    var deleted *Repair
+    err = s.core.DB.Tx(ctx, func(tx core.Tx) error {
+        var txErr error
+
+        // Fetch before state so audit has the full snapshot
+        deleted, txErr = s.repo.GetByIDTx(ctx, tx, id)
+        if txErr != nil {
+            return txErr
+        }
+
+        txErr = s.repo.SoftDeleteTx(ctx, tx, id)
+        if txErr != nil {
+            return txErr
+        }
+
+        return s.core.Events.EmitTx(ctx, tx, core.Event{
+            Name:          "repairs.deleted",
+            AggregateType: "repair",
+            AggregateID:   id,
+            Payload:       map[string]any{"repair": deleted},
+        })
+    })
+    if err != nil {
+        return err
+    }
+
+    // Step 5 — Post-transaction side effects
+    s.core.Audit.Create(ctx, core.AuditEntry{
+        Action:   "repairs.deleted",
+        Resource: core.Resource{Type: "repair", ID: id},
+    }, core.WithAuditBefore(deleted))
+
+    s.core.Log.Logger(ctx).WithModule("repairs").WithAction("delete").
+        Info("repair deleted", map[string]any{"id": id})
+
+    return nil
+}
+```
+
+---
+
+## Status Transition Variant
+
+Status transitions are a specialized update that enforces the state machine defined in `module.yaml`.
+
+```go
+func (s *RepairsService) Transition(
+    ctx context.Context,
+    id string,
+    action string,
+    input TransitionInput,
+) (*Repair, error) {
+    // Step 1 — Validate transition action name
+    if action == "" {
+        return nil, s.core.Errors.Validation("action", "required")
+    }
+
+    // Step 2 — Check permission (transitions use the update permission)
+    s.core.Permission.MustCan(ctx, "repairs.update")
+
+    var before, after *Repair
+    err := s.core.DB.Tx(ctx, func(tx core.Tx) error {
+        var txErr error
+
+        // Fetch current state and validate transition is allowed
+        before, txErr = s.repo.GetByIDTx(ctx, tx, id)
+        if txErr != nil {
+            return txErr
+        }
+
+        // Validate the transition is defined in the state machine
+        nextStatus, txErr := s.core.Modules.ValidateTransition("repairs", before.Status, action)
+        if txErr != nil {
+            return s.core.Errors.Module("INVALID_TRANSITION", 422, "This status transition is not allowed.")
+        }
+
+        after, txErr = s.repo.UpdateStatusTx(ctx, tx, id, nextStatus, input)
+        if txErr != nil {
+            return txErr
+        }
+
+        return s.core.Events.EmitTx(ctx, tx, core.Event{
+            Name:          "repairs.status_changed",
+            AggregateType: "repair",
+            AggregateID:   id,
+            Payload: map[string]any{
+                "from":   before.Status,
+                "to":     after.Status,
+                "action": action,
+            },
+        })
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    s.core.Audit.Create(ctx, core.AuditEntry{
+        Action:   "repairs." + action,
+        Resource: core.Resource{Type: "repair", ID: id},
+    }, core.WithAuditBefore(before), core.WithAuditAfter(after))
+
+    return after, nil
+}
+```
+
+---
+
+## Read-Only Methods
+
+Read-only methods are simpler: no hook, no transaction wrapper, no audit recording. Only permission and scope checks apply.
+
+```go
+func (s *RepairsService) List(ctx context.Context, filter ListFilter) ([]Repair, int, error) {
+    // Permission check only — scope is applied by the repository
+    s.core.Permission.MustCan(ctx, "repairs.read")
+    return s.repo.List(ctx, filter)
+}
+
+func (s *RepairsService) GetByID(ctx context.Context, id string) (*Repair, error) {
+    if id == "" {
+        return nil, s.core.Errors.Validation("id", "required")
+    }
+    s.core.Permission.MustCan(ctx, "repairs.read")
+    return s.repo.GetByID(ctx, id)
+}
+```
+
+---
+
+## Common Anti-Patterns to Avoid
+
+| Anti-Pattern | Why It Breaks |
+|---|---|
+| Emitting events outside the transaction | Event fires even if the transaction rolls back |
+| Recording the audit entry inside the transaction | Audit write failure would roll back the business operation |
+| Calling `MustCan` after the first database read | Wasted I/O on unauthorized requests |
+| Querying the database in Step 1 (validation) | Creates a database call that is discarded if other validations fail later |
+| Ignoring the `hookResult` return value | Hooks cannot modify the input if you discard the modified copy |

@@ -1,0 +1,172 @@
+---
+title: Event Outbox
+description: How Trazo guarantees domain event delivery using the transactional outbox pattern, including the event structure, worker pool, retry policy, and dead letter queue.
+---
+
+Trazo implements the transactional outbox pattern to ensure that domain events are never silently lost due to process crashes, network failures, or subscriber errors. Events are not dispatched directly into memory; they are first written to a durable outbox table within the same database transaction as the originating business operation, then delivered to subscribers by a background processor.
+
+## Why the Outbox Pattern
+
+The naive approach — emit to an in-memory bus after a DB commit — has a reliability gap: the process can crash between the commit and the emission. The event is permanently lost. The outbox pattern eliminates this gap:
+
+1. The business operation and the event record are written in a **single atomic transaction**.
+2. If the process crashes after the commit, the event record persists in the database.
+3. The outbox processor picks up unprocessed events on the next startup and delivers them.
+
+## EventBus Interface
+
+```go
+type EventBus interface {
+    Emit(ctx context.Context, event Event) error
+    EmitTx(ctx context.Context, tx *DB, event Event) error
+    Subscribe(name string, handler EventHandler) error
+    SubscribeAll(handler EventHandler) error
+    Start(ctx context.Context) error
+    Stop(ctx context.Context) error
+}
+```
+
+`EmitTx` is the correct method for all domain events. `Emit` is available for fire-and-forget scenarios (e.g., telemetry) where at-most-once delivery is acceptable.
+
+## Emitting Events
+
+```go
+func (s *RepairsService) Complete(ctx context.Context, id string) (*Repair, error) {
+    if err := s.core.Permission.MustCan(ctx, "repairs.complete"); err != nil {
+        return nil, err
+    }
+
+    var repair *Repair
+    err := s.core.DB.Tx(ctx, func(tx *core.DB) error {
+        var txErr error
+        repair, txErr = s.repo.MarkComplete(ctx, tx, id)
+        if txErr != nil {
+            return txErr
+        }
+
+        return s.core.Events.EmitTx(ctx, tx, core.Event{
+            Name:          "repairs.completed",
+            Module:        "repairs",
+            AggregateType: "repair",
+            AggregateID:   id,
+            Version:       1,
+            Payload:       repair,
+        })
+    })
+    if err != nil {
+        return nil, err
+    }
+
+    return repair, nil
+}
+```
+
+Both the `MarkComplete` update and the outbox insert succeed or fail together. There is no window where the repair is marked complete but the event is missing.
+
+## Event Structure
+
+Each record in the `outbox` table corresponds to one `Event` value:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID | Unique event identifier |
+| `name` | string | Dot-separated event name (e.g., `repairs.completed`) |
+| `module` | string | Module that emitted the event |
+| `tenant_id` | UUID | Tenant context for the event |
+| `aggregate_type` | string | The resource type affected (e.g., `repair`) |
+| `aggregate_id` | string | The ID of the affected resource |
+| `version` | int | Schema version of the payload |
+| `payload` | JSONB | The event payload (typically the full resource snapshot) |
+| `metadata` | JSONB | Arbitrary key-value pairs (e.g., trace IDs, causation ID) |
+| `occurred_at` | timestamp | When the event was created (UTC) |
+| `sequence` | int64 | Monotonically increasing sequence number per tenant |
+| `processed_at` | timestamp | When the processor delivered the event (null if pending) |
+| `retry_count` | int | Number of delivery attempts so far |
+| `last_error` | string | Error message from the most recent failed attempt |
+
+## Outbox Processor
+
+The processor is started by calling `Core.Events.Start(ctx)` during application startup. It runs two loops:
+
+**Polling loop:** Scans the `outbox` table for rows where `processed_at IS NULL AND retry_count < max_retries`, ordered by `sequence ASC`. Rows are locked with `SELECT ... FOR UPDATE SKIP LOCKED` to support multiple processor instances without double-delivery.
+
+**Worker pool:** Delivers locked rows to their registered handlers using a configurable pool of goroutines.
+
+```
+default worker pool size: 10
+poll interval:            500ms (configurable)
+max_retries:              5 (configurable)
+```
+
+## Subscriptions
+
+```go
+// Subscribe to a specific event
+core.Events.Subscribe("repairs.completed", func(ctx context.Context, event core.Event) error {
+    // send notification, update analytics, etc.
+    return nil
+})
+
+// Subscribe to all events (useful for audit replay, analytics pipelines)
+core.Events.SubscribeAll(func(ctx context.Context, event core.Event) error {
+    return nil
+})
+```
+
+Subscriptions are registered during module `Init`. The `EventSubscriber` optional interface provides a declarative alternative:
+
+```go
+func (m *NotificationsModule) Subscriptions() []core.EventSubscription {
+    return []core.EventSubscription{
+        {
+            Event:    "repairs.completed",
+            Version:  1,
+            Handler:  m.service.OnRepairCompleted,
+            Async:    true,
+            Priority: 10,
+        },
+    }
+}
+```
+
+| Subscription field | Description |
+|---|---|
+| `Event` | The event name to subscribe to |
+| `Version` | Only deliver events with this payload version (0 = any) |
+| `Handler` | The handler function to call |
+| `Async` | If true, the handler runs in a separate goroutine and does not block delivery |
+| `Priority` | Higher priority handlers are called first within the same event |
+
+## Retry Policy
+
+When a handler returns an error, the processor:
+
+1. Increments `retry_count` on the outbox row.
+2. Records the error message in `last_error`.
+3. Schedules the next attempt with exponential backoff:
+   - Attempt 1: immediate
+   - Attempt 2: 30 seconds
+   - Attempt 3: 5 minutes
+   - Attempt 4: 1 hour
+   - Attempt 5: 6 hours
+
+After the fifth failure, the row is moved to the dead letter queue.
+
+## Dead Letter Queue
+
+Events that exceed `max_retries` are marked as permanently failed and inserted into the `dead_letter` table. The platform provides an API to:
+
+- List dead letter entries filtered by module, event name, or time range.
+- Inspect the full event payload and error history.
+- Re-queue a dead letter entry for reprocessing (resets `retry_count` to 0).
+- Discard an entry after manual investigation confirms it is safe to drop.
+
+:::caution
+Do not ignore the dead letter queue. Entries there represent business operations whose side-effects were not fully applied. Each entry should be investigated and either re-queued (if the handler is now fixed) or manually compensated.
+:::
+
+## Multiple Processor Instances
+
+The `SELECT ... FOR UPDATE SKIP LOCKED` locking strategy allows multiple application instances to run the outbox processor simultaneously without double-delivering events. Each instance locks a batch of rows, processes them, and marks them as `processed_at = NOW()`. Other instances skip those locked rows.
+
+This means the outbox processor is safe to run in horizontally scaled deployments without any additional coordination.

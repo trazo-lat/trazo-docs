@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 36" fill="none">
+  <rect width="36" height="36" rx="6" fill="#2563eb"/>
+  <text x="18" y="23" dominant-baseline="middle" text-anchor="middle" fill="white" font-family="system-ui, sans-serif" font-weight="700" font-size="20">T</text>
+  <text x="78" y="24" dominant-baseline="middle" text-anchor="middle" fill="currentColor" font-family="system-ui, sans-serif" font-weight="600" font-size="22">trazo</text>
+</svg>

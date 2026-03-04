@@ -1,0 +1,93 @@
+---
+title: CLI Overview
+description: An overview of the trazo CLI tool, its command groups, global flags, and configuration precedence for database management, migrations, and module tooling.
+---
+
+import { Aside, Badge } from '@astrojs/starlight/components';
+
+The `trazo` CLI is the primary developer tool for managing every aspect of a Trazo project from the terminal. It covers local database lifecycle, schema migrations, and module development utilities — all driven by the same `trazo.yaml` configuration file used by the server.
+
+## Installation
+
+The CLI is built from the `trazo-cli` repository:
+
+```bash
+git clone https://github.com/your-org/trazo-cli
+cd trazo-cli
+go build -o trazo ./cmd/trazo
+sudo mv trazo /usr/local/bin/
+```
+
+Verify the installation:
+
+```bash
+trazo --version
+```
+
+## Global Flags
+
+These flags are accepted by every `trazo` command and must be placed before the subcommand name.
+
+| Flag | Short | Type | Default | Description |
+|------|-------|------|---------|-------------|
+| `--config` | `-c` | string | `trazo.yaml` | Path to the Trazo configuration file |
+| `--verbose` | `-v` | bool | `false` | Enable verbose output including debug logs |
+
+```bash
+# Use a custom config file
+trazo --config /etc/trazo/staging.yaml db status
+
+# Enable verbose output
+trazo --verbose migrate up
+```
+
+## Configuration Precedence
+
+When the CLI resolves a configuration value it evaluates sources in the following order — higher entries win over lower ones:
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 (highest) | CLI flags | `--config ./my.yaml` |
+| 2 | Environment variables | `TRAZO_DATABASE_URL=postgres://...` |
+| 3 | Project config file | `trazo.yaml` in the current directory |
+| 4 | User-local config | `~/.trazo/local.json` |
+| 5 (lowest) | Built-in defaults | port `5432`, env `local` |
+
+<Aside type="tip">
+Use `~/.trazo/local.json` for secrets and personal overrides (database passwords, JWT secrets) so they are never committed to source control. The file supports the same keys as `trazo.yaml` in JSON form.
+</Aside>
+
+## Command Groups
+
+The CLI is organized into three top-level command groups:
+
+| Group | Description |
+|-------|-------------|
+| `trazo db` | Manage the local PostgreSQL Docker container and inspect database state |
+| `trazo migrate` | Run, rollback, and inspect Atlas-format schema migrations |
+| `trazo module` | Validate and generate code from `module.yaml` manifests |
+
+## Local Development Container
+
+For local development the CLI manages a Docker container named **`trazo-local-db`** running PostgreSQL. This container is created and started by `trazo db local` and can be stopped with `trazo db local --stop`.
+
+```bash
+# Start the local database (creates the container on first run)
+trazo db local
+
+# Stop the running container
+trazo db local --stop
+```
+
+The container name `trazo-local-db` is fixed and used by the other `db` subcommands to resolve the connection string when no explicit `database.url` is set in the config file.
+
+## Getting Help
+
+Every command and subcommand supports `--help`:
+
+```bash
+trazo --help
+trazo db --help
+trazo migrate --help
+trazo module --help
+```

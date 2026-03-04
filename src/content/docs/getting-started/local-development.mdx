@@ -1,0 +1,184 @@
+---
+title: Local Development
+description: Start a local PostgreSQL database with the Trazo CLI, run migrations, and launch the API server for development.
+---
+
+import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+This guide assumes you have completed [Installation](/getting-started/installation/) and have `trazo` and `trazo-server` available on your `PATH` (or are prefixing commands with the binary path).
+
+---
+
+## Step 1 — Start the Local Database
+
+The `trazo db local` command starts a PostgreSQL 15 container named `trazo-local-db` using Docker. It creates the platform database and the default platform user automatically.
+
+```bash
+trazo db local
+```
+
+Expected output:
+
+```
+Starting trazo-local-db...
+Container trazo-local-db started on port 5432
+Platform database ready.
+```
+
+<Aside type="note">
+  The container is configured to match the default `trazo.yaml` connection string:
+  `postgres://platform:platform@localhost:5432/platform?sslmode=disable`
+
+  If you change the port or credentials in your config, pass the corresponding flags:
+
+  ```bash
+  trazo db local --port 5433 --password mysecret
+  ```
+</Aside>
+
+### Check Database Status
+
+```bash
+trazo db status
+```
+
+```
+Container:  trazo-local-db  [running]
+Host:       localhost:5432
+Database:   platform
+User:       platform
+```
+
+### Verify Connectivity
+
+```bash
+trazo db ping
+```
+
+```
+OK  connected to postgres://platform:****@localhost:5432/platform
+```
+
+If `ping` fails, ensure Docker is running and the container started without errors (`docker ps | grep trazo-local-db`).
+
+---
+
+## Step 2 — Run Migrations
+
+Apply the platform-level migrations (creates the `platform` schema, tenants table, users table, etc.):
+
+```bash
+trazo migrate up
+```
+
+```
+Applying migrations...
+  [1/8] create_platform_schema          OK
+  [2/8] create_tenants_table            OK
+  [3/8] create_users_table              OK
+  [4/8] create_sessions_table           OK
+  [5/8] create_audit_log_table          OK
+  [6/8] create_events_table             OK
+  [7/8] create_permissions_table        OK
+  [8/8] create_notifications_table      OK
+Migration complete. 8 migrations applied.
+```
+
+<Aside type="tip">
+  To check which migrations have already been applied without running them:
+
+  ```bash
+  trazo migrate status
+  ```
+</Aside>
+
+---
+
+## Step 3 — Start the Server
+
+```bash
+trazo-server
+```
+
+The server starts and listens on `0.0.0.0:8080` by default. You should see structured log output similar to:
+
+```json
+{"level":"info","ts":"2026-03-03T10:00:00Z","msg":"Trazo server starting","env":"local","port":8080}
+{"level":"info","ts":"2026-03-03T10:00:01Z","msg":"Module registered","module":"users"}
+{"level":"info","ts":"2026-03-03T10:00:01Z","msg":"Module registered","module":"audit"}
+{"level":"info","ts":"2026-03-03T10:00:01Z","msg":"Event worker pool started","workers":10}
+{"level":"info","ts":"2026-03-03T10:00:01Z","msg":"Server ready","addr":"0.0.0.0:8080"}
+```
+
+Override the port or log level without editing `trazo.yaml` using flags or environment variables:
+
+<Tabs>
+  <TabItem label="Flags">
+    ```bash
+    trazo-server --port 9090 --log-level debug
+    ```
+  </TabItem>
+  <TabItem label="Environment Variables">
+    ```bash
+    TRAZO_SERVER_PORT=9090 TRAZO_LOG_LEVEL=debug trazo-server
+    ```
+  </TabItem>
+</Tabs>
+
+---
+
+## Step 4 — Verify the Server is Running
+
+```bash
+curl http://localhost:8080/healthz
+```
+
+```json
+{"status":"ok","version":"0.x.x","env":"local"}
+```
+
+A `200 OK` response confirms the server is up and connected to the database.
+
+---
+
+## Stopping the Local Database
+
+When you are done developing, stop the container:
+
+```bash
+trazo db local --stop
+```
+
+```
+Container trazo-local-db stopped.
+```
+
+The container and its data volume are preserved. The next time you run `trazo db local` it will restart in seconds without re-running migrations.
+
+To destroy the container and its data entirely (useful for a clean slate):
+
+```bash
+trazo db local --destroy
+```
+
+<Aside type="caution">
+  `--destroy` permanently deletes all local database data. You will need to re-run `trazo migrate up` afterwards.
+</Aside>
+
+---
+
+## Typical Development Loop
+
+```bash
+# Start everything
+trazo db local
+trazo migrate up
+trazo-server
+
+# Develop, make changes...
+
+# Stop when done
+trazo db local --stop
+```
+
+Continue to [Your First Tenant](/getting-started/first-tenant/) to create a tenant and make your first authenticated API request.

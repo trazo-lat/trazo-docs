@@ -1,0 +1,811 @@
+---
+title: module.yaml Specification
+description: Definitive reference for every field in a Trazo module.yaml manifest — contracts, scopes, permissions, statuses, transitions, references, approvals, events, hooks, settings, attachments, comments, custom fields, audit, metrics, and errors.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The `module.yaml` file is the single source of truth for a Trazo module. It declares everything the platform needs to understand, validate, enforce, and generate code for the module: permissions, state machines, event contracts, data references, audit rules, and more.
+
+The `trazo module validate` command checks the manifest against this specification. The `trazo module generate` command uses it to emit Go boilerplate.
+
+---
+
+## Top-Level Structure
+
+```yaml
+name: repairs          # required — lowercase, alphanumeric, hyphens allowed
+version: "1.0.0"       # required — semver string
+type: domain           # required — foundation | domain | custom
+description: "Manages vehicle repair orders from intake to completion."  # required
+
+dependencies:          # optional — list of module names this module depends on
+  - vehicles
+  - users
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `name` | Yes | string | Unique lowercase identifier. Must match the Go package name. |
+| `version` | Yes | string | Semver string (e.g., `"1.0.0"`). Quoted to preserve string type in YAML. |
+| `type` | Yes | string | `foundation` — a platform primitive; `domain` — a business domain module; `custom` — a tenant-specific extension. |
+| `description` | Yes | string | One-sentence human-readable description. |
+| `dependencies` | No | []string | Modules that must be loaded before this one. The platform validates the dependency graph at startup. |
+
+---
+
+## Contracts
+
+Declares which events this module produces and which events it consumes. Used for documentation and dependency validation.
+
+```yaml
+contracts:
+  produces:
+    - repairs.created
+    - repairs.status_changed
+    - repairs.completed
+
+  consumes:
+    - vehicles.registered
+    - users.invited
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `produces` | []string | Event names this module emits via the event bus. |
+| `consumes` | []string | Event names this module subscribes to. |
+
+---
+
+## Scopes
+
+Scopes define named data-visibility filters. When a permission is checked, the platform resolves the actor's scope and appends the scope's SQL filter to the query.
+
+```yaml
+scopes:
+  - name: own
+    description: "User can only see their own repairs"
+    filter: "assigned_to = :user_id"
+    priority: 10
+
+  - name: team
+    description: "User can see all repairs assigned to their teams"
+    filter: "assigned_to_team = ANY(:user_team_ids)"
+    priority: 20
+
+  - name: tenant
+    description: "User can see all repairs in the tenant"
+    filter: ""          # empty filter = no restriction
+    priority: 30
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `name` | Yes | string | Unique scope identifier within the module. |
+| `description` | No | string | Human-readable explanation. |
+| `filter` | Yes | string | SQL WHERE fragment. Supported placeholders: `:user_id`, `:user_team_ids`. Empty string means no data restriction. |
+| `priority` | No | int | Higher priority scopes take precedence when a user qualifies for multiple. |
+
+**Supported filter placeholders:**
+
+| Placeholder | Resolves To |
+|-------------|-------------|
+| `:user_id` | The authenticated user's UUID |
+| `:user_team_ids` | Array of team UUIDs the user belongs to |
+
+---
+
+## Permissions
+
+Declares every permission key the module defines. These are registered globally and can be assigned to roles.
+
+```yaml
+permissions:
+  - key: repairs.create
+    name: Create Repair
+    description: "Create a new repair order"
+    scope: tenant
+
+  - key: repairs.view
+    name: View Repair
+    description: "View repair orders"
+    scope: own           # default scope when not overridden by the role
+
+  - key: repairs.update
+    name: Update Repair
+    description: "Edit repair details and status"
+    scope: team
+
+  - key: repairs.delete
+    name: Delete Repair
+    description: "Permanently delete a repair record"
+    scope: tenant
+
+  - key: repairs.approve
+    name: Approve Repair
+    description: "Approve a repair for execution"
+    scope: tenant
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `key` | Yes | string | Globally unique dot-separated key in `<module>.<action>` format. Must be lowercase. |
+| `name` | Yes | string | Human-readable label shown in the roles UI. |
+| `description` | No | string | Detailed explanation. |
+| `scope` | Yes | string | Default scope name (must match a scope defined in `scopes`). Roles may override this. |
+
+---
+
+## Statuses
+
+Defines the state machine for the module's primary entity. Every entity begins in the `initial` status and can only move to a `terminal` status through declared transitions.
+
+```yaml
+statuses:
+  - name: pending
+    label: "Pending"
+    description: "Repair has been created but not yet started"
+    initial: true
+    color: "#F59E0B"
+
+  - name: in_progress
+    label: "In Progress"
+    description: "Technician is actively working on the repair"
+    active: true
+    color: "#3B82F6"
+
+  - name: waiting_parts
+    label: "Waiting for Parts"
+    description: "Work is paused pending parts arrival"
+    active: true
+    color: "#8B5CF6"
+
+  - name: completed
+    label: "Completed"
+    description: "Repair has been finished and signed off"
+    terminal: true
+    color: "#10B981"
+
+  - name: cancelled
+    label: "Cancelled"
+    description: "Repair was cancelled before completion"
+    terminal: true
+    color: "#EF4444"
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `name` | Yes | string | Lowercase status identifier. Referenced by `transitions`. |
+| `label` | Yes | string | Human-readable display label. |
+| `description` | No | string | Explanation of what this status means. |
+| `initial` | No | bool | Exactly one status must have `initial: true`. New entities start here. |
+| `active` | No | bool | Informational flag; marks statuses where the entity is being worked on. |
+| `terminal` | No | bool | Entities in a terminal status cannot be transitioned further. |
+| `color` | No | string | Hex color code for UI display. |
+
+---
+
+## Transitions
+
+Declares which status changes are allowed and what data, preconditions, and side-effects accompany each change.
+
+```yaml
+transitions:
+  - name: start
+    label: "Start Work"
+    from: pending
+    to: in_progress
+    permission: repairs.update
+    input:
+      - field: technician_id
+        type: uuid
+        label: "Assigned Technician"
+        required: true
+      - field: estimated_hours
+        type: number
+        label: "Estimated Hours"
+        required: false
+    preconditions:
+      - rule: "assigned_vehicle_exists"
+        message: "A vehicle must be assigned before starting work"
+    trigger: repairs.started
+
+  - name: complete
+    label: "Mark as Completed"
+    from: in_progress
+    to: completed
+    permission: repairs.update
+    confirm: true        # require an explicit confirmation step in the UI
+    input:
+      - field: completion_notes
+        type: text
+        label: "Completion Notes"
+        required: true
+      - field: final_cost
+        type: money
+        label: "Final Cost"
+        required: true
+    trigger: repairs.completed
+    exclude_from:
+      - repairs.view     # users with only view permission cannot trigger this
+
+  - name: cancel
+    label: "Cancel Repair"
+    from: "*"            # wildcard — can cancel from any non-terminal status
+    to: cancelled
+    permission: repairs.delete
+    confirm: true
+    input:
+      - field: cancellation_reason
+        type: select
+        label: "Cancellation Reason"
+        required: true
+        options:
+          - value: customer_request
+            label: "Customer Request"
+          - value: parts_unavailable
+            label: "Parts Unavailable"
+          - value: other
+            label: "Other"
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `name` | Yes | string | Unique transition identifier. Used as the API action slug. |
+| `label` | Yes | string | Human-readable button label in the UI. |
+| `from` | Yes | string or `"*"` | Source status name. Use `"*"` as a wildcard to allow the transition from any non-terminal status. |
+| `to` | Yes | string | Target status name. Must be declared in `statuses`. |
+| `permission` | Yes | string | Permission key required to execute this transition. |
+| `confirm` | No | bool | If `true`, the UI must show an explicit confirmation dialog before submitting. |
+| `trigger` | No | string | Event name to emit after a successful transition. |
+| `exclude_from` | No | []string | Additional permissions whose holders are explicitly blocked from this transition even if they hold the main `permission`. |
+
+### Input Field Types
+
+| Type | Description |
+|------|-------------|
+| `text` | Single-line or multiline text |
+| `number` | Numeric value (integer or float) |
+| `money` | Monetary amount (stored as integer cents) |
+| `uuid` | UUID reference to another entity |
+| `date` | ISO 8601 date string |
+| `datetime` | ISO 8601 datetime string |
+| `boolean` | True / false toggle |
+| `select` | Single selection from a predefined list of `options` |
+| `multiselect` | Multiple selections from a predefined list |
+| `file` | File upload (uses StorageManager) |
+
+### Input Field Fields
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `field` | Yes | string | Snake-case field name |
+| `type` | Yes | string | One of the input types above |
+| `label` | Yes | string | Human-readable label |
+| `required` | No | bool | Whether the field must be provided (default: `false`) |
+| `options` | Conditional | []object | Required when `type` is `select` or `multiselect`. Each option has `value` and `label`. |
+
+---
+
+## References
+
+Declares relationships between this module's primary entity and entities in other modules.
+
+```yaml
+references:
+  - type: one
+    module: vehicles
+    entity: vehicle
+    field: vehicle_id
+    label: "Vehicle"
+    required: true
+
+  - type: many
+    module: parts
+    entity: part
+    field: parts
+    label: "Parts Used"
+    required: false
+
+  - type: many_with_quantity
+    module: inventory
+    entity: item
+    field: materials
+    label: "Materials"
+    required: false
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `type` | Yes | string | `one` — single FK reference; `many` — M2M join; `many_with_quantity` — M2M join with an integer quantity column. |
+| `module` | Yes | string | Name of the referenced module. |
+| `entity` | Yes | string | Lowercase entity name within the referenced module. |
+| `field` | Yes | string | Field name on this module's entity. |
+| `label` | Yes | string | Human-readable label for the UI. |
+| `required` | No | bool | Whether the reference must be set. |
+
+---
+
+## Approvals
+
+Declares approval workflows that must be completed before certain transitions proceed.
+
+```yaml
+approvals:
+  - name: manager_approval
+    label: "Manager Approval"
+    description: "A manager must approve repairs over $500"
+    permission: repairs.approve
+    required_for_transition: complete
+    condition: "final_cost > 50000"   # condition in cents; evaluated server-side
+    timeout: 72h
+    on_timeout: auto_reject
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `name` | Yes | string | Unique approval identifier. |
+| `label` | Yes | string | Human-readable label. |
+| `description` | No | string | Explanation shown to approvers. |
+| `permission` | Yes | string | Permission required to approve. |
+| `required_for_transition` | Yes | string | Transition name that is blocked until approval is granted. |
+| `condition` | No | string | Server-side expression that determines when approval is required. Omit to always require approval. |
+| `timeout` | No | duration | How long before the approval request expires (e.g., `72h`). |
+| `on_timeout` | No | string | What happens on timeout: `auto_approve` or `auto_reject`. |
+
+---
+
+## Events
+
+Declares the events this module emits and the events it subscribes to, with payload schemas.
+
+```yaml
+events:
+  emits:
+    - name: repairs.created
+      version: 1
+      description: "Emitted when a new repair order is created"
+      payload:
+        - field: repair_id
+          type: uuid
+        - field: vehicle_id
+          type: uuid
+        - field: tenant_id
+          type: uuid
+
+    - name: repairs.status_changed
+      version: 1
+      description: "Emitted on every status transition"
+      payload:
+        - field: repair_id
+          type: uuid
+        - field: from_status
+          type: string
+        - field: to_status
+          type: string
+
+  subscribes:
+    - event: vehicles.decommissioned
+      versions: [1]
+      handler: OnVehicleDecommissioned
+      async: true
+      priority: 10
+```
+
+### `emits` fields
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `name` | Yes | string | Event name in `<module>.<event>` format. |
+| `version` | Yes | int | Payload schema version. Increment when the payload changes in a breaking way. |
+| `description` | No | string | What causes this event to be emitted. |
+| `payload` | No | []object | List of payload fields with `field` (name) and `type` (string, uuid, int, bool, object, array). |
+
+### `subscribes` fields
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `event` | Yes | string | Event name to subscribe to. |
+| `versions` | No | []int | Payload versions to handle. Empty = all versions. |
+| `handler` | Yes | string | Go function name in the module package that handles the event. |
+| `async` | No | bool | If `true`, the handler runs in a worker pool goroutine rather than inline. |
+| `priority` | No | int | Execution priority relative to other handlers for the same event. |
+
+---
+
+## Hooks
+
+Declares lifecycle hooks this module registers on the platform or other modules.
+
+```yaml
+hooks:
+  - hook: tenant.before_delete
+    handler: OnBeforeTenantDelete
+    description: "Cancel all open repairs before the tenant is deleted"
+
+  - hook: users.before_invite
+    handler: OnBeforeUserInvite
+    description: "Check repair assignment quota before inviting a new user"
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `hook` | Yes | string | Hook name in `<module>.<lifecycle_event>` format. |
+| `handler` | Yes | string | Go function name in the module package. |
+| `description` | No | string | What this hook does and why. |
+
+---
+
+## Settings
+
+Declares module-level configuration keys that tenants can customize via the admin UI or API.
+
+```yaml
+settings:
+  - key: auto_assign_technician
+    type: boolean
+    label: "Auto-assign Technician"
+    description: "Automatically assign available technicians to new repairs"
+    default: false
+
+  - key: max_open_repairs_per_technician
+    type: number
+    label: "Max Open Repairs per Technician"
+    description: "Maximum concurrent open repairs a technician can be assigned"
+    default: 5
+    min: 1
+    max: 50
+
+  - key: default_sla_hours
+    type: number
+    label: "Default SLA (hours)"
+    description: "Target completion time for standard repairs"
+    default: 48
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `key` | Yes | string | Setting identifier (snake_case). |
+| `type` | Yes | string | `string`, `number`, `boolean`, `select`, `multiselect`. |
+| `label` | Yes | string | Human-readable label. |
+| `description` | No | string | Explanation shown in the settings UI. |
+| `default` | No | any | Default value applied at tenant provisioning. |
+| `min` / `max` | No | number | Numeric range validation (for `number` type). |
+| `options` | Conditional | []object | Required for `select` and `multiselect` types. |
+
+---
+
+## Attachments
+
+Enables file attachment support on the module's primary entity.
+
+```yaml
+attachments:
+  enabled: true
+  max_size_mb: 20
+  allowed_types:
+    - image/jpeg
+    - image/png
+    - application/pdf
+  permission_upload: repairs.update
+  permission_view: repairs.view
+  permission_delete: repairs.delete
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `enabled` | Yes | bool | Whether attachments are enabled for this module. |
+| `max_size_mb` | No | int | Maximum file size in megabytes (default: 10). |
+| `allowed_types` | No | []string | MIME type allowlist. Empty = all types permitted. |
+| `permission_upload` | No | string | Permission key required to upload files. |
+| `permission_view` | No | string | Permission key required to view files. |
+| `permission_delete` | No | string | Permission key required to delete files. |
+
+---
+
+## Comments
+
+Enables a threaded comment system on the module's primary entity.
+
+```yaml
+comments:
+  enabled: true
+  permission_create: repairs.update
+  permission_view: repairs.view
+  permission_delete: repairs.delete
+  allow_internal: true    # internal comments visible only to staff, not the customer
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `enabled` | Yes | bool | Whether comments are enabled. |
+| `permission_create` | No | string | Permission key required to post comments. |
+| `permission_view` | No | string | Permission key required to read comments. |
+| `permission_delete` | No | string | Permission key required to delete comments. |
+| `allow_internal` | No | bool | If `true`, comments can be flagged as internal (staff-only). |
+
+---
+
+## Custom Fields
+
+Allows tenants to define additional fields on the module's entity without code changes.
+
+```yaml
+custom_fields:
+  enabled: true
+  permission_manage: repairs.update
+  types:
+    - text
+    - number
+    - boolean
+    - date
+    - select
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `enabled` | Yes | bool | Whether tenants can define custom fields. |
+| `permission_manage` | No | string | Permission required to add/edit custom field values. |
+| `types` | No | []string | Allowed custom field types. Empty = all types. |
+
+---
+
+## Audit
+
+Controls what the audit recorder captures for this module's write operations.
+
+```yaml
+audit:
+  enabled: true
+  mask_fields:
+    - payment_details
+    - internal_notes
+  include_transitions: true
+  include_comments: true
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `enabled` | Yes | bool | Whether audit recording is active for this module. |
+| `mask_fields` | No | []string | Field names to redact in the stored before/after diff. |
+| `include_transitions` | No | bool | Whether status transitions are recorded as audit entries. |
+| `include_comments` | No | bool | Whether comment creates/deletes are recorded. |
+
+---
+
+## Metrics
+
+Declares analytics metrics the module exposes through the metrics API.
+
+```yaml
+metrics:
+  - key: repairs.open_count
+    name: "Open Repairs"
+    description: "Number of repairs currently in a non-terminal status"
+    type: gauge
+    unit: count
+    query: "SELECT COUNT(*) FROM repairs WHERE status NOT IN ('completed', 'cancelled')"
+    permission: repairs.view
+
+  - key: repairs.completion_trend
+    name: "Repair Completions Over Time"
+    description: "Daily count of completed repairs over the last 30 days"
+    type: timeseries
+    unit: count
+    query: |
+      SELECT DATE(updated_at) AS date, COUNT(*) AS value
+      FROM repairs
+      WHERE status = 'completed'
+        AND updated_at >= NOW() - INTERVAL '30 days'
+      GROUP BY date
+      ORDER BY date
+    permission: repairs.view
+
+  - key: repairs.status_breakdown
+    name: "Repairs by Status"
+    description: "Count of repairs grouped by current status"
+    type: breakdown
+    unit: count
+    query: "SELECT status AS label, COUNT(*) AS value FROM repairs GROUP BY status"
+    permission: repairs.view
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `key` | Yes | string | Unique metric key in `<module>.<metric_name>` format. |
+| `name` | Yes | string | Human-readable display name. |
+| `description` | No | string | What the metric measures. |
+| `type` | Yes | string | `gauge` — single numeric value; `timeseries` — value over time; `breakdown` — value by category. |
+| `unit` | No | string | Display unit (e.g., `count`, `USD`, `minutes`, `%`). |
+| `query` | Yes | string | SQL query that computes the metric. Runs in the tenant's schema context. |
+| `permission` | Yes | string | Permission key required to read this metric. |
+
+---
+
+## Errors
+
+Declares module-specific error codes. These are registered globally and can be used with the `ErrorFactory`.
+
+```yaml
+errors:
+  - code: REPAIRS.VALIDATION.INVALID_STATUS_TRANSITION
+    status: 400
+    message: "Cannot transition repair from {from} to {to}"
+    description: "The requested status change is not an allowed transition"
+
+  - code: REPAIRS.NOT_FOUND.REPAIR
+    status: 404
+    message: "Repair {repair_id} not found"
+    description: "No repair exists with the given ID in this tenant"
+
+  - code: REPAIRS.CONFLICT.APPOINTMENT_OVERLAP
+    status: 409
+    message: "This time slot overlaps with an existing appointment"
+    description: "A repair appointment was requested for a time slot already occupied"
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `code` | Yes | string | Error code in `<MODULE>.<CATEGORY>.<DETAIL>` format. All uppercase. |
+| `status` | Yes | int | HTTP status code (400, 404, 409, 500, etc.). |
+| `message` | Yes | string | English message template. Use `{field}` placeholders for params. |
+| `description` | No | string | Developer-facing explanation of when this error occurs. |
+
+---
+
+## Complete Example
+
+```yaml
+name: repairs
+version: "1.0.0"
+type: domain
+description: "Manages vehicle repair orders from intake through completion."
+
+dependencies:
+  - vehicles
+  - users
+
+contracts:
+  produces:
+    - repairs.created
+    - repairs.status_changed
+    - repairs.completed
+  consumes:
+    - vehicles.decommissioned
+
+scopes:
+  - name: own
+    description: "Only repairs assigned to the current user"
+    filter: "assigned_to = :user_id"
+    priority: 10
+  - name: tenant
+    description: "All repairs in the tenant"
+    filter: ""
+    priority: 30
+
+permissions:
+  - key: repairs.create
+    name: Create Repair
+    scope: tenant
+  - key: repairs.view
+    name: View Repairs
+    scope: own
+  - key: repairs.update
+    name: Update Repair
+    scope: tenant
+  - key: repairs.approve
+    name: Approve Repair
+    scope: tenant
+  - key: repairs.delete
+    name: Delete Repair
+    scope: tenant
+
+statuses:
+  - name: pending
+    label: "Pending"
+    initial: true
+    color: "#F59E0B"
+  - name: in_progress
+    label: "In Progress"
+    active: true
+    color: "#3B82F6"
+  - name: completed
+    label: "Completed"
+    terminal: true
+    color: "#10B981"
+  - name: cancelled
+    label: "Cancelled"
+    terminal: true
+    color: "#EF4444"
+
+transitions:
+  - name: start
+    label: "Start Work"
+    from: pending
+    to: in_progress
+    permission: repairs.update
+    trigger: repairs.started
+  - name: complete
+    label: "Mark Completed"
+    from: in_progress
+    to: completed
+    permission: repairs.update
+    confirm: true
+    trigger: repairs.completed
+  - name: cancel
+    label: "Cancel"
+    from: "*"
+    to: cancelled
+    permission: repairs.delete
+    confirm: true
+
+references:
+  - type: one
+    module: vehicles
+    entity: vehicle
+    field: vehicle_id
+    label: "Vehicle"
+    required: true
+
+approvals:
+  - name: manager_approval
+    label: "Manager Approval"
+    permission: repairs.approve
+    required_for_transition: complete
+    condition: "final_cost > 50000"
+    timeout: 72h
+    on_timeout: auto_reject
+
+events:
+  emits:
+    - name: repairs.created
+      version: 1
+      payload:
+        - field: repair_id
+          type: uuid
+        - field: vehicle_id
+          type: uuid
+  subscribes:
+    - event: vehicles.decommissioned
+      versions: [1]
+      handler: OnVehicleDecommissioned
+      async: true
+
+attachments:
+  enabled: true
+  max_size_mb: 20
+  allowed_types:
+    - image/jpeg
+    - image/png
+    - application/pdf
+  permission_upload: repairs.update
+  permission_view: repairs.view
+
+comments:
+  enabled: true
+  permission_create: repairs.update
+  permission_view: repairs.view
+  allow_internal: true
+
+audit:
+  enabled: true
+  mask_fields:
+    - payment_details
+  include_transitions: true
+
+metrics:
+  - key: repairs.open_count
+    name: "Open Repairs"
+    type: gauge
+    unit: count
+    query: "SELECT COUNT(*) FROM repairs WHERE status NOT IN ('completed', 'cancelled')"
+    permission: repairs.view
+
+errors:
+  - code: REPAIRS.VALIDATION.INVALID_STATUS_TRANSITION
+    status: 400
+    message: "Cannot transition repair from {from} to {to}"
+  - code: REPAIRS.NOT_FOUND.REPAIR
+    status: 404
+    message: "Repair {repair_id} not found"
+```

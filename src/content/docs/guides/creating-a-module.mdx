@@ -1,0 +1,619 @@
+---
+title: Creating a Module
+description: Step-by-step walkthrough for building a new domain module in Trazo, using a "repairs" module as a concrete example.
+---
+
+import { Aside, Steps, FileTree } from '@astrojs/starlight/components';
+
+This guide walks through creating a fully functional domain module from scratch. By the end you will have a `repairs` module with its own migrations, models, repository, service, and HTTP handlers, all wired into the Trazo platform.
+
+## What You Will Build
+
+The `repairs` module tracks vehicle repair jobs for a tenant. It will expose CRUD endpoints, enforce permission scopes, emit domain events, and record audit entries — all following Trazo conventions.
+
+---
+
+## Step 1 — Create the Directory
+
+All domain modules live under `internal/modules/domain/`. Create the directory for the new module:
+
+```bash
+mkdir -p internal/modules/domain/repairs
+```
+
+The full module will have this layout when complete:
+
+<FileTree>
+- internal/
+  - modules/
+    - domain/
+      - repairs/
+        - module.yaml
+        - module.go
+        - models.go
+        - repository.go
+        - service.go
+        - handler.go
+        - migrations/
+          - 20240101000000_create_repairs.sql
+</FileTree>
+
+---
+
+## Step 2 — Write `module.yaml`
+
+`module.yaml` is the declarative manifest that drives code generation, permission registration, and runtime behavior. Create it at `internal/modules/domain/repairs/module.yaml`:
+
+```yaml
+name: repairs
+version: "1.0.0"
+type: domain
+description: Tracks vehicle repair jobs and their lifecycle from intake to completion.
+
+dependencies:
+  - vehicles
+  - users
+
+scopes:
+  all:
+    priority: 100
+    filter: ""
+  assigned:
+    priority: 80
+    filter: "assigned_to = :user_id"
+  own:
+    priority: 60
+    filter: "created_by = :user_id"
+
+permissions:
+  - repairs.create
+  - repairs.read.all
+  - repairs.read.assigned
+  - repairs.read.own
+  - repairs.update.all
+  - repairs.update.assigned
+  - repairs.delete.all
+
+statuses:
+  pending:
+    initial: true
+    label: Pending
+  in_progress:
+    label: In Progress
+  completed:
+    terminal: true
+    label: Completed
+  cancelled:
+    terminal: true
+    label: Cancelled
+
+transitions:
+  - action: start
+    from: [pending]
+    to: in_progress
+  - action: complete
+    from: [in_progress]
+    to: completed
+    input:
+      - name: resolution_notes
+        type: text
+        required: true
+  - action: cancel
+    from: ["*"]
+    to: cancelled
+    input:
+      - name: reason
+        type: text
+        required: true
+    confirm:
+      title: Cancel Repair?
+      message: "This will cancel the repair. This action cannot be undone."
+
+events:
+  emits:
+    - repairs.created
+    - repairs.updated
+    - repairs.status_changed
+    - repairs.deleted
+
+comments:
+  enabled: true
+
+audit:
+  enabled: true
+  track_fields:
+    - status
+    - assigned_to
+    - description
+```
+
+<Aside type="note">
+  The `trazo` CLI reads `module.yaml` to generate permission sync SQL, validate dependency graphs, and scaffold missing files. You do not need to write all fields immediately — start minimal and expand as your module grows.
+</Aside>
+
+---
+
+## Step 3 — Implement `module.go`
+
+`module.go` is the entry point that wires the module into the platform. Every module must implement the `core.Module` interface, which requires 9 methods.
+
+```go
+// internal/modules/domain/repairs/module.go
+package repairs
+
+import (
+	"context"
+	"embed"
+
+	"github.com/trazo-dev/trazo-core-service/internal/core"
+	"github.com/danielgtaylor/huma/v2"
+)
+
+//go:embed module.yaml
+var moduleConfig []byte
+
+//go:embed migrations
+var migrationFiles embed.FS
+
+type RepairsModule struct {
+	core    *core.Core
+	service *RepairsService
+	handler *Handler
+}
+
+// Name returns the unique module identifier. Must match module.yaml "name".
+func (m *RepairsModule) Name() string { return "repairs" }
+
+// Version returns the module version from module.yaml.
+func (m *RepairsModule) Version() string { return "1.0.0" }
+
+// Type returns the module classification: foundation, domain, or custom.
+func (m *RepairsModule) Type() string { return "domain" }
+
+// Config returns the raw module.yaml bytes, embedded at compile time.
+func (m *RepairsModule) Config() []byte { return moduleConfig }
+
+// Migrations returns the embedded filesystem containing SQL migration files.
+func (m *RepairsModule) Migrations() embed.FS { return migrationFiles }
+
+// Init is called once at server startup after all modules are registered.
+// Use this to resolve cross-module dependencies and initialize internal state.
+func (m *RepairsModule) Init(c *core.Core) error {
+	m.core = c
+
+	repo := NewRepository(c)
+	m.service = NewService(c, repo)
+	m.handler = NewHandler(m.service)
+
+	return nil
+}
+
+// RegisterRoutes attaches this module's HTTP handlers to the Huma API.
+func (m *RepairsModule) RegisterRoutes(api huma.API) {
+	m.handler.RegisterRoutes(api)
+}
+
+// Service returns the module's primary service for use by other modules.
+// Return nil if this module does not expose a service interface.
+func (m *RepairsModule) Service() any {
+	return m.service
+}
+
+// Shutdown is called during graceful server shutdown.
+// Close any resources (goroutines, connections) the module owns.
+func (m *RepairsModule) Shutdown(ctx context.Context) error {
+	return nil
+}
+
+// New constructs the module. Called during application startup wiring.
+func New() *RepairsModule {
+	return &RepairsModule{}
+}
+```
+
+<Aside type="tip">
+  The `//go:embed` directives embed the YAML and SQL files into the compiled binary. This means your migrations and module config ship inside the binary with no need for runtime file access.
+</Aside>
+
+---
+
+## Step 4 — Define `models.go`
+
+Models are plain Go structs. The `db` struct tags map to PostgreSQL column names. Use `*Type` for nullable columns.
+
+```go
+// internal/modules/domain/repairs/models.go
+package repairs
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Repair is the primary domain entity for this module.
+type Repair struct {
+	ID              uuid.UUID  `json:"id"               db:"id"`
+	TenantID        uuid.UUID  `json:"-"                db:"tenant_id"`
+	VehicleID       uuid.UUID  `json:"vehicle_id"       db:"vehicle_id"`
+	Description     string     `json:"description"      db:"description"`
+	Status          string     `json:"status"           db:"status"`
+	CreatedBy       uuid.UUID  `json:"created_by"       db:"created_by"`
+	AssignedTo      *uuid.UUID `json:"assigned_to"      db:"assigned_to"`
+	ResolutionNotes *string    `json:"resolution_notes" db:"resolution_notes"`
+	CreatedAt       time.Time  `json:"created_at"       db:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"       db:"updated_at"`
+	DeletedAt       *time.Time `json:"-"                db:"deleted_at"`
+}
+
+// CreateRepairInput carries validated input for the Create service method.
+type CreateRepairInput struct {
+	VehicleID   uuid.UUID
+	Description string
+	AssignedTo  *uuid.UUID
+}
+
+// UpdateRepairInput carries validated input for the Update service method.
+type UpdateRepairInput struct {
+	Description *string
+	AssignedTo  *uuid.UUID
+}
+
+// ListFilter carries pagination and filtering parameters for list queries.
+type ListFilter struct {
+	Status string
+	Limit  int
+	Offset int
+}
+```
+
+---
+
+## Step 5 — Write `repository.go`
+
+The repository layer owns all database access. It uses `sqlx` for query execution and `squirrel` for query building.
+
+```go
+// internal/modules/domain/repairs/repository.go
+package repairs
+
+import (
+	"context"
+
+	sq "github.com/Masterminds/squirrel"
+	"github.com/jmoiron/sqlx"
+	"github.com/trazo-dev/trazo-core-service/internal/core"
+)
+
+type Repository struct {
+	core *core.Core
+}
+
+func NewRepository(c *core.Core) *Repository {
+	return &Repository{core: c}
+}
+
+func (r *Repository) List(ctx context.Context, filter ListFilter) ([]Repair, int, error) {
+	query := sq.Select("*").From("repairs").Where("deleted_at IS NULL")
+
+	scope := r.core.Permission.ApplyScope(ctx, "repairs.read")
+	for _, w := range scope.Wheres {
+		query = query.Where(w.SQL, w.Args...)
+	}
+
+	if filter.Status != "" {
+		query = query.Where("status = ?", filter.Status)
+	}
+
+	// Count before pagination
+	countSQL, countArgs, _ := query.Column("COUNT(*)").
+		PlaceholderFormat(sq.Dollar).ToSql()
+	var total int
+	_ = r.core.DB.Conn(ctx).QueryRowContext(ctx, countSQL, countArgs...).Scan(&total)
+
+	query = query.Columns("*").
+		Limit(uint64(filter.Limit)).
+		Offset(uint64(filter.Offset)).
+		OrderBy("created_at DESC")
+
+	sql, args, _ := query.PlaceholderFormat(sq.Dollar).ToSql()
+	var repairs []Repair
+	err := sqlx.SelectContext(ctx, r.core.DB.Conn(ctx), &repairs, sql, args...)
+	return repairs, total, err
+}
+
+func (r *Repository) GetByID(ctx context.Context, id string) (*Repair, error) {
+	sql, args, _ := sq.Select("*").From("repairs").
+		Where("id = ? AND deleted_at IS NULL", id).
+		PlaceholderFormat(sq.Dollar).ToSql()
+
+	var repair Repair
+	err := sqlx.GetContext(ctx, r.core.DB.Conn(ctx), &repair, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return &repair, nil
+}
+
+func (r *Repository) CreateTx(ctx context.Context, tx core.Tx, input CreateRepairInput) (*Repair, error) {
+	sql, args, _ := sq.Insert("repairs").
+		Columns("vehicle_id", "description", "assigned_to", "status", "created_by").
+		Values(input.VehicleID, input.Description, input.AssignedTo, "pending",
+			r.core.Session.UserID(ctx)).
+		Suffix("RETURNING *").
+		PlaceholderFormat(sq.Dollar).ToSql()
+
+	var repair Repair
+	err := sqlx.GetContext(ctx, tx.Conn(), &repair, sql, args...)
+	return &repair, err
+}
+
+func (r *Repository) UpdateTx(ctx context.Context, tx core.Tx, id string, input UpdateRepairInput) (*Repair, error) {
+	q := sq.Update("repairs").Where("id = ?", id)
+	if input.Description != nil {
+		q = q.Set("description", *input.Description)
+	}
+	if input.AssignedTo != nil {
+		q = q.Set("assigned_to", *input.AssignedTo)
+	}
+	q = q.Set("updated_at", "NOW()").Suffix("RETURNING *")
+
+	sql, args, _ := q.PlaceholderFormat(sq.Dollar).ToSql()
+	var repair Repair
+	err := sqlx.GetContext(ctx, tx.Conn(), &repair, sql, args...)
+	return &repair, err
+}
+
+func (r *Repository) SoftDeleteTx(ctx context.Context, tx core.Tx, id string) error {
+	sql, args, _ := sq.Update("repairs").
+		Set("deleted_at", "NOW()").
+		Where("id = ?", id).
+		PlaceholderFormat(sq.Dollar).ToSql()
+	_, err := tx.Conn().ExecContext(ctx, sql, args...)
+	return err
+}
+```
+
+---
+
+## Step 6 — Write `service.go`
+
+The service layer contains all business logic. It follows the canonical 5-step pattern: validate, check permission, execute hook, database transaction, post-transaction side effects.
+
+```go
+// internal/modules/domain/repairs/service.go
+package repairs
+
+import (
+	"context"
+
+	"github.com/trazo-dev/trazo-core-service/internal/core"
+)
+
+type RepairsService struct {
+	core *core.Core
+	repo *Repository
+}
+
+func NewService(c *core.Core, repo *Repository) *RepairsService {
+	return &RepairsService{core: c, repo: repo}
+}
+
+func (s *RepairsService) Create(ctx context.Context, input CreateRepairInput) (*Repair, error) {
+	// 1. Validate
+	if input.VehicleID.String() == "" {
+		return nil, s.core.Errors.Validation("vehicle_id", "required")
+	}
+
+	// 2. Check permission
+	s.core.Permission.MustCan(ctx, "repairs.create")
+
+	// 3. Execute before hook
+	_, err := s.core.Hooks.Execute(ctx, "repairs.before_create", input)
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Database transaction
+	var repair *Repair
+	err = s.core.DB.Tx(ctx, func(tx core.Tx) error {
+		var txErr error
+		repair, txErr = s.repo.CreateTx(ctx, tx, input)
+		if txErr != nil {
+			return txErr
+		}
+		return s.core.Events.EmitTx(ctx, tx, core.Event{
+			Name:          "repairs.created",
+			AggregateType: "repair",
+			AggregateID:   repair.ID.String(),
+			Payload:       map[string]any{"repair": repair},
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// 5. Post-transaction side effects
+	s.core.Audit.Create(ctx, core.AuditEntry{
+		Action:   "repairs.created",
+		Resource: core.Resource{Type: "repair", ID: repair.ID.String()},
+	}, core.WithAuditAfter(repair))
+
+	s.core.Log.Logger(ctx).WithModule("repairs").WithAction("create").
+		Info("repair created", map[string]any{"id": repair.ID})
+
+	return repair, nil
+}
+
+func (s *RepairsService) List(ctx context.Context, filter ListFilter) ([]Repair, int, error) {
+	s.core.Permission.MustCan(ctx, "repairs.read")
+	return s.repo.List(ctx, filter)
+}
+
+func (s *RepairsService) GetByID(ctx context.Context, id string) (*Repair, error) {
+	s.core.Permission.MustCan(ctx, "repairs.read")
+	return s.repo.GetByID(ctx, id)
+}
+```
+
+See [Service Patterns](/guides/service-patterns/) for the full `Update` and `Delete` variants with before-state fetching for audit.
+
+---
+
+## Step 7 — Write `handler.go`
+
+The handler layer translates HTTP requests into service calls. It uses Huma for input binding and OpenAPI registration.
+
+```go
+// internal/modules/domain/repairs/handler.go
+package repairs
+
+import (
+	"context"
+	"errors"
+	"net/http"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/trazo-dev/trazo-core-service/internal/core"
+)
+
+type Handler struct {
+	service *RepairsService
+}
+
+func NewHandler(service *RepairsService) *Handler {
+	return &Handler{service: service}
+}
+
+func (h *Handler) RegisterRoutes(api huma.API) {
+	huma.Register(api, huma.Operation{
+		OperationID: "list-repairs",
+		Method:      http.MethodGet,
+		Path:        "/api/v1/repairs",
+		Summary:     "List Repairs",
+		Tags:        []string{"Repairs"},
+	}, h.listRepairs)
+
+	huma.Register(api, huma.Operation{
+		OperationID: "create-repair",
+		Method:      http.MethodPost,
+		Path:        "/api/v1/repairs",
+		Summary:     "Create Repair",
+		Tags:        []string{"Repairs"},
+	}, h.createRepair)
+}
+
+type CreateRepairRequest struct {
+	Body struct {
+		VehicleID   string  `json:"vehicle_id"   required:"true"`
+		Description string  `json:"description"`
+		AssignedTo  *string `json:"assigned_to"`
+	}
+}
+
+type RepairResponse struct {
+	Body Repair
+}
+
+func (h *Handler) createRepair(ctx context.Context, req *CreateRepairRequest) (*RepairResponse, error) {
+	repair, err := h.service.Create(ctx, CreateRepairInput{
+		Description: req.Body.Description,
+	})
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return &RepairResponse{Body: *repair}, nil
+}
+
+func mapError(err error) error {
+	var coreErr *core.Error
+	if !errors.As(err, &coreErr) {
+		return huma.NewError(http.StatusInternalServerError, "internal server error")
+	}
+	return huma.NewError(coreErr.HTTPStatus(), coreErr.Message)
+}
+```
+
+See [Handler Patterns](/guides/handler-patterns/) for a complete treatment including list endpoints with query parameters.
+
+---
+
+## Step 8 — Validate the Module
+
+The CLI's `module validate` command parses `module.yaml`, checks for unknown fields, validates dependency references, and verifies that all declared permissions follow the naming convention:
+
+```bash
+trazo module validate internal/modules/domain/repairs
+```
+
+Expected output for a valid module:
+
+```
+Validating repairs...
+  [OK] module.yaml is well-formed
+  [OK] all dependency modules exist
+  [OK] 7 permissions follow naming convention
+  [OK] status machine is acyclic
+  [OK] all transition "from" states are declared
+repairs is valid.
+```
+
+<Aside type="caution">
+  Fix all validation errors before continuing. A module that fails validation will be rejected at startup if the platform is configured to enforce strict module validation.
+</Aside>
+
+---
+
+## Step 9 — Register the Module at Startup
+
+Open `cmd/server/main.go` (or wherever modules are wired up in your application) and add the new module to the registry:
+
+```go
+import (
+    "github.com/trazo-dev/trazo-core-service/internal/modules/domain/repairs"
+)
+
+func main() {
+    // ... existing setup ...
+
+    moduleRegistry.Register(
+        // Foundation modules
+        users.New(),
+        audit.New(),
+
+        // Domain modules
+        vehicles.New(),
+        repairs.New(), // Add this line
+    )
+
+    // ... start server ...
+}
+```
+
+<Aside type="tip">
+  Module registration order matters for dependency resolution. Declare dependencies in `module.yaml` and the platform will automatically initialize modules in the correct order regardless of the order they appear in the slice.
+</Aside>
+
+---
+
+## What Happens at Startup
+
+When the server starts with your new module registered:
+
+1. The platform reads each module's `Config()` and builds a dependency graph.
+2. Modules are initialized in topological order via `Init()`.
+3. Each module's `Migrations()` are applied to the tenant schema.
+4. Each module's `RegisterRoutes()` is called to attach handlers to the router.
+5. Permissions declared in `module.yaml` are synced to the permissions table.
+
+Your module is now live and ready for tenant activation.
+
+---
+
+## Next Steps
+
+- [module.yaml Reference](/guides/module-yaml-reference/) — full field-by-field documentation for the manifest
+- [Service Patterns](/guides/service-patterns/) — the canonical 5-step service pattern in depth
+- [Handler Patterns](/guides/handler-patterns/) — Huma registration, request types, and error mapping
+- [Repository Patterns](/guides/repository-patterns/) — squirrel query building, scopes, and transactions
+- [Migrations](/guides/migrations/) — writing and running Atlas-compatible SQL migrations

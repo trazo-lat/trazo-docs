@@ -1,0 +1,81 @@
+---
+title: Introduction
+description: An overview of Trazo, a multi-tenant SaaS platform for service-oriented businesses, its key features, and two-repo architecture.
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+Trazo is an open-source, multi-tenant SaaS platform designed as a foundation for service-oriented business applications — think auto repair shops, medical clinics, legal firms, or any business that manages clients, schedules, and operational workflows across multiple independent organizations (tenants).
+
+Rather than building multi-tenancy, permissions, auditing, and event handling from scratch every time, Trazo provides these as hardened, first-class primitives so you can focus on the domain logic that makes your product unique.
+
+## Who is Trazo for?
+
+Trazo targets developers building B2B SaaS products where:
+
+- Each customer (tenant) must be fully isolated from every other customer at the data layer.
+- The product ships as a set of pluggable feature modules that tenants opt in to.
+- Audit trails, access control, and event-driven side-effects are non-negotiable requirements.
+- A Go-based backend with a well-structured, convention-driven codebase is preferred.
+
+## Key Features
+
+<CardGrid>
+  <Card title="Schema-per-Tenant Isolation" icon="seti:db">
+    Each tenant gets its own PostgreSQL schema. Row-level and connection-level isolation ensure one tenant can never access another's data, even under misconfiguration.
+  </Card>
+  <Card title="Pluggable Module System" icon="puzzle">
+    Features are packaged as self-contained modules declared via a `module.yaml` manifest. Modules register their own routes, migrations, services, and permissions. Tenants activate only the modules they need.
+  </Card>
+  <Card title="Built-in Audit Trail" icon="document">
+    Every write operation on tenant data is automatically recorded in an immutable audit log: who changed what, when, from which IP, and what the previous value was.
+  </Card>
+  <Card title="Event-Driven Architecture" icon="rocket">
+    A transactional outbox pattern ensures domain events (e.g., `tenant.created`, `user.invited`) are reliably published and delivered. Worker pools process events with configurable retries and back-off.
+  </Card>
+  <Card title="Permission Scoping" icon="approve-check-circle">
+    A role-based permission system is scoped per tenant. Modules declare the permissions they require; the platform enforces them at the HTTP handler level via middleware.
+  </Card>
+  <Card title="Full CLI Tooling" icon="terminal">
+    The `trazo` CLI manages the full developer lifecycle: spinning up local databases, running migrations, scaffolding modules, and inspecting tenant state — no manual SQL or Docker commands needed.
+  </Card>
+</CardGrid>
+
+## Two-Repo Architecture
+
+Trazo ships across two repositories with clearly separated concerns:
+
+### `trazo-core-service`
+
+The API server. Written in Go 1.24, it uses [Huma v2](https://huma.rocks/) for OpenAPI-first HTTP handling and [chi](https://github.com/go-chi/chi) as the router. All business logic, modules, migrations, and background workers live here.
+
+```
+trazo-core-service/
+├── cmd/server/          # Entrypoint — wires config, DB, modules, and HTTP server
+├── internal/
+│   ├── core/            # Platform primitives: tenant context, auth, audit, events
+│   ├── modules/         # Feature modules (users, audit, etc.)
+│   └── platform/        # Shared infrastructure: DB pool, config, middleware
+└── trazo.example.yaml   # Reference configuration file
+```
+
+### `trazo-cli`
+
+The developer toolchain. Also written in Go, `trazo-cli` wraps Docker for local Postgres management, Atlas for migrations, and code generation for scaffolding new modules. It reads the same `trazo.yaml` configuration file as the server.
+
+```
+trazo-cli/
+├── cmd/trazo/           # CLI entrypoint (cobra/viper)
+└── internal/
+    ├── db/              # `trazo db` subcommands
+    ├── migrate/         # `trazo migrate` subcommands
+    └── module/          # `trazo module` subcommands
+```
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard title="Prerequisites" href="/getting-started/prerequisites/" description="Check what you need installed before you begin." />
+  <LinkCard title="Installation" href="/getting-started/installation/" description="Clone and build both repos in a few commands." />
+  <LinkCard title="Architecture Overview" href="/architecture/overview/" description="Dive deeper into how the platform is structured." />
+</CardGrid>

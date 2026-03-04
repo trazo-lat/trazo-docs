@@ -1,0 +1,228 @@
+---
+title: Authentication
+description: JWT-based authentication flow in Trazo — token lifecycle, middleware chain, session tracking, and the login, refresh, logout, and /me endpoints.
+---
+
+Trazo uses JWT-based authentication with short-lived access tokens and longer-lived refresh tokens. All authentication state is tracked in the `sessions` table in the `public` schema, enabling session revocation, audit trails, and per-session metadata.
+
+## Token Lifecycle
+
+| Token | TTL | Purpose |
+|---|---|---|
+| Access token | 15 minutes (configurable) | Authorizes API requests. Sent in `Authorization: Bearer <token>`. |
+| Refresh token | 7 days | Exchanges for a new access token. Sent to the refresh endpoint only. |
+
+Short access token TTLs limit the window during which a stolen token can be used. The refresh token allows clients to obtain new access tokens transparently without re-prompting for credentials.
+
+:::note
+The JWT secret is read from the `TRAZO_AUTH_JWT_SECRET` environment variable. This must be a cryptographically random string of at least 32 bytes. Rotating this secret invalidates all existing tokens immediately.
+:::
+
+## Middleware Chain
+
+Every request passes through the following middleware in order:
+
+```
+RecoveryMiddleware
+    │   Catches panics. Returns a 500 with a sanitized error body.
+    │   Logs the full panic with stack trace.
+    ▼
+CORSMiddleware
+    │   Sets Access-Control-Allow-Origin and related headers.
+    │   Handles OPTIONS preflight requests.
+    ▼
+RequestIDMiddleware
+    │   Reads X-Request-ID from the incoming request.
+    │   Generates a new ULID if the header is absent.
+    │   Injects the ID into the context and echoes it in the response header.
+    ▼
+CanonicalLogMiddleware
+    │   Emits one structured log line per request on completion.
+    │   Includes: method, path, status, duration, request_id, tenant_id, user_id.
+    ▼
+JWTAuthMiddleware
+    │   Reads and validates the Bearer token from Authorization header.
+    │   Loads the session, user, tenant, membership, and permissions from the DB.
+    │   Injects the SessionInfo into the context.
+    │   Returns 401 if the token is missing, invalid, or expired.
+    │   Returns 401 if the session has been revoked.
+    ▼
+chi Router → Huma Handler
+```
+
+Routes under `/api/v1/auth/login`, `/api/v1/auth/refresh`, and public health endpoints bypass `JWTAuthMiddleware`.
+
+## Endpoints
+
+### Login
+
+```
+POST /api/v1/auth/login
+```
+
+Request:
+
+```json
+{
+  "email": "user@example.com",
+  "password": "correct-password",
+  "tenant_slug": "acme"
+}
+```
+
+Flow:
+
+1. Look up the user by email in `public.users`.
+2. Verify the password against the stored bcrypt hash (cost: 12).
+3. Load the user's membership in the specified tenant.
+4. Create a new session record with IP, user agent, device type, and `auth_method: "password"`.
+5. Issue an access token and a refresh token, both signed with `TRAZO_AUTH_JWT_SECRET`.
+6. Return tokens and the current user payload.
+
+Response:
+
+```json
+{
+  "access_token": "eyJ...",
+  "refresh_token": "eyJ...",
+  "expires_in": 900,
+  "token_type": "Bearer",
+  "user": { ... }
+}
+```
+
+Failed login attempts increment `failed_login_count` on the user record. After a configurable threshold, the account is temporarily locked.
+
+### Refresh
+
+```
+POST /api/v1/auth/refresh
+```
+
+Request:
+
+```json
+{
+  "refresh_token": "eyJ..."
+}
+```
+
+Flow:
+
+1. Validate the refresh token signature and expiry.
+2. Look up the session by the token's `session_id` claim.
+3. Confirm the session is still active and not revoked.
+4. Issue a new access token (the refresh token is not rotated on every refresh by default).
+5. Update `last_active_at` and `request_count` on the session record.
+
+Response:
+
+```json
+{
+  "access_token": "eyJ...",
+  "expires_in": 900,
+  "token_type": "Bearer"
+}
+```
+
+### Logout
+
+```
+POST /api/v1/auth/logout
+```
+
+Requires a valid access token. Sets `revoked_at = NOW()` on the session record. Subsequent requests using any token from that session will receive a 401.
+
+To invalidate all sessions for the current user (e.g., "log out everywhere"), pass:
+
+```json
+{
+  "all_sessions": true
+}
+```
+
+### Current User
+
+```
+GET /api/v1/auth/me
+```
+
+Returns the current user's profile, active tenant membership, role, and effective permissions. This endpoint is called by clients on startup to initialize their local state.
+
+Response:
+
+```json
+{
+  "user": {
+    "id": "...",
+    "email": "user@example.com",
+    "name": "Jane Smith"
+  },
+  "tenant": {
+    "id": "...",
+    "slug": "acme",
+    "name": "Acme Corp"
+  },
+  "membership": {
+    "id": "...",
+    "role": "technician"
+  },
+  "permissions": [
+    "repairs.read.assigned",
+    "repairs.create",
+    "repairs.complete"
+  ]
+}
+```
+
+## Session Tracking
+
+Each session record stores the following metadata:
+
+| Field | Description |
+|---|---|
+| `id` | Unique session identifier (embedded in the JWT as `session_id` claim) |
+| `user_id` | The authenticated user |
+| `tenant_id` | The tenant context for this session |
+| `ip_address` | The client IP from the login request |
+| `user_agent` | The raw `User-Agent` header |
+| `device_type` | Parsed from user agent: `desktop`, `mobile`, or `unknown` |
+| `auth_method` | `password`, `refresh`, or `service_principal` |
+| `request_count` | Incremented on each token refresh |
+| `last_active_at` | Updated on each request |
+| `revoked_at` | Set on logout; null if active |
+| `expires_at` | When the refresh token expires |
+| `created_at` | When the session was created |
+
+Sessions are listed and revocable via `/api/v1/auth/sessions` for the current user, and via the admin API for administrators.
+
+## Password Hashing
+
+Passwords are hashed using bcrypt with a cost factor of 12 (configurable via `TRAZO_AUTH_BCRYPT_COST`). The raw password is never logged, stored, or transmitted after the initial hashing step.
+
+```go
+hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
+```
+
+Password comparison uses `bcrypt.CompareHashAndPassword`, which is timing-safe.
+
+## JWT Claims
+
+Access token claims:
+
+```json
+{
+  "sub": "<user_id>",
+  "sid": "<session_id>",
+  "tid": "<tenant_id>",
+  "mid": "<membership_id>",
+  "iat": 1234567890,
+  "exp": 1234568790
+}
+```
+
+The `sid` (session ID) claim is validated on every request against the `sessions` table to detect revocation. This adds one DB lookup per request, which is mitigated by caching the session record for the duration of the request context.
+
+## Service Principals
+
+Non-human integrations authenticate using service principal credentials instead of user passwords. Service principals have their own records in `public.service_principals`, are assigned a role and permissions, and receive long-lived tokens (no refresh cycle). They appear in the `actor_type` field of audit log entries as `service_principal` rather than `user`.

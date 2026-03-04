@@ -1,0 +1,160 @@
+---
+title: Error Codes
+description: Complete catalog of Trazo platform error codes, their HTTP status mappings, and guidance for modules defining custom error codes following the MODULE.CATEGORY.DETAIL convention.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Trazo uses a hierarchical error code system. Every error has a machine-readable `code` that follows the pattern:
+
+```
+<NAMESPACE>.<CATEGORY>.<DETAIL>
+```
+
+- **NAMESPACE** — `CORE` for platform errors; the uppercase module name for module errors (e.g., `REPAIRS`).
+- **CATEGORY** — The broad error class: `AUTHENTICATION`, `AUTHORIZATION`, `VALIDATION`, `NOT_FOUND`, `CONFLICT`, or `INTERNAL`.
+- **DETAIL** — A specific descriptor within the category.
+
+---
+
+## Platform Error Codes
+
+These codes are defined by the platform core and may be returned by any request.
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `CORE.AUTHENTICATION.INVALID_TOKEN` | 401 | The JWT token is malformed, has an invalid signature, or is otherwise unparseable |
+| `CORE.AUTHENTICATION.EXPIRED_TOKEN` | 401 | The JWT token's `exp` claim is in the past |
+| `CORE.AUTHORIZATION.FORBIDDEN` | 403 | The authenticated actor does not hold the required permission |
+| `CORE.AUTHORIZATION.NO_SCOPE` | 403 | The permission exists but no scope filter is defined for the actor's role |
+| `CORE.VALIDATION.REQUIRED_FIELD` | 400 | A required request field is missing or empty |
+| `CORE.VALIDATION.INVALID_INPUT` | 400 | A field value fails a format, range, or business rule validation |
+| `CORE.NOT_FOUND.TENANT` | 404 | No tenant was found for the provided subdomain or ID |
+| `CORE.NOT_FOUND.USER` | 404 | No user was found for the provided ID or email |
+| `CORE.CONFLICT.DUPLICATE` | 409 | A resource with conflicting unique fields already exists |
+| `CORE.INTERNAL.DATABASE` | 500 | A database operation failed (query error, constraint violation at the driver level) |
+| `CORE.INTERNAL.UNEXPECTED` | 500 | An unexpected panic or unhandled error occurred |
+
+---
+
+## Module Error Codes
+
+Modules define their own error codes by prefixing with the uppercase module name:
+
+```
+<MODULE>.<CATEGORY>.<DETAIL>
+```
+
+**Examples from a `repairs` module:**
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `REPAIRS.VALIDATION.INVALID_STATUS_TRANSITION` | 400 | The requested status change is not an allowed transition |
+| `REPAIRS.NOT_FOUND.REPAIR` | 404 | No repair was found for the given ID |
+| `REPAIRS.CONFLICT.APPOINTMENT_OVERLAP` | 409 | A repair appointment overlaps with an existing booking |
+| `REPAIRS.INTERNAL.PARTS_SERVICE_UNAVAILABLE` | 502 | The external parts pricing service did not respond |
+
+<Aside type="tip">
+Keep `DETAIL` descriptive but concise. Clients use these codes to drive UI logic (e.g., showing a specific validation message), so they must be stable across releases. Treat them as part of your public API.
+</Aside>
+
+---
+
+## Using the Error Factory
+
+Never construct `*core.Error` values manually. Use the `ErrorFactory` from the module's `Core`:
+
+```go
+// Validation error — field-level
+if input.VehicleID == "" {
+    return core.Errors.NewValidation("vehicle_id", "vehicle_id is required")
+}
+
+// Not found error
+repair, err := repo.GetByID(ctx, repairID)
+if errors.Is(err, pgx.ErrNoRows) {
+    return core.Errors.NewNotFound("repair", repairID)
+}
+
+// Forbidden error
+if err := core.Permissions.Check(ctx, "repairs.create"); err != nil {
+    return core.Errors.NewForbidden("repairs.create")
+}
+```
+
+For module-specific error codes not covered by the typed helpers, use `New`:
+
+```go
+return core.Errors.New(
+    "REPAIRS.VALIDATION.INVALID_STATUS_TRANSITION",
+    400,
+    fmt.Sprintf("cannot transition repair from %q to %q", current, next),
+)
+```
+
+---
+
+## Wire Errors to Cause
+
+When wrapping a lower-level error (e.g., a database error) always chain the cause. The platform logs the cause for debugging but does not expose it to API clients:
+
+```go
+rows, err := db.Query(ctx, sql, args...)
+if err != nil {
+    return core.Errors.NewInternal(err).WithCause(err)
+}
+```
+
+---
+
+## Error Response Format
+
+All errors are serialized to JSON using a consistent envelope. HTTP clients should always inspect the `error.code` field for programmatic error handling:
+
+```json
+{
+  "error": {
+    "code": "CORE.VALIDATION.REQUIRED_FIELD",
+    "message": "vehicle_id is required",
+    "field": "vehicle_id"
+  }
+}
+```
+
+**With request tracing:**
+
+```json
+{
+  "error": {
+    "code": "CORE.INTERNAL.UNEXPECTED",
+    "message": "An unexpected error occurred. Please try again.",
+    "request_id": "req_01J5ZKR8GH3QWMXD"
+  }
+}
+```
+
+**With i18n parameters** (for clients that resolve `message_key` client-side):
+
+```json
+{
+  "error": {
+    "code": "REPAIRS.VALIDATION.INVALID_STATUS_TRANSITION",
+    "message": "cannot transition repair from \"pending\" to \"closed\"",
+    "message_key": "repairs.errors.invalid_status_transition",
+    "params": {
+      "from": "pending",
+      "to": "closed"
+    }
+  }
+}
+```
+
+| Field | Always Present | Description |
+|-------|---------------|-------------|
+| `code` | Yes | Machine-readable error code |
+| `message` | Yes | English human-readable message |
+| `message_key` | No | i18n translation key |
+| `field` | No | Affected form field (validation errors only) |
+| `params` | No | Variables for `message_key` interpolation |
+| `request_id` | No | Trace ID, present on 500-level errors |
+| `detail` | No | Developer-facing additional context |

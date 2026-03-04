@@ -1,0 +1,224 @@
+---
+title: Configuration
+description: Complete reference for trazo.yaml, environment variable overrides, and Viper's configuration precedence rules.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Trazo uses [Viper](https://github.com/spf13/viper) for configuration. Values are resolved in the following order of precedence (highest wins):
+
+```
+CLI flags  >  Environment variables (TRAZO_ prefix)  >  trazo.yaml  >  Built-in defaults
+```
+
+This means you can keep a minimal `trazo.yaml` for base settings and inject secrets via environment variables in CI/CD pipelines or container environments — no file changes needed.
+
+---
+
+## Full `trazo.yaml` Reference
+
+Copy `trazo.example.yaml` from the `trazo-core-service` repo as your starting point:
+
+```bash
+cp trazo-core-service/trazo.example.yaml trazo.yaml
+```
+
+Below is the complete structure with all available fields and their defaults:
+
+```yaml
+# Runtime environment. Controls log formatting and certain defaults.
+# Values: local | staging | production
+env: "local"
+
+# ─── Database ───────────────────────────────────────────────────────────────
+database:
+  # PostgreSQL DSN. The platform schema and tenant schemas all live in this DB.
+  url: "postgres://platform:platform@localhost:5432/platform?sslmode=disable"
+
+  # Maximum number of open connections in the pool.
+  max_conns: 25
+
+  # Minimum number of idle connections kept alive.
+  min_conns: 5
+
+# ─── HTTP Server ────────────────────────────────────────────────────────────
+server:
+  host: "0.0.0.0"
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+
+# ─── Logging ────────────────────────────────────────────────────────────────
+log:
+  # Values: debug | info | warn | error
+  level: "info"
+
+  # Path to a log file. Leave empty to write to stderr.
+  file: ""
+
+# ─── Authentication ─────────────────────────────────────────────────────────
+auth:
+  # HMAC-SHA256 secret for signing JWTs.
+  # Override in production via TRAZO_AUTH_JWT_SECRET.
+  jwt_secret: "change-me-in-production"
+
+  # How long access tokens remain valid.
+  access_token_ttl: 15m
+
+  # How long refresh tokens remain valid (default: 7 days).
+  refresh_token_ttl: 168h
+
+  # bcrypt cost factor. Higher = slower hashing = more secure.
+  # Recommended minimum for production: 12.
+  bcrypt_cost: 12
+
+# ─── Event System ───────────────────────────────────────────────────────────
+events:
+  # How often the outbox poller checks for new events.
+  poll_interval: 1s
+
+  # Maximum events to process per polling cycle.
+  batch_size: 50
+
+  # Number of delivery attempts before an event is marked as failed.
+  max_retries: 5
+
+  # Number of concurrent event worker goroutines.
+  worker_pool_size: 10
+
+  # Grace period for in-flight events during server shutdown.
+  shutdown_timeout: 30s
+
+# ─── Notifications ──────────────────────────────────────────────────────────
+notifications:
+  email:
+    host: ""
+    port: 587
+    user: ""
+    # Override via TRAZO_NOTIFICATIONS_EMAIL_PASS
+    pass: ""
+    from: "noreply@example.com"
+
+  slack:
+    default_channel: ""
+
+  webhook:
+    # Timeout for outbound webhook HTTP requests.
+    timeout: 10s
+
+# ─── Tenant Defaults ────────────────────────────────────────────────────────
+tenant:
+  # Modules automatically activated for every new tenant at creation time.
+  default_modules:
+    - users
+    - audit
+```
+
+---
+
+## Environment Variable Overrides
+
+Any configuration key can be overridden with an environment variable by:
+
+1. Uppercasing the key path.
+2. Replacing `.` (dot) with `_` (underscore).
+3. Prepending `TRAZO_`.
+
+### Common Examples
+
+| `trazo.yaml` key | Environment variable |
+|---|---|
+| `database.url` | `TRAZO_DATABASE_URL` |
+| `server.port` | `TRAZO_SERVER_PORT` |
+| `server.host` | `TRAZO_SERVER_HOST` |
+| `log.level` | `TRAZO_LOG_LEVEL` |
+| `auth.jwt_secret` | `TRAZO_AUTH_JWT_SECRET` |
+| `auth.access_token_ttl` | `TRAZO_AUTH_ACCESS_TOKEN_TTL` |
+| `events.worker_pool_size` | `TRAZO_EVENTS_WORKER_POOL_SIZE` |
+| `notifications.email.pass` | `TRAZO_NOTIFICATIONS_EMAIL_PASS` |
+
+### Example: Production Docker Deployment
+
+```bash
+docker run \
+  -e TRAZO_ENV=production \
+  -e TRAZO_DATABASE_URL="postgres://trazo:s3cr3t@db.internal:5432/trazo?sslmode=require" \
+  -e TRAZO_AUTH_JWT_SECRET="$(openssl rand -hex 32)" \
+  -e TRAZO_LOG_LEVEL=warn \
+  -e TRAZO_NOTIFICATIONS_EMAIL_PASS="smtp-password" \
+  -p 8080:8080 \
+  trazo-server:latest
+```
+
+<Aside type="caution">
+  Never set `auth.jwt_secret` to the placeholder `"change-me-in-production"` in staging or production environments. Generate a strong secret with `openssl rand -hex 32` and inject it via `TRAZO_AUTH_JWT_SECRET`.
+</Aside>
+
+---
+
+## CLI Flag Overrides
+
+Both binaries accept flags that override the corresponding config values. Flags take the highest precedence of all sources.
+
+<Tabs>
+  <TabItem label="trazo-server">
+    ```bash
+    trazo-server \
+      --config /etc/trazo/trazo.yaml \
+      --port 9090 \
+      --log-level debug
+    ```
+  </TabItem>
+  <TabItem label="trazo (CLI)">
+    ```bash
+    trazo --config /etc/trazo/trazo.yaml db status
+    trazo --config /etc/trazo/trazo.yaml migrate up
+    ```
+  </TabItem>
+</Tabs>
+
+Run `trazo-server --help` or `trazo --help` to see all available flags.
+
+---
+
+## Config File Location
+
+By default, both binaries search for `trazo.yaml` in the current working directory. You can specify an alternative path with:
+
+<Tabs>
+  <TabItem label="Flag">
+    ```bash
+    trazo-server --config /path/to/trazo.yaml
+    ```
+  </TabItem>
+  <TabItem label="Environment Variable">
+    ```bash
+    export TRAZO_CONFIG=/path/to/trazo.yaml
+    trazo-server
+    ```
+  </TabItem>
+</Tabs>
+
+---
+
+## Environment-Specific Tips
+
+### `env: "local"`
+
+- Logs are output in human-readable format with colour.
+- Detailed error messages are included in API responses to aid debugging.
+- Use `trazo db local` to manage the local Docker container.
+
+### `env: "staging"` / `env: "production"`
+
+- Logs are emitted as structured JSON (compatible with Datadog, Loki, CloudWatch, etc.).
+- API error responses return a sanitized message and an error code only — no internal stack traces.
+- Set `log.level` to `warn` or `error` to reduce log volume.
+- Ensure `database.url` uses `sslmode=require` or `sslmode=verify-full`.
+- Always inject secrets via environment variables rather than storing them in a file on disk.
+
+---
+
+## Full Configuration Reference
+
+For detailed descriptions of every field including accepted values, validation rules, and defaults, see the [Configuration Reference](/reference/configuration-reference/) page.

@@ -1,0 +1,497 @@
+---
+title: module.yaml Reference
+description: Complete field-by-field reference for the module.yaml manifest that drives code generation, permission registration, and runtime behavior in Trazo.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+`module.yaml` is the single source of truth for a module's capabilities, dependencies, permissions, data model extensions, and integration contracts. The Trazo CLI reads it for code generation and validation; the runtime reads it at startup to register permissions, scopes, and hook points.
+
+---
+
+## Identity Fields
+
+```yaml
+name: repairs
+version: "1.0.0"
+type: domain
+description: Tracks vehicle repair jobs and their lifecycle from intake to completion.
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Unique module identifier. Lowercase, hyphens allowed. Must match the package name. |
+| `version` | string | yes | Semantic version string (e.g., `"1.0.0"`). Used for compatibility checks during startup. |
+| `type` | enum | yes | Module classification: `foundation`, `domain`, or `custom`. |
+| `description` | string | yes | Human-readable summary shown in the CLI and admin UI. |
+
+### Module Types
+
+| Type | Description |
+|---|---|
+| `foundation` | Core platform capabilities. Always enabled for all tenants. Examples: `users`, `audit`, `auth`. |
+| `domain` | Business-specific features that tenants opt into. Examples: `repairs`, `inventory`, `billing`. |
+| `custom` | Tenant-specific extensions. Typically developed per-customer. |
+
+---
+
+## `dependencies`
+
+```yaml
+dependencies:
+  - vehicles
+  - users
+```
+
+A list of module `name` values that must be initialized before this module's `Init()` is called. The platform builds a dependency graph and initializes modules in topological order. Declaring a dependency that does not exist will fail validation.
+
+<Aside type="caution">
+  Circular dependencies are rejected at startup. If two modules need each other, refactor the shared behavior into a third module or use the event system for decoupling.
+</Aside>
+
+---
+
+## `contracts`
+
+```yaml
+contracts:
+  produces:
+    - RepairsService
+  consumes:
+    - VehiclesService
+```
+
+Contracts describe the interfaces a module exposes and the interfaces it requires from other modules.
+
+| Sub-field | Description |
+|---|---|
+| `produces` | Interface names this module exports via `Service()`. Consumed by other modules via type assertion. |
+| `consumes` | Interface names this module requires from its dependencies. Resolved in `Init()`. |
+
+See [Cross-Module Calls](/guides/cross-module-calls/) for the contracts resolution pattern.
+
+---
+
+## `scopes`
+
+Scopes define SQL `WHERE` filters that restrict which rows a user can read or modify based on their role. The platform applies the highest-priority scope for which the user holds a matching permission.
+
+```yaml
+scopes:
+  all:
+    priority: 100
+    filter: ""
+  assigned:
+    priority: 80
+    filter: "assigned_to = :user_id"
+  own:
+    priority: 60
+    filter: "created_by = :user_id"
+  team:
+    priority: 70
+    filter: "assigned_to = ANY(:user_team_ids)"
+  created:
+    priority: 50
+    filter: "created_by = :user_id"
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `priority` | int | Higher value means broader access. The platform selects the highest-priority scope the user is authorized for. |
+| `filter` | string | Raw SQL WHERE clause fragment. Empty string means no filter (full access). |
+
+### Scope Placeholders
+
+| Placeholder | Resolves To |
+|---|---|
+| `:user_id` | UUID of the currently authenticated user |
+| `:user_team_ids` | Array of UUIDs for all teams the user belongs to |
+
+### Built-in Scope Names
+
+| Name | Meaning |
+|---|---|
+| `all` | No filter — user can access all tenant records |
+| `assigned` | Only records explicitly assigned to this user |
+| `own` | Only records created by this user |
+| `team` | Records assigned to any team the user belongs to |
+| `created` | Alias for `own`; explicit for clarity |
+
+You may define custom scope names. The convention is to reference them in permission keys as `<module>.<action>.<scope>`.
+
+---
+
+## `permissions`
+
+```yaml
+permissions:
+  - repairs.create
+  - repairs.read.all
+  - repairs.read.assigned
+  - repairs.read.own
+  - repairs.update.all
+  - repairs.update.assigned
+  - repairs.delete.all
+```
+
+Each string is a permission key in the format `<module>.<action>[.<scope>]`. The CLI syncs these keys into the platform's permissions table at startup.
+
+### Naming Convention
+
+| Segment | Example | Notes |
+|---|---|---|
+| `module` | `repairs` | Must match the module `name` |
+| `action` | `create`, `read`, `update`, `delete`, `export` | Use standard verbs; custom verbs are allowed |
+| `scope` | `all`, `assigned`, `own` | Optional. Omit for actions that are not scoped (e.g., `create`). |
+
+<Aside type="note">
+  The platform enforces permission checks at the service layer via `core.Permission.MustCan(ctx, "repairs.read")`. The scope suffix is evaluated separately by `core.Permission.ApplyScope(ctx, "repairs.read")` to inject the appropriate WHERE clause into repository queries.
+</Aside>
+
+---
+
+## `statuses`
+
+```yaml
+statuses:
+  pending:
+    initial: true
+    label: Pending
+  in_progress:
+    label: In Progress
+    active: true
+  completed:
+    terminal: true
+    label: Completed
+  cancelled:
+    terminal: true
+    label: Cancelled
+  archived:
+    terminal: true
+    label: Archived
+    extensible: true
+```
+
+| Sub-field | Type | Default | Description |
+|---|---|---|---|
+| `label` | string | key | Human-readable display name. |
+| `initial` | bool | false | One status per module must be marked `initial`. This is the default status on record creation. |
+| `active` | bool | false | Marks statuses that represent actively in-progress work (used by dashboard metrics). |
+| `terminal` | bool | false | Terminal statuses cannot be transitioned away from. |
+| `extensible` | bool | false | If `true`, tenants can create sub-statuses beneath this status via the admin UI. |
+
+<Aside type="caution">
+  Exactly one status must have `initial: true`. The platform will reject the module at startup if zero or more than one initial status is declared.
+</Aside>
+
+---
+
+## `transitions`
+
+Transitions define the state machine. Each transition represents a user action that moves a record from one status to another.
+
+```yaml
+transitions:
+  - action: start
+    from: [pending]
+    to: in_progress
+
+  - action: complete
+    from: [in_progress]
+    to: completed
+    input:
+      - name: resolution_notes
+        type: text
+        required: true
+
+  - action: cancel
+    from: ["*"]
+    to: cancelled
+    input:
+      - name: reason
+        type: text
+        required: true
+    confirm:
+      title: "Cancel Repair?"
+      message: "This will cancel the repair. This action cannot be undone."
+    trigger:
+      type: approval
+      approvers_permission: repairs.approve
+
+  - action: archive
+    from: [completed, cancelled]
+    to: archived
+    exclude_from: [archived]
+```
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `action` | string | Machine-readable action name. Used as the API endpoint segment (e.g., `POST /repairs/:id/start`). |
+| `from` | list | Status keys the record must currently be in for this transition to be allowed. Use `"*"` as a wildcard to match any non-terminal status. |
+| `to` | string | Target status after the transition completes. |
+| `input` | list | Fields collected from the user when triggering this transition. |
+| `confirm` | object | If present, the frontend shows a confirmation dialog before submitting. |
+| `trigger` | object | Controls how the transition is initiated (see below). |
+| `exclude_from` | list | Statuses explicitly excluded from the wildcard `"*"` match. |
+
+### Transition Input Field Types
+
+| Type | Description |
+|---|---|
+| `text` | Free-form string |
+| `number` | Integer or float |
+| `currency` | Monetary amount with currency code |
+| `date` | ISO 8601 date string |
+| `boolean` | True/false toggle |
+| `select` | Enum from a fixed list of options |
+| `reference` | Reference to a record in another module |
+| `attachment` | File upload |
+| `line_items` | Structured list of items (e.g., invoice lines) |
+
+### Trigger Types
+
+| Type | Description |
+|---|---|
+| `approval` | Transition requires an approval workflow. The `approvers_permission` sub-field names who can approve. |
+| `system` | Transition is triggered programmatically, not by a user action. Hidden from the UI. |
+| `event` | Transition fires automatically when a named domain event is received. |
+
+---
+
+## `references`
+
+```yaml
+references:
+  - name: vehicle
+    module: vehicles
+    type: one
+    required: true
+  - name: parts_used
+    module: inventory
+    type: many_with_quantity
+    required: false
+```
+
+References declare relationships from this module to records in other modules.
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `name` | string | Field name used in the API response and UI. |
+| `module` | string | The referenced module's `name`. Must be listed in `dependencies`. |
+| `type` | enum | Relationship cardinality: `one`, `many`, or `many_with_quantity`. |
+| `required` | bool | Whether the reference must be set on create. |
+
+---
+
+## `approvals`
+
+```yaml
+approvals:
+  - name: repair_completion
+    required_approvers: 1
+    eligible_permission: repairs.approve
+    on_approved: complete
+    on_rejected: return_to_in_progress
+```
+
+Approval workflows gate specific transitions behind multi-party review.
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `name` | string | Unique identifier for this workflow. |
+| `required_approvers` | int | Minimum number of approvals needed. |
+| `eligible_permission` | string | Permission key that identifies who can approve. |
+| `on_approved` | string | Transition `action` to fire when approved. |
+| `on_rejected` | string | Transition `action` to fire when rejected. |
+
+---
+
+## `events`
+
+```yaml
+events:
+  emits:
+    - repairs.created
+    - repairs.updated
+    - repairs.status_changed
+    - repairs.deleted
+  subscribes:
+    - vehicles.deleted
+```
+
+| Sub-field | Description |
+|---|---|
+| `emits` | Event names this module publishes via `core.Events.EmitTx`. Used for documentation and contract validation. |
+| `subscribes` | Event names this module listens to. The platform registers the handler automatically at startup. |
+
+---
+
+## `hooks`
+
+```yaml
+hooks:
+  - name: repairs.before_create
+    description: "Runs before a repair record is inserted. Modify input or abort."
+  - name: repairs.after_complete
+    description: "Runs after a repair is moved to completed status."
+```
+
+Hook declarations create extension points that other modules (or tenants) can register handlers for. The platform executes all registered handlers in priority order when `core.Hooks.Execute` is called.
+
+---
+
+## `settings`
+
+```yaml
+settings:
+  - key: default_sla_hours
+    type: number
+    default: 48
+    label: "Default SLA (hours)"
+    description: "Number of hours before a repair is flagged as overdue."
+  - key: require_photo_on_complete
+    type: boolean
+    default: false
+    label: "Require photo on completion"
+```
+
+Settings are tenant-configurable values accessible at runtime via `core.Config.Get(ctx, "repairs.default_sla_hours")`.
+
+| Sub-field | Type | Description |
+|---|---|---|
+| `key` | string | Setting identifier. Accessed as `<module>.<key>`. |
+| `type` | enum | Value type: `string`, `number`, `boolean`, `select`. |
+| `default` | any | Value used when a tenant has not customized this setting. |
+| `label` | string | Human-readable label shown in the settings UI. |
+| `description` | string | Explanatory text shown below the label. |
+
+---
+
+## `attachments`
+
+```yaml
+attachments:
+  - category: before_photos
+    label: Before Photos
+    allowed_types: [image/jpeg, image/png]
+    max_count: 10
+  - category: invoice
+    label: Invoice
+    allowed_types: [application/pdf]
+    max_count: 1
+    required: true
+```
+
+Attachment categories define the types and limits of files that can be associated with a record.
+
+---
+
+## `comments`
+
+```yaml
+comments:
+  enabled: true
+  internal_only: false
+```
+
+| Sub-field | Default | Description |
+|---|---|---|
+| `enabled` | false | Enable the commenting capability on records of this module. |
+| `internal_only` | false | If `true`, comments are visible only to users, not customers. |
+
+---
+
+## `custom_fields`
+
+```yaml
+custom_fields:
+  enabled: true
+  field_types:
+    - text
+    - number
+    - date
+    - select
+    - boolean
+```
+
+When enabled, tenants can define additional fields on records without code changes. Custom field values are stored in a JSONB column and surfaced in the API alongside built-in fields.
+
+---
+
+## `audit`
+
+```yaml
+audit:
+  enabled: true
+  track_fields:
+    - status
+    - assigned_to
+    - description
+    - resolution_notes
+```
+
+| Sub-field | Description |
+|---|---|
+| `enabled` | Enable automatic audit log recording for this module. |
+| `track_fields` | Column names included in the before/after JSON diff. Fields not listed are excluded from audit records. |
+
+---
+
+## `metrics`
+
+```yaml
+metrics:
+  - name: open_repairs
+    type: gauge
+    label: "Open Repairs"
+    query: "SELECT COUNT(*) FROM repairs WHERE status NOT IN ('completed','cancelled') AND deleted_at IS NULL"
+
+  - name: repairs_over_time
+    type: timeseries
+    label: "Repairs Over Time"
+    query: "SELECT DATE_TRUNC('day', created_at) as ts, COUNT(*) as value FROM repairs WHERE deleted_at IS NULL GROUP BY ts ORDER BY ts"
+
+  - name: repairs_by_status
+    type: breakdown
+    label: "Repairs by Status"
+    query: "SELECT status, COUNT(*) as value FROM repairs WHERE deleted_at IS NULL GROUP BY status"
+```
+
+| Sub-field | Description |
+|---|---|
+| `name` | Unique metric identifier. |
+| `type` | Visualization type: `gauge` (single number), `timeseries` (line chart), or `breakdown` (pie/bar chart). |
+| `label` | Display name shown on dashboards. |
+| `query` | Raw SQL query. Executed in the tenant schema context. |
+
+<Aside type="caution">
+  Metric queries run on every dashboard load. Keep them fast. Add indexes to support the grouping and filtering patterns in your queries.
+</Aside>
+
+---
+
+## `errors`
+
+```yaml
+errors:
+  - code: REPAIR_NOT_FOUND
+    http_status: 404
+    message: "Repair not found."
+  - code: INVALID_TRANSITION
+    http_status: 422
+    message: "This status transition is not allowed."
+  - code: SLA_BREACH
+    http_status: 422
+    message: "This repair has breached its SLA. Supervisor approval is required."
+```
+
+Module-specific error codes extend the platform's error system. The CLI generates typed error constructors in `errors.go` based on these declarations:
+
+```go
+// Generated by trazo module generate
+func (e *RepairsErrors) RepairNotFound() *core.Error {
+    return e.core.Errors.Module("REPAIR_NOT_FOUND", http.StatusNotFound, "Repair not found.")
+}
+```
+
+Use these constructors in your service layer instead of inline `core.Errors.Module(...)` calls for consistency.

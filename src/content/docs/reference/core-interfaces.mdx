@@ -1,0 +1,343 @@
+---
+title: Core Interfaces
+description: Complete reference for the 11 platform sub-interfaces and the ContextLogger — the contracts that all Trazo modules interact with to access platform services.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every Trazo module receives a `Core` struct at startup that exposes 11 sub-interfaces. These interfaces are the only coupling between a module and the platform — they can all be replaced by mock implementations in tests.
+
+```go
+type Core struct {
+    Sessions    SessionManager
+    Permissions PermissionChecker
+    Audit       AuditRecorder
+    Events      EventBus
+    Modules     ModuleManager
+    Hooks       HookExecutor
+    Storage     StorageManager
+    DB          DatabaseManager
+    Config      ConfigProvider
+    Errors      ErrorFactory
+    Log         LogProvider
+}
+```
+
+---
+
+## SessionManager
+
+Manages user sessions. Creates new sessions on login, resolves the active session from a request, and terminates sessions on logout.
+
+```go
+type SessionManager interface {
+    Create(ctx context.Context, tenantID, userID, authMethod string, meta SessionMeta) (Session, error)
+    Get(ctx context.Context, sessionID string) (Session, error)
+    End(ctx context.Context, sessionID string) error
+    ListForUser(ctx context.Context, tenantID, userID string) ([]Session, error)
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Create` | Opens a new session record, capturing IP, user-agent, and device type from `SessionMeta`. Returns the persisted `Session` including its generated ID. |
+| `Get` | Retrieves a session by ID. Returns `CORE.NOT_FOUND` if the session does not exist. |
+| `End` | Marks a session as ended and sets `EndedAt` to the current time. |
+| `ListForUser` | Returns all sessions (active and ended) for a user within a tenant, ordered by `StartedAt` descending. |
+
+**Mock:** `core/mocks.MockSessionManager` — all methods are no-ops returning zero values by default. Use `On("Create", ...)` to configure expectations.
+
+---
+
+## PermissionChecker
+
+Enforces access control. Checks whether the current actor holds a given permission and resolves the data-level scope filter that should be applied to queries.
+
+```go
+type PermissionChecker interface {
+    Check(ctx context.Context, permission string) error
+    CheckAny(ctx context.Context, permissions ...string) error
+    CheckAll(ctx context.Context, permissions ...string) error
+    Scope(ctx context.Context, permission string) (Query, error)
+    ActorPermissions(ctx context.Context) ([]string, error)
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Check` | Returns nil if the current actor holds the permission; returns `CORE.AUTHORIZATION.FORBIDDEN` otherwise. |
+| `CheckAny` | Returns nil if the actor holds at least one of the listed permissions. |
+| `CheckAll` | Returns nil only if the actor holds every listed permission. |
+| `Scope` | Returns the `Query` (SQL WHERE fragment + args) corresponding to the actor's scope for the given permission. Append this to module queries to enforce row-level visibility. |
+| `ActorPermissions` | Returns the full list of resolved permission keys for the current actor, including role permissions and `ExtraPermissions`. |
+
+**Mock:** `core/mocks.MockPermissionChecker`
+
+---
+
+## AuditRecorder
+
+Records immutable audit log entries for write operations.
+
+```go
+type AuditRecorder interface {
+    Record(ctx context.Context, entry AuditEntry) error
+    Query(ctx context.Context, tenantID string, filter AuditFilter) ([]AuditEntry, error)
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Record` | Persists an `AuditEntry` to the tenant's `audit_log` table. The actor ID and session ID are extracted from the request context automatically. Fields listed in `MaskFields` are redacted in the stored diff. |
+| `Query` | Retrieves audit entries for a tenant filtered by resource type, resource ID, actor, action, or time range via `AuditFilter`. |
+
+**Mock:** `core/mocks.MockAuditRecorder`
+
+---
+
+## EventBus
+
+Publishes and delivers domain events using the transactional outbox pattern.
+
+```go
+type EventBus interface {
+    Publish(ctx context.Context, event Event) error
+    PublishTx(ctx context.Context, tx pgx.Tx, event Event) error
+    Subscribe(subscription Subscription) error
+    Unsubscribe(eventName string) error
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Publish` | Inserts the event into the outbox table within its own transaction. Use this when you are not already inside a database transaction. |
+| `PublishTx` | Inserts the event into the outbox using an existing transaction `tx`. Guarantees atomicity with the business write — if the outer transaction rolls back, the event is not published. Prefer this method. |
+| `Subscribe` | Registers a `Subscription` handler. Should be called during `Module.Setup`. |
+| `Unsubscribe` | Removes all handlers for the given event name. |
+
+<Aside type="tip">
+Always use `PublishTx` inside a handler that writes to the database. This is the core of the outbox guarantee: the event is only published if the business write succeeds.
+</Aside>
+
+**Mock:** `core/mocks.MockEventBus`
+
+---
+
+## ModuleManager
+
+Provides runtime information about the loaded module registry.
+
+```go
+type ModuleManager interface {
+    Get(name string) (Module, error)
+    List() []Module
+    IsEnabled(ctx context.Context, tenantID, moduleName string) bool
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Get` | Returns the `Module` instance registered under `name`. Returns an error if no module is found. |
+| `List` | Returns all currently loaded modules in dependency order. |
+| `IsEnabled` | Returns `true` if the given module is active for the specified tenant. |
+
+**Mock:** `core/mocks.MockModuleManager`
+
+---
+
+## HookExecutor
+
+Executes registered lifecycle hooks before and after critical operations.
+
+```go
+type HookExecutor interface {
+    Before(ctx context.Context, hook string, payload any) error
+    After(ctx context.Context, hook string, payload any) error
+    Register(hook string, fn HookFunc) error
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Before` | Runs all handlers registered for `hook` with the given payload before the main operation. If any handler returns a non-nil error the operation is aborted. |
+| `After` | Runs all handlers registered for `hook` after the main operation. Errors are logged but do not roll back the completed operation. |
+| `Register` | Adds a `HookFunc` for the named hook. Can be called from any module's `Setup` method. |
+
+**Mock:** `core/mocks.MockHookExecutor`
+
+---
+
+## StorageManager
+
+Manages file uploads and retrieval against the configured storage backend (local filesystem, S3, GCS, etc.).
+
+```go
+type StorageManager interface {
+    Upload(ctx context.Context, tenantID string, opts UploadOptions) (StoredFile, error)
+    Get(ctx context.Context, fileID string) (StoredFile, error)
+    Delete(ctx context.Context, fileID string) error
+    List(ctx context.Context, tenantID, resourceID string) ([]StoredFile, error)
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Upload` | Streams bytes from `opts.Reader` to the storage backend, creates a `StoredFile` record, and returns the metadata including the access URL. |
+| `Get` | Retrieves the `StoredFile` metadata by ID. Does not return the file bytes — use the `URL` field to download. |
+| `Delete` | Removes the file from both the storage backend and the database record. |
+| `List` | Returns all files attached to a resource, ordered by `CreatedAt` descending. |
+
+**Mock:** `core/mocks.MockStorageManager`
+
+---
+
+## DatabaseManager
+
+Provides access to the underlying database connection pool and tenant schema resolution.
+
+```go
+type DatabaseManager interface {
+    Pool() *pgxpool.Pool
+    TenantPool(ctx context.Context, tenantID string) (*pgxpool.Pool, error)
+    Exec(ctx context.Context, sql string, args ...any) error
+    Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+    QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Pool` | Returns the root connection pool scoped to the `public` schema. |
+| `TenantPool` | Returns a connection pool configured with `search_path` set to the tenant's schema. Connections are cached per tenant. |
+| `Exec` | Executes a statement that returns no rows, using the context's current schema scope. |
+| `Query` | Executes a SELECT and returns a `pgx.Rows` iterator. |
+| `QueryRow` | Executes a SELECT expected to return at most one row. |
+
+**Mock:** `core/mocks.MockDatabaseManager`
+
+---
+
+## ConfigProvider
+
+Reads typed configuration values from the loaded `trazo.yaml` and environment variables.
+
+```go
+type ConfigProvider interface {
+    Get(key string) any
+    GetString(key string) string
+    GetInt(key string) int
+    GetBool(key string) bool
+    GetDuration(key string) time.Duration
+    GetStringSlice(key string) []string
+    ModuleConfig(moduleName string) map[string]any
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `Get` | Returns a raw `any` value for the dot-separated `key`. Returns `nil` if not set. |
+| `GetString` | Returns the value as a `string`. Returns `""` if not set or wrong type. |
+| `GetInt` | Returns the value as an `int`. Returns `0` if not set. |
+| `GetBool` | Returns the value as a `bool`. Returns `false` if not set. |
+| `GetDuration` | Parses duration strings (e.g., `"15m"`, `"2h"`) and returns a `time.Duration`. |
+| `GetStringSlice` | Returns the value as `[]string`. |
+| `ModuleConfig` | Returns the entire `modules.<name>` sub-map for module-specific settings. |
+
+**Mock:** `core/mocks.MockConfigProvider`
+
+---
+
+## ErrorFactory
+
+Constructs typed `*Error` values with the correct codes and HTTP statuses. Use this instead of building `Error` structs directly.
+
+```go
+type ErrorFactory interface {
+    NewValidation(field, message string) *Error
+    NewNotFound(resourceType, resourceID string) *Error
+    NewForbidden(permission string) *Error
+    NewConflict(resourceType, detail string) *Error
+    NewInternal(cause error) *Error
+    NewUnauthorized(detail string) *Error
+    New(code string, status int, message string) *Error
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `NewValidation` | Creates a 400 validation error for the specified `field`. |
+| `NewNotFound` | Creates a 404 error indicating `resourceType` with ID `resourceID` was not found. |
+| `NewForbidden` | Creates a 403 error indicating the actor lacks the specified `permission`. |
+| `NewConflict` | Creates a 409 error for duplicate or conflicting resources. |
+| `NewInternal` | Creates a 500 error wrapping the provided `cause`. The cause is logged but not exposed to API clients. |
+| `NewUnauthorized` | Creates a 401 error for missing or invalid credentials. |
+| `New` | Low-level constructor for custom error codes. Prefer the typed helpers above. |
+
+**Usage:**
+
+```go
+if repair.Status != "pending" {
+    return core.Errors.NewValidation("status", "repair must be in pending state to approve")
+}
+```
+
+**Mock:** `core/mocks.MockErrorFactory`
+
+---
+
+## LogProvider
+
+Returns a structured logger scoped to the current module and request context.
+
+```go
+type LogProvider interface {
+    For(ctx context.Context) ContextLogger
+}
+```
+
+`For` extracts the request-scoped logger from `ctx` (populated by the logging middleware) and returns a `ContextLogger`.
+
+**Mock:** `core/mocks.MockLogProvider`
+
+---
+
+## ContextLogger
+
+`ContextLogger` is returned by `LogProvider.For` and supports a fluent API for adding structured fields before emitting a log entry.
+
+```go
+type ContextLogger interface {
+    WithModule(module string) ContextLogger
+    WithAction(action string) ContextLogger
+    WithError(err error) ContextLogger
+    WithFields(fields map[string]any) ContextLogger
+
+    Debug(msg string, fields ...map[string]any)
+    Info(msg string, fields ...map[string]any)
+    Warn(msg string, fields ...map[string]any)
+    Error(msg string, fields ...map[string]any)
+}
+```
+
+**Usage examples:**
+
+```go
+logger := core.Log.For(ctx)
+
+// Log an informational event with module and action context
+logger.WithModule("repairs").WithAction("create").Info("repair created", map[string]any{
+    "repair_id":  repair.ID,
+    "vehicle_id": repair.VehicleID,
+})
+
+// Log an error with the wrapped cause
+logger.WithModule("repairs").WithAction("approve").WithError(err).Error("failed to approve repair")
+
+// Log a warning with arbitrary fields
+logger.WithFields(map[string]any{
+    "tenant_id": tenantID,
+    "count":     pendingCount,
+}).Warn("high number of pending repairs")
+```
+
+Chain `WithModule`, `WithAction`, `WithError`, and `WithFields` in any order before calling the terminal method (`Debug`, `Info`, `Warn`, `Error`). Each `With*` call returns a new `ContextLogger` — the original is not mutated.

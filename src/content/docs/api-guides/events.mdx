@@ -1,0 +1,478 @@
+---
+title: Events
+description: Query domain events, inspect event statistics, and retrieve failed dead-letter events from the Trazo event store.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Trazo uses an event-sourced architecture. Every meaningful state change in the system — a repair being created, a user being updated, an invoice being issued — is recorded as an immutable domain event. These events flow through the event bus to power side effects such as notifications, projections, and integrations.
+
+The Events API lets you query the event store directly. This is useful for debugging, replaying events, building custom projections, and monitoring pipeline health.
+
+All event endpoints require the `events:read` permission.
+
+## Event Structure
+
+Every event in the system shares the following shape:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique event identifier |
+| `name` | string | Dot-separated event name, e.g. `repairs.created` |
+| `module` | string | The bounded context that produced the event, e.g. `repairs` |
+| `tenant_id` | string | The tenant this event belongs to |
+| `aggregate_type` | string | The type of the root entity, e.g. `repair` |
+| `aggregate_id` | string | The ID of the root entity instance |
+| `version` | integer | Monotonically increasing version for the aggregate instance |
+| `payload` | object | Event-specific data (the "what changed") |
+| `metadata` | object | Contextual information: `actor_id`, `ip_address`, `correlation_id`, etc. |
+| `occurred_at` | string | ISO 8601 timestamp when the event was raised |
+| `sequence` | integer | Global sequence number across all events in the store |
+
+**Example event:**
+
+```json
+{
+  "id": "evt_01HQ...",
+  "name": "repairs.created",
+  "module": "repairs",
+  "tenant_id": "ten_01HQ...",
+  "aggregate_type": "repair",
+  "aggregate_id": "rep_01HQ...",
+  "version": 1,
+  "payload": {
+    "title": "Screen replacement",
+    "device": "iPhone 14",
+    "customer_id": "cus_01HQ...",
+    "status": "pending"
+  },
+  "metadata": {
+    "actor_id": "usr_01HQ...",
+    "ip_address": "203.0.113.42",
+    "correlation_id": "corr_01HQ..."
+  },
+  "occurred_at": "2024-03-15T09:00:00Z",
+  "sequence": 4821
+}
+```
+
+## List Events
+
+Retrieve a paginated list of domain events from the event store. Use filters to scope results to a specific event type, aggregate, or module.
+
+**`GET /api/v1/events`**
+
+| Query parameter | Type | Description |
+|---|---|---|
+| `name` | string | Filter by event name, e.g. `repairs.created` |
+| `module` | string | Filter by module/bounded context, e.g. `repairs` |
+| `aggregate_type` | string | Filter by aggregate type, e.g. `repair` |
+| `aggregate_id` | string | Filter to events for a specific aggregate instance |
+| `from_sequence` | integer | Return events with `sequence` greater than this value (for cursor-based pagination) |
+| `limit` | integer | Maximum results to return (default: `50`, max: `200`) |
+| `offset` | integer | Number of records to skip (default: `0`) |
+
+**Response**
+
+```json
+{
+  "items": [ /* array of event objects */ ],
+  "total": 4821,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl "http://localhost:8080/api/v1/events?name=repairs.created&aggregate_type=repair&limit=50" \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+      "net/url"
+  )
+
+  type Event struct {
+      ID            string         `json:"id"`
+      Name          string         `json:"name"`
+      Module        string         `json:"module"`
+      TenantID      string         `json:"tenant_id"`
+      AggregateType string         `json:"aggregate_type"`
+      AggregateID   string         `json:"aggregate_id"`
+      Version       int            `json:"version"`
+      Payload       map[string]any `json:"payload"`
+      Metadata      map[string]any `json:"metadata"`
+      OccurredAt    string         `json:"occurred_at"`
+      Sequence      int            `json:"sequence"`
+  }
+
+  type EventListResponse struct {
+      Items  []Event `json:"items"`
+      Total  int     `json:"total"`
+      Limit  int     `json:"limit"`
+      Offset int     `json:"offset"`
+  }
+
+  type EventFilter struct {
+      Name          string
+      Module        string
+      AggregateType string
+      AggregateID   string
+      FromSequence  int
+      Limit         int
+      Offset        int
+  }
+
+  func listEvents(accessToken string, filter EventFilter) (*EventListResponse, error) {
+      params := url.Values{}
+      if filter.Name != ""          { params.Set("name",           filter.Name) }
+      if filter.Module != ""        { params.Set("module",         filter.Module) }
+      if filter.AggregateType != "" { params.Set("aggregate_type", filter.AggregateType) }
+      if filter.AggregateID != ""   { params.Set("aggregate_id",   filter.AggregateID) }
+      if filter.FromSequence > 0    { params.Set("from_sequence",  fmt.Sprintf("%d", filter.FromSequence)) }
+      if filter.Limit > 0           { params.Set("limit",          fmt.Sprintf("%d", filter.Limit)) }
+      if filter.Offset > 0          { params.Set("offset",         fmt.Sprintf("%d", filter.Offset)) }
+
+      req, err := http.NewRequest(http.MethodGet,
+          "http://localhost:8080/api/v1/events?"+params.Encode(), nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result EventListResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      result, err := listEvents("$ACCESS_TOKEN", EventFilter{
+          Name:          "repairs.created",
+          AggregateType: "repair",
+          Limit:         50,
+      })
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Found %d events\n", result.Total)
+      for _, evt := range result.Items {
+          fmt.Printf("  [seq:%d] %s on %s %s at %s\n",
+              evt.Sequence, evt.Name, evt.AggregateType, evt.AggregateID, evt.OccurredAt)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function listEvents(accessToken, filters = {}) {
+    const params = new URLSearchParams();
+
+    if (filters.name)          params.set('name',           filters.name);
+    if (filters.module)        params.set('module',         filters.module);
+    if (filters.aggregateType) params.set('aggregate_type', filters.aggregateType);
+    if (filters.aggregateId)   params.set('aggregate_id',   filters.aggregateId);
+    if (filters.fromSequence)  params.set('from_sequence',  filters.fromSequence);
+    if (filters.limit)         params.set('limit',          filters.limit);
+    if (filters.offset)        params.set('offset',         filters.offset);
+
+    const response = await fetch(`http://localhost:8080/api/v1/events?${params}`, {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (response.status === 403) {
+      throw new Error('Insufficient permissions to access events');
+    }
+    if (!response.ok) {
+      throw new Error('Failed to fetch events');
+    }
+
+    return response.json();
+  }
+
+  // Example: list all repair creation events
+  const result = await listEvents(accessToken, {
+    name: 'repairs.created',
+    aggregateType: 'repair',
+    limit: 50,
+  });
+
+  console.log(`Total events: ${result.total}`);
+  result.items.forEach(evt => {
+    console.log(`[seq:${evt.sequence}] ${evt.name} on ${evt.aggregate_id} at ${evt.occurred_at}`);
+  });
+  ```
+  </TabItem>
+</Tabs>
+
+## Event Statistics
+
+Retrieve a summary of the event pipeline's health. This is particularly useful for monitoring dashboards and alerting on stuck or failed events.
+
+**`GET /api/v1/events/stats`**
+
+**Response**
+
+```json
+{
+  "total": 48210,
+  "processed": 48185,
+  "failed": 12,
+  "pending": 13
+}
+```
+
+| Field | Description |
+|---|---|
+| `total` | Total number of events ever recorded |
+| `processed` | Events that have been successfully consumed by all subscribers |
+| `failed` | Events that exhausted all retry attempts and moved to the dead-letter store |
+| `pending` | Events currently awaiting processing or in-flight |
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl http://localhost:8080/api/v1/events/stats \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type EventStats struct {
+      Total     int `json:"total"`
+      Processed int `json:"processed"`
+      Failed    int `json:"failed"`
+      Pending   int `json:"pending"`
+  }
+
+  func getEventStats(accessToken string) (*EventStats, error) {
+      req, err := http.NewRequest(http.MethodGet, "http://localhost:8080/api/v1/events/stats", nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var stats EventStats
+      if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
+          return nil, err
+      }
+      return &stats, nil
+  }
+
+  func main() {
+      stats, err := getEventStats("$ACCESS_TOKEN")
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Total: %d | Processed: %d | Pending: %d | Failed: %d\n",
+          stats.Total, stats.Processed, stats.Pending, stats.Failed)
+
+      if stats.Failed > 0 {
+          fmt.Printf("WARNING: %d events in dead-letter store\n", stats.Failed)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function getEventStats(accessToken) {
+    const response = await fetch('http://localhost:8080/api/v1/events/stats', {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (!response.ok) {
+      throw new Error('Failed to fetch event stats');
+    }
+
+    const stats = await response.json();
+    console.log(`Total: ${stats.total} | Processed: ${stats.processed} | Pending: ${stats.pending} | Failed: ${stats.failed}`);
+
+    if (stats.failed > 0) {
+      console.warn(`${stats.failed} events are in the dead-letter store`);
+    }
+
+    return stats;
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Dead-Letter Events
+
+Events that could not be processed after all retry attempts are moved to the dead-letter store. Inspect them here to diagnose consumer failures and determine whether manual reprocessing or remediation is needed.
+
+**`GET /api/v1/events/dead-letters`**
+
+Each dead-letter entry includes the original event plus an `error` field describing why it failed.
+
+**Response**
+
+```json
+{
+  "items": [
+    {
+      "id": "dl_01HQ...",
+      "event": { /* original event object */ },
+      "error": "connection refused: downstream service unavailable",
+      "attempts": 5,
+      "last_attempted_at": "2024-03-15T12:00:00Z",
+      "created_at": "2024-03-15T09:01:00Z"
+    }
+  ],
+  "total": 12
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl http://localhost:8080/api/v1/events/dead-letters \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type DeadLetterEntry struct {
+      ID              string `json:"id"`
+      Event           Event  `json:"event"`
+      Error           string `json:"error"`
+      Attempts        int    `json:"attempts"`
+      LastAttemptedAt string `json:"last_attempted_at"`
+      CreatedAt       string `json:"created_at"`
+  }
+
+  type DeadLetterResponse struct {
+      Items []DeadLetterEntry `json:"items"`
+      Total int               `json:"total"`
+  }
+
+  func getDeadLetters(accessToken string) (*DeadLetterResponse, error) {
+      req, err := http.NewRequest(http.MethodGet,
+          "http://localhost:8080/api/v1/events/dead-letters", nil)
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result DeadLetterResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      dl, err := getDeadLetters("$ACCESS_TOKEN")
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Dead-letter events: %d\n", dl.Total)
+      for _, entry := range dl.Items {
+          fmt.Printf("  [%s] event %s failed after %d attempts: %s\n",
+              entry.CreatedAt, entry.Event.Name, entry.Attempts, entry.Error)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function getDeadLetters(accessToken) {
+    const response = await fetch('http://localhost:8080/api/v1/events/dead-letters', {
+      headers: { 'Authorization': `Bearer ${accessToken}` },
+    });
+
+    if (response.status === 403) {
+      throw new Error('Insufficient permissions to access dead-letter events');
+    }
+    if (!response.ok) {
+      throw new Error('Failed to fetch dead-letter events');
+    }
+
+    const data = await response.json();
+    console.log(`Dead-letter events: ${data.total}`);
+    data.items.forEach(entry => {
+      console.error(
+        `[${entry.created_at}] ${entry.event.name} failed after ${entry.attempts} attempt(s): ${entry.error}`
+      );
+    });
+    return data;
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Using Sequence Numbers for Polling
+
+The `sequence` field provides a global, monotonically increasing counter across all events. Use it to implement efficient cursor-based polling without missing or duplicating events:
+
+1. On first poll, fetch events with `limit=200` and record the highest `sequence` value seen.
+2. On subsequent polls, pass `from_sequence=<last_seen_sequence>` to receive only newer events.
+
+This approach is more efficient than timestamp-based pagination because sequence numbers are assigned atomically and are not subject to clock skew.
+
+## Common Errors
+
+| Status | Code | Description |
+|---|---|---|
+| `403` | `INSUFFICIENT_PERMISSIONS` | The authenticated user does not have the `events:read` permission. |
+| `422` | `VALIDATION_ERROR` | A query parameter has an invalid value (e.g., `from_sequence` is negative). |
+
+**Error response shape:**
+
+```json
+{
+  "code": "INSUFFICIENT_PERMISSIONS",
+  "message": "You do not have permission to access events",
+  "request_id": "req_01HQ..."
+}
+```
+
+## Related
+
+- [Auto-generated API Reference](/reference) — full schemas for all event endpoints.
+- [Audit Logs Guide](/api-guides/audit-logs) — per-field diff tracking (distinct from domain events).
+- [Notifications Guide](/api-guides/notifications) — rules that trigger notifications in response to events.

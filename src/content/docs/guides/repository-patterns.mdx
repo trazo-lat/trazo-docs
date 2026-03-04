@@ -1,0 +1,416 @@
+---
+title: Repository Patterns
+description: Conventions for writing database repositories in Trazo using sqlx and squirrel, including scope enforcement, transactional variants, and soft deletes.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The repository layer is responsible for all SQL generation and execution. Trazo repositories follow a strict set of conventions that make them predictable, testable, and safe in a multi-tenant environment.
+
+---
+
+## Repository Struct
+
+Each module has a single `Repository` struct holding a reference to `*core.Core`. All database access goes through `core.DB`, which carries the tenant-scoped connection.
+
+```go
+// internal/modules/domain/repairs/repository.go
+package repairs
+
+import (
+    "context"
+    "database/sql"
+    "errors"
+
+    sq "github.com/Masterminds/squirrel"
+    "github.com/jmoiron/sqlx"
+    "github.com/trazo-dev/trazo-core-service/internal/core"
+)
+
+type Repository struct {
+    core *core.Core
+}
+
+func NewRepository(c *core.Core) *Repository {
+    return &Repository{core: c}
+}
+```
+
+---
+
+## Core Rules
+
+### 1. Always Use `sq.Dollar` for PostgreSQL Placeholders
+
+Squirrel defaults to `?` (MySQL-style). PostgreSQL requires `$1`, `$2`, etc. Apply `PlaceholderFormat(sq.Dollar)` to every query before calling `ToSql()`.
+
+```go
+sql, args, err := sq.Select("*").From("repairs").
+    Where("id = ?", id).
+    PlaceholderFormat(sq.Dollar). // Required for PostgreSQL
+    ToSql()
+```
+
+### 2. Always Apply Scope via `ApplyScope`
+
+Every query that fetches records the user will see must apply the permission scope. This enforces the row-level visibility rules declared in `module.yaml`.
+
+```go
+scope := r.core.Permission.ApplyScope(ctx, "repairs.read")
+for _, w := range scope.Wheres {
+    query = query.Where(w.SQL, w.Args...)
+}
+```
+
+`ApplyScope` resolves the highest-priority scope the current user holds (e.g., `all`, `assigned`, `own`) and returns the corresponding WHERE clause fragments.
+
+### 3. Provide `*Tx` Variants for All Write Operations
+
+Methods called inside a `core.DB.Tx` transaction closure receive a `core.Tx`. Name these methods with the `Tx` suffix and accept `core.Tx` as the second parameter.
+
+```go
+// Read: no Tx variant needed (reads use the ambient connection)
+func (r *Repository) GetByID(ctx context.Context, id string) (*Repair, error)
+
+// Write: Tx variant required
+func (r *Repository) CreateTx(ctx context.Context, tx core.Tx, input CreateRepairInput) (*Repair, error)
+func (r *Repository) UpdateTx(ctx context.Context, tx core.Tx, id string, input UpdateRepairInput) (*Repair, error)
+func (r *Repository) SoftDeleteTx(ctx context.Context, tx core.Tx, id string) error
+```
+
+### 4. Use Soft Deletes
+
+Never issue `DELETE FROM`. Always set `deleted_at = NOW()` and filter on `deleted_at IS NULL` in every read query.
+
+```go
+// Wrong
+sq.Delete("repairs").Where("id = ?", id)
+
+// Correct
+sq.Update("repairs").Set("deleted_at", "NOW()").Where("id = ?", id)
+```
+
+### 5. Use `db` Struct Tags
+
+Hand-write `db:"column_name"` tags on every struct field that maps to a database column. The tag name must exactly match the column name in the schema.
+
+```go
+type Repair struct {
+    ID          uuid.UUID  `json:"id"          db:"id"`
+    TenantID    uuid.UUID  `json:"-"           db:"tenant_id"`
+    VehicleID   uuid.UUID  `json:"vehicle_id"  db:"vehicle_id"`
+    Description string     `json:"description" db:"description"`
+    Status      string     `json:"status"      db:"status"`
+    CreatedBy   uuid.UUID  `json:"created_by"  db:"created_by"`
+    AssignedTo  *uuid.UUID `json:"assigned_to" db:"assigned_to"`
+    CreatedAt   time.Time  `json:"created_at"  db:"created_at"`
+    UpdatedAt   time.Time  `json:"updated_at"  db:"updated_at"`
+    DeletedAt   *time.Time `json:"-"           db:"deleted_at"`
+}
+```
+
+---
+
+## List with Pagination and Scope
+
+The list query is the most complex: it applies scope, optional filters, a count query, and pagination — all from the same base query builder.
+
+```go
+func (r *Repository) List(ctx context.Context, filter ListFilter) ([]Repair, int, error) {
+    // Base query — always filter soft-deleted records
+    base := sq.Select("*").From("repairs").Where("deleted_at IS NULL")
+
+    // Apply permission scope (adds WHERE clauses based on user's role)
+    scope := r.core.Permission.ApplyScope(ctx, "repairs.read")
+    for _, w := range scope.Wheres {
+        base = base.Where(w.SQL, w.Args...)
+    }
+
+    // Apply caller-supplied filters
+    if filter.Status != "" {
+        base = base.Where("status = ?", filter.Status)
+    }
+    if filter.AssignedTo != nil {
+        base = base.Where("assigned_to = ?", filter.AssignedTo)
+    }
+
+    // Count total matching records before applying pagination
+    countSQL, countArgs, _ := base.
+        Columns().        // Clear existing SELECT columns
+        Column("COUNT(*)").
+        PlaceholderFormat(sq.Dollar).
+        ToSql()
+
+    var total int
+    err := r.core.DB.Conn(ctx).QueryRowContext(ctx, countSQL, countArgs...).Scan(&total)
+    if err != nil {
+        return nil, 0, err
+    }
+
+    // Apply ordering and pagination
+    listSQL, listArgs, _ := base.
+        Columns("*").
+        OrderBy("created_at DESC").
+        Limit(uint64(filter.Limit)).
+        Offset(uint64(filter.Offset)).
+        PlaceholderFormat(sq.Dollar).
+        ToSql()
+
+    var repairs []Repair
+    err = sqlx.SelectContext(ctx, r.core.DB.Conn(ctx), &repairs, listSQL, listArgs...)
+    if err != nil {
+        return nil, 0, err
+    }
+
+    return repairs, total, nil
+}
+```
+
+<Aside type="tip">
+  The `Columns()` call with no arguments clears the existing `SELECT *` clause so you can replace it with `COUNT(*)` for the count query. This avoids duplicating the entire WHERE clause.
+</Aside>
+
+---
+
+## GetByID
+
+```go
+func (r *Repository) GetByID(ctx context.Context, id string) (*Repair, error) {
+    sql, args, _ := sq.Select("*").From("repairs").
+        Where("id = ? AND deleted_at IS NULL", id).
+        PlaceholderFormat(sq.Dollar).
+        ToSql()
+
+    var repair Repair
+    err := sqlx.GetContext(ctx, r.core.DB.Conn(ctx), &repair, sql, args...)
+    if err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return nil, r.core.Errors.NotFound("repair", id)
+        }
+        return nil, err
+    }
+    return &repair, nil
+}
+```
+
+Use the `*Tx` variant when you need to lock the row during an update (to prevent lost updates under concurrent requests):
+
+```go
+func (r *Repository) GetByIDTx(ctx context.Context, tx core.Tx, id string) (*Repair, error) {
+    sqlStr, args, _ := sq.Select("*").From("repairs").
+        Where("id = ? AND deleted_at IS NULL", id).
+        Suffix("FOR UPDATE"). // Lock the row for the duration of the transaction
+        PlaceholderFormat(sq.Dollar).
+        ToSql()
+
+    var repair Repair
+    err := sqlx.GetContext(ctx, tx.Conn(), &repair, sqlStr, args...)
+    if err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return nil, r.core.Errors.NotFound("repair", id)
+        }
+        return nil, err
+    }
+    return &repair, nil
+}
+```
+
+---
+
+## CreateTx
+
+```go
+func (r *Repository) CreateTx(ctx context.Context, tx core.Tx, input CreateRepairInput) (*Repair, error) {
+    sql, args, _ := sq.Insert("repairs").
+        Columns(
+            "vehicle_id",
+            "description",
+            "assigned_to",
+            "status",
+            "created_by",
+        ).
+        Values(
+            input.VehicleID,
+            input.Description,
+            input.AssignedTo,   // nil maps to SQL NULL
+            "pending",
+            r.core.Session.UserID(ctx),
+        ).
+        Suffix("RETURNING *").  // Return the full row so generated fields (id, created_at) are available
+        PlaceholderFormat(sq.Dollar).
+        ToSql()
+
+    var repair Repair
+    err := sqlx.GetContext(ctx, tx.Conn(), &repair, sql, args...)
+    if err != nil {
+        return nil, err
+    }
+    return &repair, nil
+}
+```
+
+<Aside type="note">
+  `RETURNING *` is a PostgreSQL extension that returns the inserted row. Use `sqlx.GetContext` (not `ExecContext`) when using `RETURNING` so the result is scanned into the struct.
+</Aside>
+
+---
+
+## UpdateTx with Partial Updates
+
+Use a conditional builder to apply only the fields that were actually provided. Fields that are `nil` in the input struct are not included in the `SET` clause.
+
+```go
+func (r *Repository) UpdateTx(ctx context.Context, tx core.Tx, id string, input UpdateRepairInput) (*Repair, error) {
+    q := sq.Update("repairs").Where("id = ? AND deleted_at IS NULL", id)
+
+    if input.Description != nil {
+        q = q.Set("description", *input.Description)
+    }
+    if input.AssignedTo != nil {
+        q = q.Set("assigned_to", *input.AssignedTo)
+    }
+
+    // Always update the timestamp
+    q = q.Set("updated_at", sq.Expr("NOW()"))
+
+    // Return the updated row
+    q = q.Suffix("RETURNING *")
+
+    sqlStr, args, _ := q.PlaceholderFormat(sq.Dollar).ToSql()
+
+    var repair Repair
+    err := sqlx.GetContext(ctx, tx.Conn(), &repair, sqlStr, args...)
+    if err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return nil, r.core.Errors.NotFound("repair", id)
+        }
+        return nil, err
+    }
+    return &repair, nil
+}
+```
+
+<Aside type="caution">
+  If the input struct has no set fields (every pointer is nil), the `UPDATE` statement will have no `SET` clause and will fail at the SQL level. Validate in the service layer that at least one field is provided before calling the repository.
+</Aside>
+
+---
+
+## SoftDeleteTx
+
+```go
+func (r *Repository) SoftDeleteTx(ctx context.Context, tx core.Tx, id string) error {
+    sqlStr, args, _ := sq.Update("repairs").
+        Set("deleted_at", sq.Expr("NOW()")).
+        Where("id = ? AND deleted_at IS NULL", id).
+        PlaceholderFormat(sq.Dollar).
+        ToSql()
+
+    result, err := tx.Conn().ExecContext(ctx, sqlStr, args...)
+    if err != nil {
+        return err
+    }
+
+    // Verify the record existed and was not already deleted
+    affected, _ := result.RowsAffected()
+    if affected == 0 {
+        return r.core.Errors.NotFound("repair", id)
+    }
+    return nil
+}
+```
+
+---
+
+## UpdateStatusTx
+
+Status updates often need to write additional fields alongside the status (e.g., `resolution_notes` when completing a repair).
+
+```go
+func (r *Repository) UpdateStatusTx(
+    ctx context.Context,
+    tx core.Tx,
+    id string,
+    newStatus string,
+    input TransitionInput,
+) (*Repair, error) {
+    q := sq.Update("repairs").
+        Set("status", newStatus).
+        Set("updated_at", sq.Expr("NOW()")).
+        Where("id = ? AND deleted_at IS NULL", id)
+
+    if input.ResolutionNotes != nil {
+        q = q.Set("resolution_notes", *input.ResolutionNotes)
+    }
+
+    q = q.Suffix("RETURNING *")
+    sqlStr, args, _ := q.PlaceholderFormat(sq.Dollar).ToSql()
+
+    var repair Repair
+    err := sqlx.GetContext(ctx, tx.Conn(), &repair, sqlStr, args...)
+    if err != nil {
+        if errors.Is(err, sql.ErrNoRows) {
+            return nil, r.core.Errors.NotFound("repair", id)
+        }
+        return nil, err
+    }
+    return &repair, nil
+}
+```
+
+---
+
+## Connection Resolution
+
+| Context | Method | Use For |
+|---|---|---|
+| Outside transaction | `r.core.DB.Conn(ctx)` | Read queries |
+| Inside transaction closure | `tx.Conn()` | All writes and reads that must be atomic |
+
+Never mix `Conn(ctx)` and `tx.Conn()` — a read using `Conn(ctx)` inside a transaction closure may not see the writes made via `tx.Conn()` if they have not been committed.
+
+---
+
+## Handling `sql.ErrNoRows`
+
+Always check for `sql.ErrNoRows` on single-row queries and convert it to a typed `core.Error`:
+
+```go
+err := sqlx.GetContext(ctx, r.core.DB.Conn(ctx), &repair, sqlStr, args...)
+if err != nil {
+    if errors.Is(err, sql.ErrNoRows) {
+        return nil, r.core.Errors.NotFound("repair", id)
+    }
+    return nil, err // Unknown DB error — propagate as-is
+}
+```
+
+`core.Errors.NotFound` returns a `*core.Error` with HTTP status 404 that the handler's `mapError` converts to a structured 404 response.
+
+---
+
+## Using `sq.Expr` for SQL Functions
+
+When a column value is a SQL expression rather than a literal, use `sq.Expr` to prevent squirrel from treating it as a parameter:
+
+```go
+// Wrong — squirrel will bind "NOW()" as a string literal
+q = q.Set("updated_at", "NOW()")
+
+// Correct — squirrel emits NOW() as a raw SQL expression
+q = q.Set("updated_at", sq.Expr("NOW()"))
+```
+
+---
+
+## Repository Checklist
+
+Before submitting a repository for review:
+
+- Every query builder call ends with `.PlaceholderFormat(sq.Dollar)`.
+- Every read query filters `deleted_at IS NULL`.
+- Every read query that returns user-visible rows applies `ApplyScope`.
+- Write methods have a `Tx` suffix and accept `core.Tx`.
+- Single-row reads handle `sql.ErrNoRows` explicitly.
+- `RETURNING *` is used on insert and update queries.
+- No raw SQL strings with hardcoded `$1` placeholders — use squirrel throughout.

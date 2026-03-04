@@ -1,0 +1,114 @@
+---
+title: Architecture Overview
+description: High-level architecture of the Trazo platform, covering the two-repository structure, request lifecycle, and key architectural patterns.
+---
+
+Trazo is a multi-tenant SaaS platform built in Go. The system is organized into two repositories with clearly separated responsibilities and designed around a small set of composable architectural patterns.
+
+## Repository Structure
+
+| Repository | Purpose |
+|---|---|
+| `trazo-core-service` | The main HTTP API server, all modules, and the database layer |
+| `trazo-cli` | Developer tooling: code generation, migration management, module scaffolding |
+
+The API server is the runtime artifact deployed to production. The CLI is a development-time tool that reads `module.yaml` files to generate boilerplate, sync permissions, and manage schema migrations.
+
+## Request Lifecycle
+
+Every HTTP request passes through a fixed middleware chain before reaching a Huma handler, then flows downward through the service and repository layers.
+
+```
+HTTP Request
+    │
+    ▼
+RecoveryMiddleware        ← catches panics, returns 500
+    │
+    ▼
+CORSMiddleware            ← sets CORS headers
+    │
+    ▼
+RequestIDMiddleware       ← attaches X-Request-ID
+    │
+    ▼
+CanonicalLogMiddleware    ← structured request/response logging
+    │
+    ▼
+JWTAuthMiddleware         ← validates token, loads session into context
+    │
+    ▼
+Huma Handler              ← input validation, OpenAPI binding
+    │
+    ▼
+Service Layer             ← business logic, permission checks, audit recording
+    │
+    ▼
+Repository Layer          ← SQL via sqlx + squirrel
+    │
+    ▼
+PostgreSQL                ← tenant schema isolated via search_path
+```
+
+All request-scoped data (current user, tenant, permissions, request ID) is available through the `Core` struct passed into every service and handler. Handlers never reach into the database directly; all data access goes through the repository layer.
+
+## Key Architectural Patterns
+
+### Dependency Injection via the Core Struct
+
+The `Core` struct is the single dependency carrier for the entire application. It holds 11 sub-interfaces covering session management, permissions, auditing, events, modules, hooks, storage, database, configuration, error construction, and logging.
+
+Services and handlers receive `*Core` at initialization and use it to access every platform capability. This makes every dependency explicit and every component independently testable via mock implementations.
+
+See [Core Struct](/architecture/core-struct) for the complete interface definitions.
+
+### Schema-per-Tenant Isolation
+
+Each tenant is assigned a dedicated PostgreSQL schema named `tenant_<slug>`. At the start of each authenticated request, the database connection sets:
+
+```sql
+SET search_path = tenant_slug, public;
+```
+
+All module tables live in the tenant schema. Shared platform tables (users, tenants, memberships, roles) remain in the `public` schema and are accessible to all schemas via the search path fallback.
+
+See [Schema-per-Tenant](/architecture/schema-per-tenant) for isolation details and trade-offs.
+
+### Transactional Outbox for Domain Events
+
+Domain events are not emitted directly to an in-memory bus. Instead, `EventBus.EmitTx` writes the event record into an outbox table within the same database transaction as the originating business operation. A background processor polls the outbox and delivers events to subscribers.
+
+This guarantees that an event is never lost if the process crashes after the DB commit but before an in-memory delivery would have occurred.
+
+See [Event Outbox](/architecture/event-outbox) for the full delivery and retry model.
+
+### RFC 6902 Audit Trail
+
+Every state-changing operation records an audit entry. Updates produce a JSON Patch diff (RFC 6902) between the before and after snapshots, making it possible to replay or inspect every change to any resource over time.
+
+See [Audit Trail](/architecture/audit-trail) for the recording API and query model.
+
+## Module Types
+
+Trazo organizes all functionality into modules. Every module follows the same interface and file layout convention.
+
+| Type | Purpose | Examples |
+|---|---|---|
+| `foundation` | Core platform capabilities required by all tenants | users, tenants, audit, auth |
+| `domain` | Business-specific functionality shipped with the platform | repairs, inventory, billing |
+| `custom` | Tenant-specific extensions developed per-customer | custom workflows, integrations |
+
+Foundation modules are always enabled. Domain and custom modules can be enabled or disabled per tenant through the module registry.
+
+See [Module System](/architecture/module-system) for lifecycle, registration, and the `module.yaml` configuration format.
+
+## Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Go |
+| HTTP framework | [chi](https://github.com/go-chi/chi) + [Huma](https://huma.rocks/) |
+| Database | PostgreSQL |
+| SQL builder | sqlx + squirrel |
+| Auth | JWT (access + refresh tokens) |
+| Password hashing | bcrypt (cost 12) |
+| Config | Environment variables + `module.yaml` |

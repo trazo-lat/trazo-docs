@@ -1,0 +1,247 @@
+---
+title: Configuration Reference
+description: Complete reference for every trazo.yaml configuration key, its environment variable equivalent, type, default value, and description.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Trazo is configured via a `trazo.yaml` file (path configurable with `--config`). Every key has a corresponding environment variable that follows the pattern `TRAZO_<SECTION>_<KEY>` in uppercase with dots replaced by underscores.
+
+Configuration precedence (highest to lowest):
+
+1. CLI flags
+2. Environment variables
+3. `trazo.yaml` project file
+4. `~/.trazo/local.json` user-local overrides
+5. Built-in defaults
+
+<Aside type="caution">
+Never commit secrets (JWT secret, database passwords, SMTP credentials) to source control. Use environment variables or `~/.trazo/local.json` for sensitive values.
+</Aside>
+
+---
+
+## Top-Level
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `env` | `TRAZO_ENV` | string | `"local"` | Runtime environment. Accepted values: `local`, `staging`, `production`. Affects log formatting and default behavior. |
+
+---
+
+## Database
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `database.url` | `TRAZO_DATABASE_URL` | string | — | PostgreSQL connection string in `postgres://user:pass@host:port/dbname` format. **Required.** |
+| `database.max_conns` | `TRAZO_DATABASE_MAX_CONNS` | int | `25` | Maximum number of open connections in the pool. |
+| `database.min_conns` | `TRAZO_DATABASE_MIN_CONNS` | int | `5` | Minimum number of idle connections kept alive. |
+
+**Example:**
+
+```yaml
+database:
+  url: postgres://trazo:secret@localhost:5432/trazo_dev
+  max_conns: 50
+  min_conns: 10
+```
+
+---
+
+## Server
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `server.host` | `TRAZO_SERVER_HOST` | string | `"0.0.0.0"` | Network interface to bind. Use `127.0.0.1` to restrict to loopback. |
+| `server.port` | `TRAZO_SERVER_PORT` | int | `8080` | TCP port the HTTP server listens on. |
+| `server.read_timeout` | `TRAZO_SERVER_READ_TIMEOUT` | duration | `30s` | Maximum duration for reading the full HTTP request including body. |
+| `server.write_timeout` | `TRAZO_SERVER_WRITE_TIMEOUT` | duration | `30s` | Maximum duration before the server times out writing the response. |
+
+**Example:**
+
+```yaml
+server:
+  host: 0.0.0.0
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+```
+
+---
+
+## Logging
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `log.level` | `TRAZO_LOG_LEVEL` | string | `"info"` | Minimum log level to emit. Accepted values: `debug`, `info`, `warn`, `error`. |
+| `log.file` | `TRAZO_LOG_FILE` | string | `""` | Path to a log file. Empty string writes to stderr. |
+
+**Example:**
+
+```yaml
+log:
+  level: debug
+  file: /var/log/trazo/server.log
+```
+
+---
+
+## Authentication
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `auth.jwt_secret` | `TRAZO_AUTH_JWT_SECRET` | string | — | Secret used to sign and verify JWT tokens. **Required in production.** Minimum 32 characters recommended. |
+| `auth.access_token_ttl` | `TRAZO_AUTH_ACCESS_TOKEN_TTL` | duration | `15m` | Lifetime of short-lived access tokens. |
+| `auth.refresh_token_ttl` | `TRAZO_AUTH_REFRESH_TOKEN_TTL` | duration | `168h` | Lifetime of refresh tokens (7 days). |
+| `auth.bcrypt_cost` | `TRAZO_AUTH_BCRYPT_COST` | int | `12` | bcrypt hashing cost factor for passwords. Range: 4–31. Higher values are more secure but slower. |
+
+**Example:**
+
+```yaml
+auth:
+  jwt_secret: "your-secret-at-least-32-characters-long"
+  access_token_ttl: 15m
+  refresh_token_ttl: 168h
+  bcrypt_cost: 12
+```
+
+<Aside type="caution">
+Do not set `auth.jwt_secret` directly in `trazo.yaml`. Use the `TRAZO_AUTH_JWT_SECRET` environment variable or `~/.trazo/local.json` so the secret is not committed to version control.
+</Aside>
+
+---
+
+## Events
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `events.poll_interval` | `TRAZO_EVENTS_POLL_INTERVAL` | duration | `1s` | How often the outbox worker polls for new events. |
+| `events.batch_size` | `TRAZO_EVENTS_BATCH_SIZE` | int | `50` | Maximum number of events processed per poll cycle. |
+| `events.max_retries` | `TRAZO_EVENTS_MAX_RETRIES` | int | `5` | Maximum delivery attempts before an event is marked as permanently failed. |
+| `events.worker_pool_size` | `TRAZO_EVENTS_WORKER_POOL_SIZE` | int | `10` | Number of goroutines in the async event worker pool. |
+| `events.shutdown_timeout` | `TRAZO_EVENTS_SHUTDOWN_TIMEOUT` | duration | `30s` | How long the server waits for in-flight event handlers to complete during graceful shutdown. |
+
+**Example:**
+
+```yaml
+events:
+  poll_interval: 500ms
+  batch_size: 100
+  max_retries: 3
+  worker_pool_size: 20
+  shutdown_timeout: 30s
+```
+
+---
+
+## Notifications
+
+### Email (SMTP)
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `notifications.email.host` | `TRAZO_NOTIFICATIONS_EMAIL_HOST` | string | `""` | SMTP server hostname. Empty string disables email notifications. |
+| `notifications.email.port` | `TRAZO_NOTIFICATIONS_EMAIL_PORT` | int | `587` | SMTP server port (587 for STARTTLS, 465 for implicit TLS). |
+| `notifications.email.user` | `TRAZO_NOTIFICATIONS_EMAIL_USER` | string | `""` | SMTP authentication username. |
+| `notifications.email.pass` | `TRAZO_NOTIFICATIONS_EMAIL_PASS` | string | `""` | SMTP authentication password. |
+| `notifications.email.from` | `TRAZO_NOTIFICATIONS_EMAIL_FROM` | string | `"noreply@example.com"` | Default From address for outgoing emails. |
+
+### Slack
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `notifications.slack.default_channel` | `TRAZO_NOTIFICATIONS_SLACK_DEFAULT_CHANNEL` | string | `""` | Default Slack channel (e.g., `#alerts`). Empty string disables Slack notifications. |
+
+### Webhook
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `notifications.webhook.timeout` | `TRAZO_NOTIFICATIONS_WEBHOOK_TIMEOUT` | duration | `10s` | HTTP request timeout for webhook deliveries. |
+
+**Example:**
+
+```yaml
+notifications:
+  email:
+    host: smtp.sendgrid.net
+    port: 587
+    user: apikey
+    pass: SG.your-api-key
+    from: noreply@yourapp.com
+  slack:
+    default_channel: "#trazo-alerts"
+  webhook:
+    timeout: 15s
+```
+
+---
+
+## Tenant
+
+| YAML Key | Env Var | Type | Default | Description |
+|----------|---------|------|---------|-------------|
+| `tenant.default_modules` | `TRAZO_TENANT_DEFAULT_MODULES` | []string | `["users", "audit"]` | List of module names automatically enabled when a new tenant is provisioned. |
+
+**Example:**
+
+```yaml
+tenant:
+  default_modules:
+    - users
+    - audit
+    - repairs
+    - vehicles
+```
+
+---
+
+## Complete Example: `trazo.yaml`
+
+```yaml
+env: local
+
+database:
+  url: postgres://trazo:secret@localhost:5432/trazo_dev
+  max_conns: 25
+  min_conns: 5
+
+server:
+  host: 0.0.0.0
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+
+log:
+  level: info
+  file: ""
+
+auth:
+  # jwt_secret: set via TRAZO_AUTH_JWT_SECRET environment variable
+  access_token_ttl: 15m
+  refresh_token_ttl: 168h
+  bcrypt_cost: 12
+
+events:
+  poll_interval: 1s
+  batch_size: 50
+  max_retries: 5
+  worker_pool_size: 10
+  shutdown_timeout: 30s
+
+notifications:
+  email:
+    host: ""
+    port: 587
+    user: ""
+    pass: ""
+    from: noreply@example.com
+  slack:
+    default_channel: ""
+  webhook:
+    timeout: 10s
+
+tenant:
+  default_modules:
+    - users
+    - audit
+```

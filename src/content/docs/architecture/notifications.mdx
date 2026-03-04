@@ -1,0 +1,153 @@
+---
+title: Notification System
+description: How Trazo routes domain events to notification channels, configures per-tenant notification rules, and delivers messages asynchronously.
+---
+
+Trazo's notification system connects domain events to delivery channels through a rule-based routing layer. When a domain event is emitted, the notifications module matches it against the tenant's configured `NotificationRule` records and delivers messages to the appropriate channels asynchronously.
+
+## Channel Types
+
+| Channel | Identifier | Description |
+|---|---|---|
+| In-app | `in_app` | Persistent notification stored in the tenant schema, surfaced in the UI |
+| Email | `email` | Outbound email via the configured mail provider |
+| Slack | `slack` | Message posted to a configured Slack channel or DM |
+| Webhook | `webhook` | HTTP POST to a configured endpoint with the event payload |
+
+## NotificationRule
+
+A `NotificationRule` is a per-tenant record that maps an event to a delivery channel and a message template. Rules are managed through the API and are stored in the tenant schema.
+
+```
+NotificationRule {
+    id          UUID
+    module      string      // module that emits the event (e.g., "repairs")
+    event_name  string      // event to match (e.g., "repairs.completed")
+    channel     string      // delivery channel: in_app | email | slack | webhook
+    template_id UUID        // reference to a NotificationTemplate record
+    enabled     bool
+    created_at  timestamp
+    updated_at  timestamp
+}
+```
+
+Multiple rules can match the same event, delivering it to several channels simultaneously (e.g., an in-app notification and an email).
+
+## NotificationTemplate
+
+Templates define the content of the notification. They support interpolation with values from the event payload using a simple `{{field_path}}` syntax:
+
+```
+Title:   Repair {{id}} has been completed
+Body:    The repair assigned to {{assigned_to.name}} was marked complete at {{completed_at}}.
+         View it here: {{_links.self}}
+Link:    /repairs/{{id}}
+```
+
+Field paths use dot notation to navigate nested payload fields. The `_links` namespace is injected by the notification system with pre-computed URLs for common actions.
+
+## In-App Notifications
+
+In-app notifications are stored as rows in the `notifications` table within the tenant schema:
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID | Unique identifier |
+| `recipient_id` | UUID | The user who should receive the notification |
+| `title` | string | Rendered from the template title |
+| `body` | string | Rendered from the template body |
+| `link` | string | Optional deep link to the related resource |
+| `read` | bool | Whether the user has read the notification |
+| `read_at` | timestamp | When the notification was marked read (null if unread) |
+| `event_name` | string | The originating event name |
+| `event_id` | UUID | The originating event ID (for deduplication) |
+| `created_at` | timestamp | When the notification was created |
+
+Clients poll or subscribe (via WebSocket or SSE) to `/api/v1/notifications` to display unread counts and notification lists.
+
+## Delivery Flow
+
+```
+Domain event emitted via EmitTx
+    │
+    ▼
+Outbox processor delivers event to notification module subscriber
+    │
+    ▼
+NotificationService.Handle(ctx, event)
+    │
+    ├── Query matching NotificationRules for tenant + event_name
+    │
+    ├── For each matching rule:
+    │     ├── Render template with event payload
+    │     └── Dispatch to channel handler (async)
+    │
+    └── Channel handlers:
+          ├── in_app   → INSERT into notifications table
+          ├── email    → enqueue to mail provider
+          ├── slack    → POST to Slack API
+          └── webhook  → HTTP POST to configured URL
+```
+
+Delivery is async. The notification subscriber handler returns immediately after dispatching; the actual delivery to external channels (email, Slack, webhook) happens in background workers. This means a slow external provider cannot block event processing.
+
+## Managing Rules via API
+
+Notification rules are fully manageable through the API:
+
+```
+GET    /api/v1/notification-rules          List all rules for the tenant
+POST   /api/v1/notification-rules          Create a new rule
+GET    /api/v1/notification-rules/:id      Get a specific rule
+PUT    /api/v1/notification-rules/:id      Update a rule
+DELETE /api/v1/notification-rules/:id      Delete a rule
+PATCH  /api/v1/notification-rules/:id/toggle  Enable or disable a rule
+```
+
+Rules require the permission `notifications.manage` (unscoped).
+
+## Default Rules
+
+When a module is enabled for a tenant, the platform reads the `notifications` section of `module.yaml` and provisions default `NotificationRule` records if they do not already exist:
+
+```yaml
+# repairs/module.yaml
+notifications:
+  - event: repairs.created
+    default_channel: in_app
+  - event: repairs.completed
+    default_channel: email
+```
+
+Default rules are created with `enabled: true`. Tenants can disable, modify, or extend them. Disabling a default rule does not prevent it from being re-created if the module is disabled and re-enabled; default rules are provisioned idempotently on module activation.
+
+:::tip
+When adding a new event to a domain module, always declare it in the `notifications` section of `module.yaml` with a sensible default channel. This ensures tenants have a working notification rule immediately when the module is updated, without requiring manual configuration.
+:::
+
+## Webhook Channel
+
+The `webhook` channel performs an HTTP POST to the configured URL with the following body:
+
+```json
+{
+  "event": "repairs.completed",
+  "module": "repairs",
+  "tenant_id": "...",
+  "occurred_at": "2026-03-03T10:00:00Z",
+  "payload": { ... }
+}
+```
+
+Webhook deliveries include a `X-Trazo-Signature` header computed as an HMAC-SHA256 of the request body using the tenant's webhook secret. Recipients should verify this signature before processing.
+
+Failed webhook deliveries are retried up to 3 times with exponential backoff. Permanently failed webhook deliveries are logged but do not go to the event dead letter queue, as the originating event was successfully processed.
+
+## Channel Configuration
+
+Channel-specific settings (mail provider credentials, Slack token, webhook URL and secret) are stored as tenant settings and read via `Core.Config.Setting`. They are not hardcoded in templates or rules.
+
+```go
+slackToken, err := s.core.Config.Setting(ctx, "notifications", "slack_token")
+webhookURL, err  := s.core.Config.Setting(ctx, "notifications", "webhook_url")
+```
