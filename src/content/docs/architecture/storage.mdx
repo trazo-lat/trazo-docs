@@ -1,0 +1,108 @@
+---
+title: File Storage
+description: Pluggable file storage system supporting local filesystem and S3-compatible backends with tenant-scoped paths.
+---
+
+Trazo provides a pluggable file storage system through the `core.Storage` interface. Files are stored with tenant isolation and tracked via metadata records in the database.
+
+## Backends
+
+| Backend | Use Case | URL Generation |
+|---|---|---|
+| **Local** | Development, single-server deployments | Filesystem path or configured base URL |
+| **S3** | Production, multi-server deployments | Presigned URLs with configurable expiry |
+
+Both backends implement the same `Backend` interface:
+
+```go
+type Backend interface {
+    Put(ctx context.Context, key string, reader io.Reader, contentType string) (int64, error)
+    Get(ctx context.Context, key string) (io.ReadCloser, error)
+    Delete(ctx context.Context, key string) error
+    URL(ctx context.Context, key string, expiry time.Duration) (string, error)
+}
+```
+
+## Tenant-Scoped Storage
+
+Files are stored with tenant isolation in the path structure:
+
+```
+tenant_<subdomain>/<module>/<resource_id>/<uuid>_<filename>
+```
+
+Example: `tenant_acme/invoices/inv_123/a1b2c3_receipt.pdf`
+
+## Upload Flow
+
+```go
+file, err := storageMgr.Upload(ctx, core.UploadOptions{
+    Reader:      body,
+    Filename:    "invoice.pdf",
+    ContentType: "application/pdf",
+    Module:      "invoices",
+    ResourceID:  "inv_123",
+    Backend:     "s3",  // optional; uses default if empty
+})
+```
+
+1. Validate file size against `MaxFileSize` (default 50 MB)
+2. Generate storage key with tenant prefix
+3. Stream bytes to the selected backend
+4. Persist metadata to `stored_files` table
+5. Return file record with ID and URL
+
+## Metadata Storage
+
+```sql
+CREATE TABLE stored_files (
+    id           TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL,
+    filename     TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    size         BIGINT NOT NULL,
+    module       TEXT NOT NULL,
+    resource_id  TEXT NOT NULL,
+    backend      TEXT NOT NULL,       -- "local" or "s3"
+    storage_key  TEXT NOT NULL,       -- path within backend
+    created_at   TIMESTAMPTZ,
+    expires_at   TIMESTAMPTZ          -- NULL = no expiration
+);
+```
+
+## Configuration
+
+```yaml
+# trazo.yaml
+storage:
+  default_backend: local        # "local" or "s3"
+  max_file_size: 52428800       # 50 MB
+  url_expiry: 1h
+
+  local:
+    root_dir: ./uploads
+    base_url: http://localhost:8080/files  # optional
+
+  s3:
+    bucket: trazo-uploads
+    region: us-east-1
+    endpoint: ""                # custom endpoint for MinIO
+    access_key: ""              # or use IAM roles
+    secret_key: ""
+    force_path_style: false     # true for MinIO
+```
+
+## S3-Compatible Services
+
+The S3 backend works with any S3-compatible service by setting `endpoint` and `force_path_style`:
+
+```yaml
+storage:
+  default_backend: s3
+  s3:
+    bucket: trazo
+    endpoint: http://localhost:9000  # MinIO
+    access_key: minioadmin
+    secret_key: minioadmin
+    force_path_style: true
+```

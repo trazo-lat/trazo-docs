@@ -1,0 +1,120 @@
+---
+title: Hooks
+description: Tenant-configurable webhooks and expression-based hooks for extending module behavior without code changes.
+---
+
+Hooks allow tenants to inject custom logic at defined points in a module's lifecycle without modifying the module code. Two hook types are supported: **webhooks** (external HTTP calls) and **expressions** (in-process evaluation).
+
+## Hook Types
+
+| Type | Execution | Use Case |
+|---|---|---|
+| Webhook | HTTP POST to external URL | Integrations with external systems, complex logic in tenant's own backend |
+| Expression | In-process via [expr-lang](https://github.com/expr-lang/expr) | Simple field transformations, conditional logic, no external dependency |
+
+## How Hooks Work
+
+Services call `core.Hooks.Execute()` at defined lifecycle points (e.g., `repairs.before_create`). The executor fetches the tenant's hook configuration from the database, runs it, and returns any modifications.
+
+```go
+// In service code
+hookResult, _ := s.core.Hooks.Execute(ctx, "repairs.before_create", input)
+if hookResult.Executed && hookResult.Modified != nil {
+    for k, v := range hookResult.Modified {
+        input[k] = v  // Merge hook-returned fields
+    }
+}
+```
+
+Hooks are **best-effort** — errors are logged but never block the business operation.
+
+## Webhook Hooks
+
+When a webhook hook is triggered, the platform sends a POST request:
+
+```json
+{
+  "hook": "repairs.before_create",
+  "tenant_id": "t123",
+  "user_id": "u456",
+  "request_id": "req-789",
+  "timestamp": "2026-04-02T14:30:00Z",
+  "data": { /* event payload */ }
+}
+```
+
+The external service responds with modifications:
+
+```json
+{
+  "modified": {
+    "priority": "urgent",
+    "assigned_to": "user-specialist-001"
+  }
+}
+```
+
+### Circuit Breaker
+
+Each webhook URL has an independent circuit breaker to prevent cascading failures:
+
+| State | Behavior |
+|---|---|
+| **Closed** (normal) | Requests flow normally |
+| **Open** (after N failures) | All requests immediately fail without calling the URL |
+| **Half-Open** (after cooldown) | One test request allowed; success → Closed, failure → Open |
+
+Default configuration:
+- Threshold: 5 consecutive failures
+- Cooldown: 60 seconds
+- Retry: 3 attempts with exponential backoff (500ms initial, 5s max)
+- Transient errors: 429, 5xx trigger retry
+- Timeout: 10 seconds per request
+
+### Security
+
+- Only HTTPS URLs allowed
+- SSRF protection: validates against private/reserved IP ranges
+- Max payload size: 1 MB (configurable)
+- Custom headers supported per webhook
+
+## Expression Hooks
+
+Expression hooks evaluate in-process using the [expr-lang](https://github.com/expr-lang/expr) library. No external call is needed.
+
+```
+amount > 1000 && status == "pending" ? {"priority": "high"} : {}
+```
+
+- Access event payload fields via dot notation
+- Return a map of field modifications, or an empty map for no changes
+- Boolean `true` means "condition matched, no modifications"
+- Boolean `false` means "condition not met, skip"
+
+## Database Schema
+
+```sql
+CREATE TABLE tenant_hooks (
+    id          TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL,
+    hook_name   TEXT NOT NULL,       -- "repairs.before_create"
+    hook_type   TEXT NOT NULL,       -- "webhook" or "expression"
+    url         TEXT,                -- webhook URL (null for expressions)
+    headers     JSONB,              -- custom webhook headers
+    expression  TEXT,                -- expr-lang expression
+    enabled     BOOLEAN DEFAULT true,
+    created_at  TIMESTAMPTZ,
+    updated_at  TIMESTAMPTZ
+);
+```
+
+## Configuration
+
+```yaml
+# trazo.yaml
+hooks:
+  webhook_timeout: 10s
+  breaker_threshold: 5
+  breaker_cooldown: 60s
+  max_payload_size: 1048576  # 1 MB
+```

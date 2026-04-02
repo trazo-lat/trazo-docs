@@ -1,0 +1,400 @@
+---
+title: Architecture Diagrams
+description: Visual diagrams of the Trazo platform architecture — system overview, request flow, event pipeline, multi-tenancy, module structure, and cross-repo dependencies.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+This page provides visual architecture diagrams for the entire Trazo platform. Each diagram focuses on a different aspect of the system.
+
+## System Overview
+
+All repositories, their tech stacks, and how they connect.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              TRAZO PLATFORM                             │
+│                                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
+│  │  Flutter App  │  │   trazo-cli  │  │   trazo-e2e  │  │ trazo-docs │ │
+│  │  (Admin UI)   │  │  (Dev Tool)  │  │  (Tests)     │  │ (Astro)    │ │
+│  │              │  │              │  │              │  │            │ │
+│  │ Riverpod     │  │ Cobra/Viper  │  │ Custom       │  │ Starlight  │ │
+│  │ go_router    │  │ Atlas        │  │ Harness      │  │ OpenAPI    │ │
+│  │ Dio + OAS    │  │ Docker SDK   │  │ Testcontain. │  │            │ │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬─────┘ │
+│         │  HTTP           │  SQL/Docker     │  HTTP           │ OAS   │
+│         ▼                 ▼                 ▼                 ▼       │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │                   TRAZO CORE SERVICE (Go)                         │ │
+│  │                                                                   │ │
+│  │  ┌───────┐ ┌──────┐ ┌────────┐ ┌───────┐ ┌────────┐ ┌────────┐ │ │
+│  │  │ Huma  │ │ Auth │ │ Events │ │ Hooks │ │ Notify │ │Storage │ │ │
+│  │  │(HTTP) │ │(JWT) │ │(Outbox)│ │(WH/Ex)│ │(Multi) │ │(S3/FS) │ │ │
+│  │  └───┬───┘ └──┬───┘ └───┬────┘ └───┬───┘ └───┬────┘ └───┬────┘ │ │
+│  │      └────────┴─────────┴──────────┴─────────┴──────────┘      │ │
+│  │                     *core.Core (DI Hub)                          │ │
+│  │  Session │ Permission │ Audit │ Events │ Modules │ Hooks        │ │
+│  │  Storage │ DB │ Config │ Errors │ Log                           │ │
+│  │                           │                                      │ │
+│  │  ┌────────────────────────┴──────────────────────────────────┐  │ │
+│  │  │                     MODULES                                │  │ │
+│  │  │  ┌──────────────────┐     ┌────────────────────────────┐  │  │ │
+│  │  │  │  FOUNDATION      │     │  DOMAIN (per-tenant)       │  │  │ │
+│  │  │  │  ├─ users        │     │  ├─ repairs (planned)      │  │  │ │
+│  │  │  │  └─ tenants      │     │  ├─ inventory (planned)    │  │  │ │
+│  │  │  └──────────────────┘     │  └─ invoices (planned)     │  │  │ │
+│  │  │                           └────────────────────────────┘  │  │ │
+│  │  └───────────────────────────────────────────────────────────┘  │ │
+│  └─────────────────────────────┬─────────────────────────────────┘ │
+│                                ▼                                     │
+│  ┌───────────────────────────────────────────────────────────────┐   │
+│  │                   PostgreSQL 15+                               │   │
+│  │  ┌────────┐  ┌─────────────┐  ┌─────────────┐  ┌──────────┐ │   │
+│  │  │ public │  │ tenant_acme │  │ tenant_solo │  │tenant_N  │ │   │
+│  │  │        │  │  repairs    │  │  repairs    │  │  ...     │ │   │
+│  │  │tenants │  │  invoices   │  │  invoices   │  │          │ │   │
+│  │  │users   │  │  roles      │  │  roles      │  │          │ │   │
+│  │  │sessions│  │  members    │  │  members    │  │          │ │   │
+│  │  │events  │  │             │  │             │  │          │ │   │
+│  │  │audit   │  │             │  │             │  │          │ │   │
+│  │  └────────┘  └─────────────┘  └─────────────┘  └──────────┘ │   │
+│  └───────────────────────────────────────────────────────────────┘   │
+│                                                                       │
+│  ┌─────────────────────┐  ┌──────────────────┐                       │
+│  │  S3 / MinIO / Local │  │  SMTP / Slack    │                       │
+│  │  (File Storage)     │  │  (Notifications) │                       │
+│  └─────────────────────┘  └──────────────────┘                       │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+## HTTP Request Lifecycle
+
+The complete middleware chain and handler flow.
+
+```
+                         HTTP Request
+                             │
+               ┌─────────────▼──────────────┐
+               │ 1. RecoveryMiddleware       │  Catches panics → 500
+               ├─────────────┬──────────────┤
+               │ 2. CORSMiddleware           │  Access-Control-* headers
+               ├─────────────┬──────────────┤
+               │ 3. RequestIDMiddleware      │  X-Request-ID → context
+               ├─────────────┬──────────────┤
+               │ 4. CanonicalLogMiddleware   │  One JSON line per request
+               ├─────────────┬──────────────┤
+               │     Public path? ──yes──→   │  Skip auth (login, healthz...)
+               │         │no                 │
+               │ 5. JWTAuthMiddleware        │  Validate token, load user/
+               │                             │  tenant/permissions/session
+               ├─────────────┬──────────────┤
+               │ 6. RateLimitMiddleware      │  Token bucket: per-IP,
+               │                             │  per-tenant, path overrides
+               └─────────────┬──────────────┘
+                             │
+               ┌─────────────▼──────────────┐
+               │     Route Handler (Huma)    │
+               │                             │
+               │  1. Validate input          │
+               │  2. MustCan(permission)     │
+               │  3. Hooks.Execute(before)   │
+               │  4. DB.Tx(ctx, func(tx) {   │
+               │       repo.Create(tx)       │
+               │       Events.EmitTx(tx)     │  ◄── same transaction
+               │     })                      │
+               │  5. Audit.Create(resource)  │
+               │  6. Return JSON response    │
+               └────────────────────────────┘
+```
+
+**Public paths** that skip auth: `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/oauth2/*`, `/api/v1/auth/magic-link/*`, `/api/v1/auth/webauthn/*`, `/api/v1/invites`, `/healthz`, `/openapi`, `/docs`
+
+## Core Struct — Dependency Injection Hub
+
+```
+                      ┌───────────────────────┐
+                      │      *core.Core       │
+                      │   (11 sub-interfaces) │
+                      └───────────┬───────────┘
+                                  │
+      ┌───────────────────────────┼───────────────────────────┐
+      │                           │                           │
+ ┌────▼─────┐             ┌──────▼──────┐             ┌──────▼──────┐
+ │ Session  │             │ Permission  │             │   Audit     │
+ │          │             │             │             │             │
+ │ Current  │             │ Can()       │             │ Create()    │
+ │ User()   │             │ MustCan()   │             │ Update()    │
+ │ Current  │             │ Resolve     │             │ Delete()    │
+ │ Tenant() │             │ Scope()     │             │             │
+ │ Request  │             │ ApplyScope()│             │ RFC 6902    │
+ │ ID()     │             │ BuildScope  │             │ JSON Patch  │
+ └──────────┘             │ Filter()    │             │ + Masking   │
+                          └─────────────┘             └─────────────┘
+      │                           │                           │
+ ┌────▼─────┐             ┌──────▼──────┐             ┌──────▼──────┐
+ │ Events   │             │  Modules    │             │   Hooks     │
+ │          │             │             │             │             │
+ │ Emit()   │             │ Service()   │             │ Execute()   │
+ │ EmitTx() │             │ Enabled()   │             │             │
+ │ Subscribe│             │ Resolve     │             │ Webhook     │
+ │ Start()  │             │ Instance()  │             │ Expression  │
+ │ Stop()   │             │ Get/Register│             │ Circuit     │
+ │          │             │ Service[T]()│             │ Breaker     │
+ └──────────┘             └─────────────┘             └─────────────┘
+      │                           │                           │
+ ┌────▼─────┐             ┌──────▼──────┐             ┌──────▼──────┐
+ │ Storage  │             │     DB      │             │  Config     │
+ │          │             │             │             │             │
+ │ Upload() │             │ Conn()      │             │ Get()       │
+ │Download()│             │ Tx()        │             │ Tenant()    │
+ │ Delete() │             │ WithTx()    │             │ Setting()   │
+ │ URL()    │             │             │             │             │
+ │          │             │ SET search  │             │ Viper → DB  │
+ │ Local/S3 │             │ _path TO    │             │ → module    │
+ └──────────┘             │ tenant_X    │             │ TTL cache   │
+                          └─────────────┘             └─────────────┘
+      │                           │
+ ┌────▼─────┐             ┌──────▼──────┐
+ │ Errors   │             │    Log      │
+ │          │             │             │
+ │Validation│             │ Logger()    │
+ │NotFound()│             │ WithModule()│
+ │Forbidden │             │ WithAction()│
+ │Conflict()│             │ slog-based  │
+ └──────────┘             └─────────────┘
+```
+
+## Event → Hook → Notification Pipeline
+
+```
+ MODULE SERVICE (e.g., repairs.Create)
+   │
+   │  core.Events.EmitTx(ctx, tx, event)   ◄── same DB transaction
+   │
+   ▼
+ events_outbox TABLE (committed atomically with business data)
+   │
+   ▼
+ BACKGROUND WORKER (polls every 1s, batch of 50, FOR UPDATE SKIP LOCKED)
+   │
+   ├── SYNC subscribers (high priority, in delivery loop)
+   │     └── Domain module handlers
+   │
+   └── ASYNC subscribers (worker pool, size=10)
+         └── Notification Service (wildcard "*", priority: -10)
+               │
+               ├── 1. Match notification_rules (tenant + event name)
+               ├── 2. Resolve targets (by user field or role)
+               ├── 3. Render template (Markdown → channel-specific)
+               └── 4. Dispatch to channel:
+                     │
+                     ├── In-App  → stored in DB (read/unread)
+                     ├── Email   → SMTP + TLS, retry ×3
+                     ├── Slack   → Block Kit via webhook
+                     └── Webhook → HTTPS POST, retry ×3
+
+ RETRY: retry_count², max 5 retries → dead-letter queue
+ HOOKS: tenant-scoped webhooks + expression language (expr-lang)
+        with per-URL circuit breaker (threshold → cooldown → half-open)
+```
+
+## Multi-Tenancy & Schema Isolation
+
+```
+ TENANT CREATION:
+   1. INSERT INTO public.tenants → schema_name = "tenant_acme"
+   2. CREATE SCHEMA tenant_acme
+   3. Run tenant migrations (roles, memberships tables)
+   4. Seed default roles (Admin, Member, Viewer)
+   5. Provision default modules → INSERT INTO tenant_modules
+   6. Sync permissions from module.yaml
+
+ REQUEST ISOLATION:
+   JWTAuthMiddleware loads tenant.SchemaName from token claims
+   │
+   ▼
+   core.DB.Tx(ctx, func(tx) {
+     SET LOCAL search_path TO tenant_acme, public
+     //                        ▲              ▲
+     //                   tenant tables   shared tables
+     SELECT * FROM repairs  →  tenant_acme.repairs
+     SELECT * FROM tenants  →  public.tenants (fallback)
+   })
+
+ MULTI-INSTANCE MODULES:
+   tenant_modules:
+   ┌─────────────┬──────────────┬──────────────┐
+   │ module_name │ instance_name│ table_prefix │
+   ├─────────────┼──────────────┼──────────────┤
+   │ invoices    │ invoices-in  │ invoices_in_ │
+   │ invoices    │ invoices-out │ invoices_out_│
+   └─────────────┴──────────────┴──────────────┘
+
+   tenant_acme schema:
+     invoices_in_invoices, invoices_in_invoice_items
+     invoices_out_invoices, invoices_out_invoice_items
+
+   Routes: GET /api/v1/tenants/{tid}/i/{instance}/invoices
+   Perms:  invoices-in.read.all (derived from invoices.read.all)
+   Events: invoices-in.created  (derived from invoices.created)
+```
+
+## Permission & Scope Resolution
+
+```
+ module.yaml           SyncFromModules        permission_definitions
+ ┌────────────┐  ──────────────────────→  ┌──────────────────────┐
+ │permissions:│                           │ (public schema)      │
+ │ - read.all │                           └──────────┬───────────┘
+ │ - read.    │                                      │
+ │   assigned │                                      ▼
+ │ - read.own │                           roles (tenant schema)
+ │            │                           ┌──────────────────────┐
+ │scopes:     │                           │ Admin: [read.all,    │
+ │ - all (100)│                           │         create, ...] │
+ │ - assigned │                           │ Mechanic: [read.     │
+ │     (50)   │                           │   assigned, create]  │
+ │ - own (10) │                           └──────────┬───────────┘
+ └────────────┘                                      │
+                                          tenant_memberships
+                                          ┌──────────────────────┐
+                                          │ user + role +        │
+                                          │ extra_permissions    │
+                                          └──────────┬───────────┘
+                                                     │
+                                          JWT claims.Permissions
+                                          ┌──────────────────────┐
+                                          │ ["repairs.read.      │
+                                          │   assigned",         │
+                                          │  "repairs.create"]   │
+                                          └──────────┬───────────┘
+                                                     │
+ AT QUERY TIME:                                      ▼
+   ResolveScope(ctx, "repairs", "read")
+     → Match: repairs.read.assigned (Priority 50)
+     → Filter: "assigned_to = :user_id"
+     → Replace: "assigned_to = 'user-uuid-123'"
+
+   SELECT * FROM repairs
+   WHERE deleted_at IS NULL
+     AND assigned_to = 'user-uuid-123'   ◄── injected by scope
+```
+
+## Authentication Flow
+
+```
+ ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
+ │ Password  │  │  OAuth2   │  │  Magic    │  │  WebAuthn  │
+ │ email +   │  │  /OIDC    │  │  Link     │  │  (FIDO2)   │
+ │ bcrypt    │  │ Google    │  │ email →   │  │  Passkeys  │
+ │           │  │ GitHub    │  │ verify    │  │  Biometric │
+ └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘
+       └──────────────┬┴──────────────┘───────────────┘
+                      │
+            ┌─────────▼──────────┐
+            │   AuthManager      │  Dispatch by method
+            │   .Login(input)    │  → AuthResult{Email, Sub, Issuer}
+            └─────────┬──────────┘
+                      ▼
+            User Lookup → Membership + Role → Permissions
+                      ▼
+            Create Session (DB record: IP, user-agent, auth_method)
+                      ▼
+            TokenService.GeneratePair()
+            ┌─────────────────────────────────────┐
+            │ Access Token (15m)  │ Refresh (7d)  │
+            │ uid, tid, mid, sid │ uid, tid, sid  │
+            │ perms: [...]       │ (no perms)     │
+            │ type: "access"     │ type: "refresh" │
+            └─────────────────────────────────────┘
+```
+
+## Cross-Repo Dependency Map
+
+```
+ trazo-cli ──────────────────────────────── trazo-core-service
+    │                                              │
+    │  migrations/core/*.sql ── testutil reads ──→ │
+    │  migrations/modules/*  ── testutil reads ──→ │
+    │  module validate ──────── module.yaml from → │
+    │  module generate ──────── outputs Go code →  │
+    │                                              │
+    │                                OpenAPI spec  │
+    │                                     │        │
+    │                           ┌─────────┘        │
+    │                           ▼                  │
+    │                   trazo-admin-app             │
+    │                      │  dart-dio client       │
+    │                      │  (generated from OAS)  │
+    │                      └──── HTTP/JSON ────→────┘
+    │
+    │                       trazo-e2e
+    │                          │  Starts real API binary
+    │  migrate up (subproc) ◄──┤  + testcontainers PG
+    │                          └──── HTTP client ──→────
+    │
+    │                       trazo-docs
+    │                          │  pnpm fetch-openapi
+    │                          └──── pulls OAS ────→────
+    │
+    │                   trazo-claude-plugin
+    │  /migration skill ◄──────┤  Skills reference both repos
+    │                          │  /tackle creates PRs in both
+    │                          └───────────────→────────────────
+```
+
+## Configuration Hierarchy
+
+```
+ STATIC CONFIG (highest wins):
+   1. CLI Flags        --port 9090
+   2. Environment      TRAZO_SERVER_PORT=9090
+   3. trazo.yaml       server: { port: 8080 }
+   4. Defaults         (hardcoded)
+
+ RUNTIME SETTINGS (3-tier, TTL cache 60s):
+   core.Config.Setting(ctx, "repairs", "auto_assign")
+     1. tenant_settings    (per-tenant override)
+     2. global_settings    (platform-wide)
+     3. module.yaml        (module defaults)
+```
+
+## Complete API Endpoint Map
+
+| Group | Method | Path | Description |
+|---|---|---|---|
+| **Auth** | POST | `/api/v1/auth/login` | Login (password, OAuth2, magic link, WebAuthn) |
+| | POST | `/api/v1/auth/refresh` | Refresh access token |
+| | POST | `/api/v1/auth/logout` | Revoke session |
+| | GET | `/api/v1/auth/me` | Current user identity |
+| | POST | `/api/v1/auth/oauth2/callback` | OAuth2 code exchange |
+| | POST | `/api/v1/auth/magic-link/request` | Send magic link |
+| | POST | `/api/v1/auth/magic-link/verify` | Verify magic link |
+| | POST | `/api/v1/auth/webauthn/register` | Start WebAuthn registration |
+| | POST | `/api/v1/auth/webauthn/login` | Start WebAuthn login |
+| **Users** | POST | `/api/v1/users` | Register |
+| | GET | `/api/v1/users` | List (scoped) |
+| | GET | `/api/v1/users/{id}` | Get |
+| | PUT | `/api/v1/users/{id}` | Update profile |
+| | POST | `/api/v1/users/{id}/change-password` | Change password |
+| **Tenants** | POST | `/api/v1/tenants` | Create (+ schema + seed) |
+| | GET | `/api/v1/tenants` | List |
+| | GET | `/api/v1/tenants/{id}` | Get |
+| | PUT | `/api/v1/tenants/{id}` | Update |
+| **Modules** | GET | `/api/v1/tenants/{tid}/modules` | List enabled |
+| | PUT | `.../modules/{name}/enable` | Enable |
+| | PUT | `.../modules/{name}/disable` | Disable |
+| | POST | `.../modules/{name}/instances` | Create instance |
+| | GET | `.../instances/{inst}` | Get instance |
+| | DELETE | `.../instances/{inst}` | Delete instance |
+| **Events** | GET | `/api/v1/tenants/{tid}/events` | List with filters |
+| | GET | `.../events/stats` | Outbox statistics |
+| | GET | `.../events/dead-letters` | Dead-letter queue |
+| | POST | `.../events/simulate` | Emit test event |
+| **Notifications** | POST | `.../notifications/rules` | Create rule |
+| | GET | `.../notifications/rules` | List rules |
+| | GET | `/api/v1/notifications` | My notifications |
+| | PUT | `/api/v1/notifications/read-all` | Mark all read |
+| **Infra** | GET | `/healthz` | Health check |
+| | GET | `/openapi` | OpenAPI 3.1 spec |

@@ -9,10 +9,14 @@ Trazo is a multi-tenant SaaS platform built in Go. The system is organized into 
 
 | Repository | Purpose |
 |---|---|
-| `trazo-core-service` | The main HTTP API server, all modules, and the database layer |
+| `trazo-core-service` | Main HTTP API server, all modules, and the database layer |
 | `trazo-cli` | Developer tooling: code generation, migration management, module scaffolding |
+| `trazo-admin-app` | Flutter cross-platform admin app (Android, iOS, Windows, macOS, Linux) |
+| `trazo-e2e` | Black-box E2E test suite with custom test harness |
+| `trazo-docs` | Astro/Starlight documentation site (this site) |
+| `trazo-claude-plugin` | Claude Code skills and agents for development workflows |
 
-The API server is the runtime artifact deployed to production. The CLI is a development-time tool that reads `module.yaml` files to generate boilerplate, sync permissions, and manage schema migrations.
+The API server is the runtime artifact deployed to production. The CLI is a development-time tool that reads `module.yaml` files to generate boilerplate, sync permissions, and manage schema migrations. The Flutter app is the primary user interface. Migrations live exclusively in `trazo-cli`.
 
 ## Request Lifecycle
 
@@ -35,6 +39,9 @@ CanonicalLogMiddleware    ← structured request/response logging
     │
     ▼
 JWTAuthMiddleware         ← validates token, loads session into context
+    │
+    ▼
+RateLimitMiddleware       ← token bucket: per-IP, per-tenant, path overrides
     │
     ▼
 Huma Handler              ← input validation, OpenAPI binding
@@ -101,14 +108,25 @@ Foundation modules are always enabled. Domain and custom modules can be enabled 
 
 See [Module System](/architecture/module-system) for lifecycle, registration, and the `module.yaml` configuration format.
 
+See the [Architecture Diagrams](/architecture/diagrams) page for comprehensive visual diagrams of the entire platform.
+
 ## Technology Stack
 
 | Layer | Technology |
 |---|---|
-| Language | Go |
-| HTTP framework | [chi](https://github.com/go-chi/chi) + [Huma](https://huma.rocks/) |
-| Database | PostgreSQL |
-| SQL builder | sqlx + squirrel |
-| Auth | JWT (access + refresh tokens) |
+| Language | Go 1.25 |
+| HTTP framework | [chi](https://github.com/go-chi/chi) + [Huma](https://huma.rocks/) (OpenAPI-first) |
+| Database | PostgreSQL 15+ (schema-per-tenant) |
+| SQL builder | pgx + sqlx + squirrel |
+| Auth | JWT + OAuth2/OIDC + WebAuthn (FIDO2) + Magic Links |
 | Password hashing | bcrypt (cost 12) |
-| Config | Environment variables + `module.yaml` |
+| Events | Transactional outbox with background worker |
+| Notifications | In-app, Email (SMTP), Slack, Webhook |
+| Hooks | Webhooks + Expression language (expr-lang) |
+| Storage | Local filesystem + AWS S3/MinIO |
+| Config | Viper (YAML + env vars + flags) |
+| Logging | slog + charmbracelet/log |
+| CLI | Cobra + Viper + Atlas + Docker SDK |
+| Admin App | Flutter 3.27+ / Dart 3.6+ / Riverpod |
+| Docs | Astro 5 + Starlight |
+| Testing | testify + testcontainers-go + custom E2E harness |

@@ -3,7 +3,29 @@ title: Authentication
 description: JWT-based authentication flow in Trazo — token lifecycle, middleware chain, session tracking, and the login, refresh, logout, and /me endpoints.
 ---
 
-Trazo uses JWT-based authentication with short-lived access tokens and longer-lived refresh tokens. All authentication state is tracked in the `sessions` table in the `public` schema, enabling session revocation, audit trails, and per-session metadata.
+Trazo supports **multiple authentication methods** — password, OAuth2/OIDC, magic links, and WebAuthn (FIDO2 passkeys) — unified through an `AuthManager` that dispatches to the appropriate provider. All methods produce the same JWT token pair and session record.
+
+All authentication state is tracked in the `sessions` table in the `public` schema, enabling session revocation, audit trails, and per-session metadata.
+
+## Authentication Methods
+
+| Method | How it works | Use case |
+|---|---|---|
+| **Password** | Email + bcrypt hash verification | Traditional login |
+| **OAuth2/OIDC** | Code exchange with external provider (Google, GitHub, etc.) | SSO, social login |
+| **Magic Link** | Email-based passwordless token | Low-friction login |
+| **WebAuthn** | FIDO2 passkeys, biometric authentication | Highest security |
+
+All methods flow through the same `AuthManager`:
+
+```
+AuthManager.Login(input)
+  → Dispatch by input.Method
+  → Provider.Authenticate(credentials)
+  → AuthResult{Email, OAuth2Sub, OAuth2Issuer}
+  → User lookup → Membership + Role → Permissions
+  → Create Session → Generate JWT pair
+```
 
 ## Token Lifecycle
 
@@ -50,7 +72,7 @@ JWTAuthMiddleware
 chi Router → Huma Handler
 ```
 
-Routes under `/api/v1/auth/login`, `/api/v1/auth/refresh`, and public health endpoints bypass `JWTAuthMiddleware`.
+Routes under `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/oauth2/*`, `/api/v1/auth/magic-link/*`, `/api/v1/auth/webauthn/*`, `/api/v1/invites`, and public health endpoints bypass `JWTAuthMiddleware`.
 
 ## Endpoints
 
@@ -187,7 +209,7 @@ Each session record stores the following metadata:
 | `ip_address` | The client IP from the login request |
 | `user_agent` | The raw `User-Agent` header |
 | `device_type` | Parsed from user agent: `desktop`, `mobile`, or `unknown` |
-| `auth_method` | `password`, `refresh`, or `service_principal` |
+| `auth_method` | `password`, `oauth2`, `magic_link`, `webauthn`, or `service_principal` |
 | `request_count` | Incremented on each token refresh |
 | `last_active_at` | Updated on each request |
 | `revoked_at` | Set on logout; null if active |
@@ -195,6 +217,54 @@ Each session record stores the following metadata:
 | `created_at` | When the session was created |
 
 Sessions are listed and revocable via `/api/v1/auth/sessions` for the current user, and via the admin API for administrators.
+
+## OAuth2/OIDC
+
+Configure one or more OAuth2 providers in `trazo.yaml`:
+
+```yaml
+auth:
+  oauth2:
+    - name: google
+      client_id: "..."
+      client_secret: "..."
+      issuer_url: "https://accounts.google.com"
+      scopes: ["openid", "email", "profile"]
+      redirect_url: "https://app.trazo.lat/auth/callback"
+```
+
+Flow: client redirects to provider → user authenticates → callback with code → server exchanges code for tokens → extracts email/subject from ID token → matches to existing user or creates new one.
+
+Users are matched by `oauth2_issuer + oauth2_subject` for existing OAuth2 accounts, or by email for linking to an existing password account.
+
+## Magic Links
+
+Passwordless email-based authentication:
+
+```yaml
+auth:
+  magic_link:
+    enabled: true
+    token_ttl: 15m
+    max_per_hour: 5    # rate limit per email
+```
+
+Flow: `POST /auth/magic-link/request` with email → server sends email with signed token → user clicks link → `POST /auth/magic-link/verify` with token → server validates and creates session.
+
+## WebAuthn (FIDO2 Passkeys)
+
+Hardware security keys, platform authenticators, and biometric login:
+
+```yaml
+auth:
+  webauthn:
+    rp_id: "trazo.lat"
+    rp_display_name: "Trazo"
+    rp_origins:
+      - "https://app.trazo.lat"
+```
+
+Supports registration (creating a passkey) and login (authenticating with a passkey). Uses the `github.com/go-webauthn/webauthn` library.
 
 ## Password Hashing
 

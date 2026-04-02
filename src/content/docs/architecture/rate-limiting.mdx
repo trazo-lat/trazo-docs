@@ -1,0 +1,90 @@
+---
+title: Rate Limiting
+description: Token bucket rate limiting with per-IP, per-tenant, and per-path tiers to protect the API from abuse.
+---
+
+Trazo uses a **token bucket** algorithm for rate limiting at three levels: per-IP (global), per-tenant, and per-path overrides. Rate limiting is applied after authentication in the middleware chain.
+
+## How It Works
+
+Each rate limit tier maintains independent token buckets. A request must pass all applicable tiers to proceed.
+
+```
+Request
+  │
+  ├── Path override? (e.g., /auth/login: 3/sec, burst 5)
+  │     └── Denied? → 429
+  │
+  ├── IP global limit (10/sec, burst 20)
+  │     └── Denied? → 429
+  │
+  └── Tenant limit (100/sec, burst 200) — only if authenticated
+        └── Denied? → 429
+```
+
+## Default Configuration
+
+| Tier | Rate | Burst | Purpose |
+|---|---|---|---|
+| IP | 10 req/sec | 20 | Prevent abuse from a single source |
+| Tenant | 100 req/sec | 200 | Fair usage across tenants |
+| Path: `/auth/login` | 3 req/sec | 5 | Brute-force protection |
+
+## Response Headers
+
+On every response:
+
+```
+X-RateLimit-Limit: 20
+X-RateLimit-Remaining: 15
+X-RateLimit-Reset: 1712050800
+```
+
+On rate limit exceeded (HTTP 429):
+
+```
+Retry-After: 2
+```
+
+## Trusted Proxies
+
+When behind a reverse proxy, configure trusted proxy IPs so the middleware reads the real client IP from `X-Forwarded-For`:
+
+```yaml
+rate_limit:
+  trusted_proxies:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+```
+
+## Configuration
+
+```yaml
+# trazo.yaml
+rate_limit:
+  enabled: true
+  cleanup_period: 60s       # Remove idle buckets
+
+  ip:
+    rate: 10                 # tokens per second
+    burst: 20                # max burst size
+
+  tenant:
+    rate: 100
+    burst: 200
+
+  path_overrides:
+    - path: /api/v1/auth/login
+      rate: 3
+      burst: 5
+    - path: /api/v1/auth/refresh
+      rate: 5
+      burst: 10
+
+  trusted_proxies:
+    - 127.0.0.1
+```
+
+## Cleanup
+
+A background goroutine runs every `cleanup_period` to remove buckets that have been idle (at full capacity) for 2x the cleanup period. This prevents memory growth from ephemeral IPs.

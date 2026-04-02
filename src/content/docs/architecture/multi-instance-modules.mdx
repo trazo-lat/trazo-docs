@@ -1,0 +1,152 @@
+---
+title: Multi-Instance Modules
+description: How the same module template can be instantiated multiple times per tenant with different configurations, isolated tables, and scoped permissions.
+---
+
+Multi-instance modules allow a tenant to run multiple copies of the same module template with different configurations. For example, an `invoices` module can be instantiated as `invoices-in` (inbound) and `invoices-out` (outbound), each with its own tables, permissions, and events.
+
+## Concepts
+
+| Term | Definition |
+|---|---|
+| **Module template** | The code, migrations, permissions, and hooks defined by a module (e.g., `invoices`) |
+| **Module instance** | A tenant-scoped copy of a template with a unique name and config (e.g., `invoices-in`) |
+| **Table prefix** | Each instance gets prefixed tables for isolation (e.g., `invoices_in_invoices`) |
+| **Single-instance sugar** | When only one instance exists, the instance name defaults to the module name |
+
+## Database Schema
+
+```sql
+CREATE TABLE tenant_modules (
+    id             TEXT PRIMARY KEY,
+    tenant_id      TEXT NOT NULL REFERENCES tenants(id),
+    module_name    TEXT NOT NULL,           -- "invoices" (template)
+    instance_name  TEXT NOT NULL,           -- "invoices-in" (unique per tenant)
+    table_prefix   TEXT NOT NULL,           -- "invoices_in_"
+    enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+    config         JSONB NOT NULL DEFAULT '{}',
+    version        TEXT NOT NULL,
+    installed_at   TIMESTAMPTZ NOT NULL,
+    UNIQUE(tenant_id, instance_name)
+);
+```
+
+## Table Isolation
+
+Each instance gets its own tables within the tenant schema, prefixed by the instance name (hyphens converted to underscores):
+
+```
+tenant_acme schema:
+  invoices_in_invoices          ← instance "invoices-in"
+  invoices_in_invoice_items
+  invoices_out_invoices         ← instance "invoices-out"
+  invoices_out_invoice_items
+```
+
+**Why prefixed tables over a shared `instance_id` column:**
+- No leaky filters — forgetting `WHERE instance_id = ...` cannot leak cross-instance data
+- Simpler queries — repositories don't need an extra filter
+- Clean indexes/constraints — each instance has independent unique constraints
+
+## Migration Templates
+
+Migration SQL files use `{{prefix}}` placeholders, replaced by the migration runner:
+
+```sql
+CREATE TABLE IF NOT EXISTS {{prefix}}invoices (
+    id          TEXT PRIMARY KEY,
+    number      TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'draft',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_{{prefix}}invoices_number
+    ON {{prefix}}invoices(number);
+
+-- +down
+DROP TABLE IF EXISTS {{prefix}}invoices CASCADE;
+```
+
+For instance `invoices-in`, `{{prefix}}` becomes `invoices_in_`.
+
+## Routes
+
+Instance name appears as a URL path segment:
+
+```
+GET /api/v1/tenants/{tenant_id}/i/{instance}/invoices
+```
+
+Middleware extracts `{instance}`, validates it exists in `tenant_modules`, resolves the module template, and injects both into context. Module route patterns remain static (`/invoices`).
+
+## Permissions
+
+Permissions are **instance-scoped**, derived from the template:
+
+| Template Permission | Instance `invoices-in` | Instance `invoices-out` |
+|---|---|---|
+| `invoices.read.all` | `invoices-in.read.all` | `invoices-out.read.all` |
+| `invoices.create` | `invoices-in.create` | `invoices-out.create` |
+
+Roles reference instance-scoped permissions:
+
+```yaml
+roles:
+  - name: "AP Clerk"
+    permissions:
+      - invoices-in.read.all
+      - invoices-in.create
+  - name: "AR Clerk"
+    permissions:
+      - invoices-out.read.all
+      - invoices-out.create
+```
+
+## Events
+
+Events are also instance-prefixed:
+
+```
+invoices-in.created    (from template: invoices.created)
+invoices-out.created
+```
+
+Wildcard subscriptions are supported: `invoices.*.created` matches all instances.
+
+## Service Registry
+
+The service registry supports instance-aware lookups:
+
+```go
+// Multi-instance — type + instance name
+inSvc, _ := core.GetService[invoices.InvoicesService]("invoices-in")
+outSvc, _ := core.GetService[invoices.InvoicesService]("invoices-out")
+
+// Single-instance sugar (backwards compatible)
+repairsSvc, _ := core.GetService[repairs.RepairsService]()
+```
+
+## Instance Lifecycle
+
+| Action | Behavior |
+|---|---|
+| **Create** | Provisions instance record, runs migrations with prefix |
+| **Disable** | Soft — data preserved, routes return 404 |
+| **Enable** | Restores access to existing data |
+| **Delete** | CLI only with `--force` — drops prefixed tables |
+
+## Scope Implications
+
+Since each instance has its own tables, global scopes (`all`, `assigned`, `own`) work without modification. A query on `invoices_in_invoices` can never accidentally return `invoices-out` data. The table itself is the isolation boundary.
+
+## API Endpoints
+
+```
+POST   /api/v1/tenants/{tid}/modules/{name}/instances    Create instance
+GET    /api/v1/tenants/{tid}/modules/{name}/instances    List instances
+GET    /api/v1/tenants/{tid}/instances/{instance}        Get instance
+PUT    /api/v1/tenants/{tid}/instances/{instance}/enable Enable
+PUT    /api/v1/tenants/{tid}/instances/{instance}/disable Disable
+PUT    /api/v1/tenants/{tid}/instances/{instance}/config  Update config
+DELETE /api/v1/tenants/{tid}/instances/{instance}         Delete
+```
