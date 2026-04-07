@@ -154,6 +154,63 @@ subscribes:
     handler: handle_vehicle_deleted
 ```
 
+## Per-tenant subscription overrides
+
+Tenants can customize a module's default subscriptions via the instance config stored in `tenant_modules.config`. Overrides are applied when an instance is created and merged with the module's defaults.
+
+### Override operations
+
+| Operation | How | Example |
+|---|---|---|
+| **Disable** | Set `enabled: false` on an existing event+handler | Tenant doesn't want auto-reorder |
+| **Override** | Set `async` or `priority` on an existing event+handler | Make a subscription sync for this tenant |
+| **Add** | New event+handler pair not in module defaults | Tenant-specific custom event |
+
+### Instance config example
+
+```json
+{
+  "direction": "inbound",
+  "subscriptions": [
+    {
+      "event": "inventory.stock_low",
+      "handler": "handle_low_stock",
+      "enabled": false
+    },
+    {
+      "event": "billing.payment_received",
+      "handler": "handle_payment",
+      "priority": 100
+    },
+    {
+      "event": "acme.custom_workflow_done",
+      "handler": "handle_payment",
+      "async": true
+    }
+  ]
+}
+```
+
+### Merge rules
+
+1. Module declares defaults in `module.yaml` `subscribes:` section
+2. At instance creation, tenant overrides from `tenant_modules.config.subscriptions` are merged:
+   - Override matching `event+handler` → replaces `async`/`priority` if set
+   - Override with `enabled: false` → removes the subscription entirely
+   - Override with no match in defaults → adds a new subscription (handler must exist in `NamedHandlers()`)
+3. Merged result is resolved against named handlers and registered with the EventBus
+
+### Validation
+
+- Added subscriptions must reference a handler that exists in the module's `NamedHandlers()`
+- If the handler doesn't exist, instance creation fails with an error listing available handlers
+- Disabling a non-existent subscription is a no-op (safe)
+
+### Limitations
+
+- Overrides are applied at instance creation time. Changing the config after creation requires restarting the server (hot reload not yet supported).
+- The EventBus is append-only — disabled subscriptions are excluded during wiring, not removed at runtime.
+
 ## Legacy: EventSubscriber interface
 
 Modules can still implement `EventSubscriber` directly for programmatic subscription control:
