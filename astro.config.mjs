@@ -39,6 +39,7 @@ export default defineConfig({
             { label: 'Authentication', slug: 'architecture/authentication' },
             { label: 'Audit Trail', slug: 'architecture/audit-trail' },
             { label: 'Event Outbox', slug: 'architecture/event-outbox' },
+            { label: 'Event Subscriptions', slug: 'architecture/event-subscriptions', badge: 'New' },
             { label: 'Hooks', slug: 'architecture/hooks', badge: 'New' },
             { label: 'Notifications', slug: 'architecture/notifications' },
             { label: 'File Storage', slug: 'architecture/storage', badge: 'New' },

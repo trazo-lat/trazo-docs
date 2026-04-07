@@ -1,0 +1,169 @@
+---
+title: Event Subscriptions
+description: How modules declare, resolve, and scope event subscriptions — including multi-instance auto-scoping, wildcard patterns, and runtime wiring.
+---
+
+Modules can subscribe to domain events in two ways: the legacy `EventSubscriber` Go interface, or the declarative `subscribes:` section in `module.yaml`. The declarative approach is preferred because it makes subscription wiring visible, validatable, and customizable per instance.
+
+## Subscription patterns
+
+| Pattern | Matches | Use case |
+|---|---|---|
+| `vehicles.deleted` | Exact match only | Subscribe to a specific event |
+| `*.deleted` | Any module's `deleted` event | Cross-module cleanup |
+| `invoices.*.done` | `invoices.review.done`, `invoices.approve.done` | Multi-step workflow |
+| `invoices-in.created` | Only the `invoices-in` instance | Instance-scoped |
+
+Wildcards use `*` to match a single dot-separated segment. The pattern and event name must have the same number of segments.
+
+## Declaring subscriptions in module.yaml
+
+```yaml
+# modules/domain/repairs/module.yaml
+events:
+  emits:
+    - name: repairs.created
+      version: 1
+    - name: repairs.completed
+      version: 1
+
+  subscribes:
+    - event: vehicles.deleted
+      handler: handle_vehicle_deleted
+      async: true
+      description: Cancel pending repairs when a vehicle is removed
+
+    - event: inventory.stock_low
+      handler: handle_low_stock
+      async: true
+      priority: 5
+      description: Auto-create reorder repair when parts run low
+
+    - event: billing.payment_received
+      handler: handle_payment
+      async: false
+      description: Update repair payment status (sync)
+```
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `event` | Yes | — | Event pattern to subscribe to |
+| `handler` | Yes | — | Name of the handler function (must match a key in `NamedHandlers()`) |
+| `async` | No | `true` | Whether the handler runs asynchronously via the worker pool |
+| `priority` | No | `0` | Execution priority (higher runs first) |
+| `description` | No | — | Human-readable description |
+
+## Exposing named handlers in Go
+
+Modules implement `DeclarativeSubscriber` to expose handler functions by name:
+
+```go
+// module.go
+func (m *Module) NamedHandlers() map[string]func(context.Context, core.Event) error {
+    return map[string]func(context.Context, core.Event) error{
+        "handle_vehicle_deleted": m.service.HandleVehicleDeleted,
+        "handle_low_stock":       m.service.HandleLowStock,
+        "handle_payment":         m.service.HandlePaymentReceived,
+    }
+}
+```
+
+```go
+// service.go
+func (s *Service) HandleVehicleDeleted(ctx context.Context, event core.Event) error {
+    return s.repo.CancelByVehicle(ctx, event.AggregateID)
+}
+```
+
+## Bootstrap resolution
+
+At startup, for each module that implements `DeclarativeSubscriber`:
+
+1. Read `module.yaml` via `Config()` bytes
+2. Parse the `events.subscribes` section
+3. For each entry, look up the handler name in `NamedHandlers()`
+4. If not found, bootstrap fails with an error listing available handlers
+5. Build `Subscription` structs and register with the `EventBus`
+
+```
+Error: resolving declarative subscriptions for module repairs:
+  handler "nonexistent" for event "vehicles.deleted" not found;
+  available: [handle_vehicle_deleted, handle_low_stock, handle_payment]
+```
+
+## Multi-instance auto-scoping
+
+When a module is instantiated multiple times (e.g. `invoices-in` and `invoices-out` from module `invoices`), event patterns that start with the module name are automatically rewritten to the instance name:
+
+```yaml
+# module.yaml for invoices
+subscribes:
+  - event: invoices.approved
+    handler: handle_approved
+  - event: external.webhook_received
+    handler: handle_webhook
+```
+
+For instance `invoices-in`:
+```
+invoices.approved         → invoices-in.approved      (rewritten)
+external.webhook_received → external.webhook_received (unchanged)
+```
+
+For instance `invoices-out`:
+```
+invoices.approved         → invoices-out.approved     (rewritten)
+external.webhook_received → external.webhook_received (unchanged)
+```
+
+This means:
+- `invoices-in.approved` → handled only by `invoices-in`
+- `invoices-out.approved` → handled only by `invoices-out`
+- `external.webhook_received` → handled by both instances
+
+## Runtime instance wiring
+
+Subscriptions are registered in two places:
+
+**At bootstrap** — for all modules and pre-existing instances registered in the module registry.
+
+**At runtime** — when `POST .../modules/{name}/instances` creates a new instance, the handler automatically resolves and registers the instance's declarative subscriptions. This ensures new instances immediately start receiving their scoped events.
+
+## Choosing between wildcard and instance-scoped subscriptions
+
+| Approach | When to use |
+|---|---|
+| **Instance-scoped** (`invoices.approved` → auto-rewritten) | Default. Each instance handles only its own events. |
+| **Wildcard** (`invoices.*.approved` or `*.approved`) | When a handler needs to react to events from all instances or all modules. |
+| **Cross-module** (`vehicles.deleted`) | When listening to events from a different module — no rewriting applied. |
+
+You can mix all three in the same module:
+
+```yaml
+subscribes:
+  # Instance-scoped: only this instance's events
+  - event: invoices.created
+    handler: handle_own_created
+
+  # Wildcard: all instances of invoices
+  - event: invoices.*.status_changed
+    handler: handle_any_status_change
+
+  # Cross-module: different module entirely
+  - event: vehicles.deleted
+    handler: handle_vehicle_deleted
+```
+
+## Legacy: EventSubscriber interface
+
+Modules can still implement `EventSubscriber` directly for programmatic subscription control:
+
+```go
+func (m *Module) Subscriptions() []core.Subscription {
+    return []core.Subscription{
+        {Event: "vehicles.deleted", Handler: m.handleVehicleDeleted, Async: true},
+    }
+}
+```
+
+Both approaches can coexist — legacy subscriptions are registered first, then declarative ones. For new modules, prefer the declarative approach.
