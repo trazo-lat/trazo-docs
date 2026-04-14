@@ -1,0 +1,143 @@
+---
+title: "Local CI with Dagger"
+description: Run containerized CI pipelines locally via `trazo dev ci run` before pushing to GitHub.
+---
+
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+The `trazo dev ci` command runs containerized CI checks locally using [Dagger](https://dagger.io). This replaces GitHub Actions for pre-push validation — run the same build, lint, and test steps in containers on your machine.
+
+```
+write code → trazo dev ci run → passes → commit → push origin
+```
+
+## Prerequisites
+
+- Docker running on your machine
+- [Dagger Engine](https://docs.dagger.io/install) installed
+- `trazo-cli` built: `cd trazo-cli && go build -o bin/trazo-cli .`
+
+## Quick start
+
+<Steps>
+
+1. **Run the full pipeline for a service**
+
+   ```bash
+   trazo dev ci run trazo-core-service
+   ```
+
+   Or auto-detect from your current directory:
+
+   ```bash
+   cd trazo-core-service
+   trazo dev ci run
+   ```
+
+2. **Read the JSON output**
+
+   Results go to stdout as structured JSON. Progress logs go to stderr.
+
+   ```json
+   {
+     "service": "trazo-core-service",
+     "scope": "all",
+     "overall": "pass",
+     "steps": [
+       {"name": "build", "status": "pass", "duration_seconds": 8},
+       {"name": "fmt", "status": "pass", "duration_seconds": 2},
+       {"name": "lint", "status": "pass", "duration_seconds": 15},
+       {"name": "test-unit", "status": "pass", "duration_seconds": 22}
+     ],
+     "summary": "4 passed, 0 failed, 0 skipped out of 4 steps"
+   }
+   ```
+
+3. **Push to origin once CI passes**
+
+   ```bash
+   git push origin <branch>
+   ```
+
+</Steps>
+
+## Scoping
+
+Run a subset of steps with `--scope`:
+
+```bash
+trazo dev ci run trazo-core-service --scope lint    # fmt + lint + vet only
+trazo dev ci run trazo-core-service --scope test    # tests only
+trazo dev ci run trazo-core-service --scope build   # build only
+```
+
+| Scope | Steps included |
+|-------|---------------|
+| `all` (default) | build, fmt, tidy, vet, lint, test-unit, test-integration |
+| `build` | build |
+| `lint` | fmt, tidy, vet, lint |
+| `test` | test-unit, test-integration, test-e2e |
+| `test-unit` | test-unit |
+| `test-integration` | test-integration |
+| `test-e2e` | test-e2e |
+
+## Service pipelines
+
+<Tabs>
+<TabItem label="Go services">
+
+**Applies to:** `trazo-core-service`, `trazo-cli`, `trazo-e2e`
+
+| Step | Container | Command |
+|------|-----------|---------|
+| build | `golang:1.25-alpine` | `go build` |
+| fmt | `golang:1.25-alpine` | `gofmt -l .` |
+| tidy | `golang:1.25-alpine` | `go mod tidy` + diff check |
+| vet | `golang:1.25-alpine` | `go vet ./...` |
+| lint | `golangci/golangci-lint` | `golangci-lint run ./...` |
+| test-unit | `golang:1.25-alpine` | `go test -race ./...` |
+| test-integration | `golang:1.25-alpine` + Docker socket | `go test -tags=integration` |
+
+Integration tests mount the Docker socket so testcontainers can create PostgreSQL containers.
+
+</TabItem>
+<TabItem label="Flutter">
+
+**Applies to:** `trazo-admin-app`
+
+| Step | Container | Command |
+|------|-----------|---------|
+| pub-get | `flutter:stable` | `flutter pub get` |
+| fmt | `flutter:stable` | `dart format --set-exit-if-changed .` |
+| analyze | `flutter:stable` | `flutter analyze --no-fatal-infos` |
+| test-unit | `flutter:stable` | `flutter test --exclude-tags=golden` |
+
+</TabItem>
+<TabItem label="Node.js">
+
+**Applies to:** `trazo-docs`
+
+| Step | Container | Command |
+|------|-----------|---------|
+| install | `node:22-alpine` | `npm install` |
+| build | `node:22-alpine` | `npm run build` |
+
+</TabItem>
+</Tabs>
+
+## How it works
+
+Under the hood, `trazo dev ci run` uses the [Dagger Go SDK](https://docs.dagger.io/sdk/go) to:
+
+1. Mount your local source directory into a container
+2. Run each step sequentially (stops on first failure)
+3. Cache Go modules and build artifacts across runs
+4. Output structured JSON results
+
+No CI server, no git forge, no tokens — just Docker and Dagger.
+
+## Claude Code integration
+
+Claude Code uses `trazo dev ci run` as part of the agentic loop. When Claude finishes writing code, it runs CI to validate, reads the JSON output, and fixes any failures before committing.
+
+The `/ci` and `/validate` skills invoke this command automatically.
