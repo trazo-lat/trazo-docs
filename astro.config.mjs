@@ -133,6 +133,7 @@ export default defineConfig({
               collapsed: true,
               items: [
                 { label: 'Authentication', slug: 'api-guides/authentication' },
+                { label: 'Auth Method Management', slug: 'api-guides/auth-method-management' },
                 { label: 'Tenant Management', slug: 'api-guides/tenant-management' },
                 { label: 'User Management', slug: 'api-guides/user-management' },
                 { label: 'Audit Logs', slug: 'api-guides/audit-logs' },
