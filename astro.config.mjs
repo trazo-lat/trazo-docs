@@ -1,18 +1,41 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightOpenAPI, { openAPISidebarGroups } from 'starlight-openapi';
+import mermaid from 'astro-mermaid';
 
 export default defineConfig({
-  legacy: {
-    collections: true,
-  },
   integrations: [
+    mermaid({
+      autoTheme: true,
+      mermaidConfig: {
+        theme: 'base',
+        themeVariables: {
+          primaryColor: '#3b82f6',
+          primaryTextColor: '#ffffff',
+          primaryBorderColor: '#2563eb',
+          secondaryColor: '#1e3a5f',
+          secondaryTextColor: '#ffffff',
+          secondaryBorderColor: '#1a2b4a',
+          tertiaryColor: '#dbeafe',
+          tertiaryTextColor: '#1e3a5f',
+          tertiaryBorderColor: '#93c5fd',
+          lineColor: '#888b96',
+          textColor: '#c0c2c7',
+          mainBkg: '#3b82f6',
+          nodeBorder: '#2563eb',
+          clusterBkg: '#24272f',
+          clusterBorder: '#545861',
+          edgeLabelBackground: '#24272f',
+          nodeTextColor: '#ffffff',
+        },
+      },
+    }),
     starlight({
       title: 'Trazo Docs',
       description: 'Documentation for the Trazo multi-tenant SaaS platform',
-      social: {
-        github: 'https://github.com/trazo-dev',
-      },
+      social: [
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/trazo-dev' },
+      ],
       customCss: ['./src/styles/custom.css'],
       sidebar: [
         {
@@ -30,21 +53,52 @@ export default defineConfig({
           label: 'Architecture',
           items: [
             { label: 'Overview', slug: 'architecture/overview' },
-            { label: 'Diagrams', slug: 'architecture/diagrams', badge: 'New' },
-            { label: 'Core Struct', slug: 'architecture/core-struct' },
-            { label: 'Schema-per-Tenant', slug: 'architecture/schema-per-tenant' },
-            { label: 'Module System', slug: 'architecture/module-system' },
-            { label: 'Multi-Instance Modules', slug: 'architecture/multi-instance-modules', badge: 'New' },
-            { label: 'Permissions', slug: 'architecture/permissions' },
-            { label: 'Authentication', slug: 'architecture/authentication' },
-            { label: 'Audit Trail', slug: 'architecture/audit-trail' },
-            { label: 'Event Outbox', slug: 'architecture/event-outbox' },
-            { label: 'Event Subscriptions', slug: 'architecture/event-subscriptions', badge: 'New' },
-            { label: 'Hooks', slug: 'architecture/hooks', badge: 'New' },
-            { label: 'Notifications', slug: 'architecture/notifications' },
-            { label: 'File Storage', slug: 'architecture/storage', badge: 'New' },
-            { label: 'Rate Limiting', slug: 'architecture/rate-limiting', badge: 'New' },
-            { label: 'Error System', slug: 'architecture/error-system' },
+            { label: 'Diagrams', slug: 'architecture/diagrams' },
+            {
+              label: 'Core',
+              collapsed: true,
+              items: [
+                { label: 'Core Struct', slug: 'architecture/core-struct' },
+                { label: 'Schema-per-Tenant', slug: 'architecture/schema-per-tenant' },
+                { label: 'Error System', slug: 'architecture/error-system' },
+                { label: 'Status Engine', slug: 'architecture/status-engine' },
+              ],
+            },
+            {
+              label: 'Modules',
+              collapsed: true,
+              items: [
+                { label: 'Module System', slug: 'architecture/module-system' },
+                { label: 'Multi-Instance Modules', slug: 'architecture/multi-instance-modules' },
+              ],
+            },
+            {
+              label: 'Security & Access',
+              collapsed: true,
+              items: [
+                { label: 'Authentication', slug: 'architecture/authentication' },
+                { label: 'Permissions', slug: 'architecture/permissions' },
+                { label: 'Rate Limiting', slug: 'architecture/rate-limiting' },
+              ],
+            },
+            {
+              label: 'Events & Messaging',
+              collapsed: true,
+              items: [
+                { label: 'Event Outbox', slug: 'architecture/event-outbox' },
+                { label: 'Event Subscriptions', slug: 'architecture/event-subscriptions' },
+                { label: 'Hooks', slug: 'architecture/hooks' },
+                { label: 'Notifications', slug: 'architecture/notifications' },
+              ],
+            },
+            {
+              label: 'Infrastructure',
+              collapsed: true,
+              items: [
+                { label: 'Audit Trail', slug: 'architecture/audit-trail' },
+                { label: 'File Storage', slug: 'architecture/storage' },
+              ],
+            },
           ],
         },
         {
@@ -60,16 +114,33 @@ export default defineConfig({
             { label: 'Cross-Module Calls', slug: 'guides/cross-module-calls' },
           ],
         },
-        ...openAPISidebarGroups,
         {
-          label: 'API Guides',
+          label: 'Flows',
           items: [
-            { label: 'Authentication', slug: 'api-guides/authentication' },
-            { label: 'Tenant Management', slug: 'api-guides/tenant-management' },
-            { label: 'User Management', slug: 'api-guides/user-management' },
-            { label: 'Audit Logs', slug: 'api-guides/audit-logs' },
-            { label: 'Events', slug: 'api-guides/events' },
-            { label: 'Notifications', slug: 'api-guides/notifications' },
+            { label: 'Creating a Module', slug: 'guides/flow-creating-a-module' },
+            { label: 'Updating a Module', slug: 'guides/flow-updating-a-module' },
+            { label: 'Application Startup', slug: 'guides/flow-startup-lifecycle' },
+            { label: 'Request Lifecycle', slug: 'guides/flow-request-lifecycle' },
+            { label: 'Event Propagation', slug: 'guides/flow-event-propagation' },
+            { label: 'Local Dev Setup', slug: 'guides/flow-local-dev-setup' },
+          ],
+        },
+        {
+          label: 'API',
+          items: [
+            {
+              label: 'Guides',
+              collapsed: true,
+              items: [
+                { label: 'Authentication', slug: 'api-guides/authentication' },
+                { label: 'Tenant Management', slug: 'api-guides/tenant-management' },
+                { label: 'User Management', slug: 'api-guides/user-management' },
+                { label: 'Audit Logs', slug: 'api-guides/audit-logs' },
+                { label: 'Events', slug: 'api-guides/events' },
+                { label: 'Notifications', slug: 'api-guides/notifications' },
+              ],
+            },
+            ...openAPISidebarGroups,
           ],
         },
         {

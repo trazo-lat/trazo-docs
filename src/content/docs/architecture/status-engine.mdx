@@ -1,0 +1,398 @@
+---
+title: Status Engine
+description: Declarative, YAML-driven state machines for modules — transitions, permissions, preconditions, input validation, and multi-machine support.
+---
+
+The Status Engine replaces hardcoded Go state machines with declarative YAML configuration. Modules define statuses and transitions in `module.yaml`; the engine handles validation, permission checks, preconditions, input schemas, and exposes generic `/actions` endpoints so the frontend is fully data-driven.
+
+## Core Concepts
+
+### Status Types
+
+Every status has a type that controls its behavior in the state machine:
+
+| Type | Behavior |
+|---|---|
+| `initial` | Auto-assigned on create. Cannot transition **to** this state. Exactly one per machine. |
+| `active` | Can transition from and to. The working states of the lifecycle. |
+| `terminal` | Can transition **to** but not **from**. Represents completed/cancelled/archived. |
+
+### Trigger Types
+
+Each transition is driven by a trigger that determines who/what can execute it:
+
+| Trigger | Driven by | Appears in `GET /actions`? |
+|---|---|---|
+| `permission` (default) | User calls action, permission checked | Yes — if user has permission |
+| `approval` | Approval engine or authorized approver | Yes — only for users with the approval permission |
+| `system` | Background worker, scheduler, or side-effect | No — hidden from users |
+| `event` | External event triggers transition | No — hidden from users |
+
+### Action-Driven Transitions
+
+Transitions are not direct status changes — they are **actions** with validation:
+
+```
+POST /billing/invoices/{id}/actions/issue   { }
+POST /orders/{id}/actions/complete          { "notes": "Done" }
+POST /orders/{id}/actions/cancel            { "reason": "Not needed" }
+```
+
+Each action defines: source state, target state, permission, preconditions, input fields, UI metadata (label, style, confirmation).
+
+## Declaring State Machines
+
+Add a `state_machines` section to your module's `module.yaml`:
+
+```yaml
+state_machines:
+  - key: status
+    statuses:
+      base:
+        - { key: draft, type: initial }
+        - { key: open, type: active }
+        - { key: in_progress, type: active }
+        - { key: completed, type: terminal }
+        - { key: cancelled, type: terminal }
+      extensible: true  # tenants can add custom statuses
+    transitions:
+      - from: draft
+        to: open
+        action: open
+        permission: orders.update
+        label: open
+
+      - from: open
+        to: in_progress
+        action: start
+        permission: orders.update
+        label: start
+
+      - from: in_progress
+        to: completed
+        action: complete
+        permission: orders.complete
+        style: confirm
+        confirm: true
+        confirm_message: "Complete this order?"
+        preconditions:
+          - type: attachment_required
+            category: after_photo
+            message: After photo required
+        input:
+          fields:
+            - key: completion_notes
+              type: text
+              required: true
+              min_length: 5
+              label: Completion Notes
+            - key: actual_cost
+              type: currency
+              required: false
+
+      - from: "*"
+        to: cancelled
+        action: cancel
+        permission: orders.cancel
+        style: destructive
+        exclude_from: [completed, cancelled]
+        confirm: true
+        input:
+          fields:
+            - key: reason
+              type: text
+              required: true
+              min_length: 10
+
+      # System-triggered (hidden from /actions)
+      - from: open
+        to: in_progress
+        action: auto_assign
+        trigger: system
+```
+
+## Registration
+
+Modules register their state machines during `Init`:
+
+```go
+func (m *Module) Init(c *core.Core) error {
+    // ... create service, handler ...
+
+    if c.Status != nil {
+        machines, err := statemachine.ParseConfig(moduleConfigBytes)
+        if err != nil {
+            return fmt.Errorf("parsing state machines: %w", err)
+        }
+        c.Status.Register(string(ModuleName), machines)
+    }
+    return nil
+}
+```
+
+`ParseConfig` validates the entire configuration at startup — invalid configs (dangling references, ambiguous transitions, missing permissions, constraint violations) cause a hard error.
+
+## Executing Actions
+
+### In Service Code
+
+```go
+result, err := s.core.Status.ExecuteAction(ctx, core.ExecuteOpts{
+    ModuleName:    "orders",
+    Action:        "complete",
+    CurrentStates: map[string]string{"status": "in_progress"},
+    Input:         map[string]any{"completion_notes": "Brakes replaced"},
+    ResourceData:  map[string]any{
+        "attachments": []any{
+            map[string]any{"category": "after_photo", "url": "..."},
+        },
+    },
+})
+// result.MachineKey = "status"
+// result.From = "in_progress"
+// result.To = "completed"
+// result.Input = {"completion_notes": "Brakes replaced"}
+```
+
+The engine validates in order:
+1. **Permission** — `core.Permission.MustCan(ctx, transition.Permission)`
+2. **Preconditions** — checks against `ResourceData` (attachments, required fields)
+3. **Input validation** — type checking, min/max, required fields, select options
+
+If any step fails, a structured `core.Error` is returned. The engine does **not** apply the DB change — the caller uses the `TransitionResult` to update state.
+
+### Available Actions (for Frontend)
+
+```go
+actions, err := s.core.Status.AvailableActions(ctx, core.ActionOpts{
+    ModuleName:    "orders",
+    CurrentStates: map[string]string{"status": "in_progress"},
+    ResourceData:  map[string]any{...},
+})
+```
+
+Returns all actions the current user can perform. Blocked actions (precondition not met) still appear with `blocked: true` and reasons, so the UI can explain **why** an action isn't available.
+
+## HTTP Endpoints
+
+Wire the generic endpoints in your handler:
+
+```go
+statemachine.RegisterActionRoutes(api, statemachine.ActionRouteConfig{
+    ModuleName: "orders",
+    PathPrefix: "/orders",
+    Tags:       []string{"orders"},
+    Resolver: func(ctx context.Context, id string) (
+        map[string]string, map[string]any, error,
+    ) {
+        order, err := svc.Get(ctx, id)
+        if err != nil {
+            return nil, nil, err
+        }
+        states := map[string]string{"status": order.Status}
+        data := map[string]any{"attachments": order.Attachments}
+        return states, data, nil
+    },
+    Applier: func(ctx context.Context, id string, result *core.TransitionResult) (any, error) {
+        switch result.Action {
+        case "complete":
+            return svc.Complete(ctx, id, result.Input)
+        case "cancel":
+            return svc.Cancel(ctx, id, result.Input)
+        default:
+            return nil, fmt.Errorf("action %q not implemented", result.Action)
+        }
+    },
+    Engine: c.Status,
+})
+```
+
+This registers three endpoints:
+
+### `GET /{id}/actions`
+
+Returns available actions for the resource in its current state:
+
+```json
+{
+  "actions": [
+    {
+      "action": "complete",
+      "machine_key": "status",
+      "from": "in_progress",
+      "to": "completed",
+      "label": "complete",
+      "style": "confirm",
+      "confirm": true,
+      "confirm_message": "Complete this order?",
+      "blocked": true,
+      "blocked_reasons": [
+        { "type": "attachment_required", "message": "After photo required" }
+      ],
+      "input": {
+        "fields": [
+          { "key": "completion_notes", "type": "text", "required": true, "min_length": 5, "label": "Completion Notes" },
+          { "key": "actual_cost", "type": "currency", "required": false }
+        ]
+      }
+    },
+    {
+      "action": "cancel",
+      "machine_key": "status",
+      "from": "in_progress",
+      "to": "cancelled",
+      "label": "cancel",
+      "style": "destructive",
+      "blocked": false,
+      "input": { "fields": [{ "key": "reason", "type": "text", "required": true, "min_length": 10 }] }
+    }
+  ]
+}
+```
+
+### `POST /{id}/actions/{action}`
+
+Execute an action with input:
+
+```json
+POST /orders/wo_001/actions/complete
+{ "completion_notes": "Brakes replaced successfully" }
+```
+
+### `GET /config`
+
+Returns the full state machine definition for the module. Frontend uses this to render the entire lifecycle UI dynamically.
+
+## Input Field Types
+
+| Type | Component | Validation |
+|---|---|---|
+| `text` | TextInput / TextArea | `min_length`, `max_length`, `multiline` |
+| `number` | NumberInput | `min`, `max`, `step` |
+| `currency` | CurrencyInput | `min`, `max` (currency from tenant config) |
+| `date` / `datetime` | DatePicker | String format validation |
+| `boolean` | Toggle | Type check |
+| `select` | Dropdown | Must match one of `options[].value` |
+| `multi_select` | Multi-Dropdown | Each item must match `options[].value` |
+| `reference` | SearchableSelect | String ID, requires `reference.module` |
+| `attachment` | FileUpload | Transport-layer validation |
+| `line_items` | Editable table | Each row validated against `columns[]` |
+
+### Conditional Fields
+
+Fields support conditional visibility and required-ness:
+
+```yaml
+fields:
+  - key: type
+    type: select
+    options: [{ value: standard }, { value: warranty }]
+  - key: warranty_code
+    type: text
+    required: true
+    visible_when: "type == warranty"    # hidden unless type is warranty
+  - key: reason
+    type: text
+    required_when: "status != approved"  # required only when status != approved
+```
+
+Supported expressions: `field == value`, `field != value`, and bare `field` (truthy check).
+
+## Multiple State Machines
+
+A single resource can have independent state flows running in parallel:
+
+```yaml
+state_machines:
+  - key: status
+    statuses:
+      base:
+        - { key: draft, type: initial }
+        - { key: open, type: active }
+        - { key: completed, type: terminal }
+    transitions:
+      - { from: draft, to: open, action: open, permission: orders.update }
+
+  - key: budget
+    statuses:
+      base:
+        - { key: none, type: initial }
+        - { key: estimated, type: active }
+        - { key: approved, type: terminal }
+    transitions:
+      - { from: none, to: estimated, action: add_estimate, permission: orders.update }
+      - { from: estimated, to: approved, action: approve_estimate, trigger: approval, permission: orders.approve }
+```
+
+States stored as JSONB: `{"status": "open", "budget": "estimated"}`
+
+`GET /actions` merges available actions from **all** state machines. Actions on one machine don't affect the other.
+
+## Custom Tenant Statuses
+
+When `extensible: true`, tenants can add custom statuses that are inserted into the base flow:
+
+```go
+statuses, _ := engine.ResolveStatuses("orders", "status", []core.StatusDef{
+    {Key: "pending_estimate", Label: "Pending Estimate", After: "open"},
+    {Key: "pending_approval", Label: "Pending Approval", After: "pending_estimate"},
+})
+// Result: draft → open → pending_estimate → pending_approval → in_progress → completed → cancelled
+```
+
+Custom statuses default to `active` type and are inserted after the status named in their `After` field. If `After` is empty, they're inserted before the first terminal status.
+
+## Config Validation
+
+`ParseConfig` validates the entire configuration at module init time:
+
+| Check | What it catches |
+|---|---|
+| Terminal → X | Terminal states can't have outgoing transitions |
+| X → Initial | Can't transition back to the initial state |
+| Ambiguous | Same action + same `from` state = non-deterministic |
+| No terminal | Machine with no way to finish |
+| `exclude_from` refs | References to non-existent statuses |
+| Enum values | Invalid trigger, style, field type, status type |
+| Permission required | `trigger: permission` without a permission key |
+| Precondition config | Unknown types, missing field/category per type |
+| Input constraints | `min > max`, select without options, reference without module |
+| Duplicate keys | Duplicate status keys, input field keys, machine keys |
+
+## Preconditions
+
+Preconditions block an action when a condition is not met. The action still appears in `GET /actions` but with `blocked: true` and a reason.
+
+| Type | Config | Checks |
+|---|---|---|
+| `field_required` | `field: "estimated_cost"` | Resource data has non-nil value for field |
+| `attachment_required` | `category: "after_photo"` | Resource data has attachment with matching category |
+| `field_not_empty` | `field: "description"` | Resource data has non-empty string for field |
+
+```yaml
+preconditions:
+  - type: attachment_required
+    category: after_photo
+    message: After photo required before completing
+  - type: field_required
+    field: estimated_cost
+    message: Estimate is required
+```
+
+## Testing
+
+Use `MockStatusEngine` from `core.MockCoreBundle`:
+
+```go
+b := testutil.NewMockCore(t)
+b.StatusMock.On("ExecuteAction", mock.Anything, mock.MatchedBy(func(opts core.ExecuteOpts) bool {
+    return opts.Action == "complete"
+})).Return(&core.TransitionResult{
+    MachineKey: "status",
+    Action:     "complete",
+    From:       "in_progress",
+    To:         "completed",
+}, nil)
+
+svc := orders.NewService(b.Core, repo)
+```
