@@ -1,0 +1,392 @@
+---
+title: Auth Method Management
+description: View and update allowed authentication methods per membership, configure tenant defaults, and enforce auth policies.
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Trazo supports multiple authentication methods — `password`, `oauth2`, `magic_link`, and `webauthn`. By default, every membership allows all methods. The auth method management API lets tenant admins **restrict which methods each member can use** and **configure tenant-wide defaults** for new memberships.
+
+Requires the `members.manage_auth` permission for GET/PUT operations on the dedicated endpoints. Auth methods can also be updated via the general `PUT /members/{id}` endpoint with the `members.update` permission.
+
+## Key Concepts
+
+| Concept | Description |
+|---|---|
+| `auth_methods` | The methods a membership is **allowed** to use. Empty array = all methods allowed. |
+| `available_methods` | All methods the platform supports (`password`, `oauth2`, `magic_link`, `webauthn`). |
+| `user_enrolled` | Which methods the user has **actually set up** (e.g., has a password hash, has linked OAuth2). |
+| Lockout protection | The API prevents removing all enrolled methods — the user must always have at least one way to log in. |
+| `default_auth_methods` | Tenant-level setting that controls what new memberships start with (default: `["password"]`). |
+
+## Get Auth Methods
+
+View a member's allowed methods, the platform-supported methods, and what the user has actually enrolled.
+
+**`GET /api/v1/tenants/{tenant_id}/members/{member_id}/auth-methods`**
+
+**Response**
+
+```json
+{
+  "auth_methods": ["password", "oauth2"],
+  "available_methods": ["password", "oauth2", "magic_link", "webauthn"],
+  "user_enrolled": [
+    { "method": "password", "enrolled": true },
+    { "method": "oauth2", "enrolled": true, "details": "accounts.google.com" },
+    { "method": "magic_link", "enrolled": true, "details": "john@acme.com" },
+    { "method": "webauthn", "enrolled": false }
+  ]
+}
+```
+
+The `details` field provides method-specific context: the OAuth2 issuer URL, the email used for magic links, or the credential name for WebAuthn.
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl http://localhost:8080/api/v1/tenants/ten_acme/members/mem_john-doe_admin/auth-methods \
+    -H "Authorization: Bearer $ACCESS_TOKEN"
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type AuthMethodsResponse struct {
+      AuthMethods      []string           `json:"auth_methods"`
+      AvailableMethods []string           `json:"available_methods"`
+      UserEnrolled     []UserEnrolledInfo `json:"user_enrolled"`
+  }
+
+  type UserEnrolledInfo struct {
+      Method   string `json:"method"`
+      Enrolled bool   `json:"enrolled"`
+      Details  string `json:"details,omitempty"`
+  }
+
+  func getAuthMethods(token, tenantID, memberID string) (*AuthMethodsResponse, error) {
+      url := fmt.Sprintf("http://localhost:8080/api/v1/tenants/%s/members/%s/auth-methods",
+          tenantID, memberID)
+
+      req, _ := http.NewRequest(http.MethodGet, url, nil)
+      req.Header.Set("Authorization", "Bearer "+token)
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result AuthMethodsResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      methods, err := getAuthMethods("eyJ...", "ten_acme", "mem_john-doe_admin")
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Allowed: %v\n", methods.AuthMethods)
+      for _, e := range methods.UserEnrolled {
+          fmt.Printf("  %s: enrolled=%v %s\n", e.Method, e.Enrolled, e.Details)
+      }
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function getAuthMethods(token, tenantId, memberId) {
+    const url = `http://localhost:8080/api/v1/tenants/${tenantId}/members/${memberId}/auth-methods`;
+    const response = await fetch(url, {
+      headers: { 'Authorization': `Bearer ${token}` },
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.message);
+    }
+
+    const data = await response.json();
+
+    // Show which methods are allowed vs enrolled
+    for (const method of data.user_enrolled) {
+      const allowed = data.auth_methods.length === 0 || data.auth_methods.includes(method.method);
+      console.log(`${method.method}: enrolled=${method.enrolled}, allowed=${allowed}`);
+    }
+
+    return data;
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+## Update Auth Methods
+
+Replace the allowed authentication methods for a membership. The update takes effect immediately — the next login attempt will be checked against the new list.
+
+**`PUT /api/v1/tenants/{tenant_id}/members/{member_id}/auth-methods`**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `auth_methods` | string[] | yes | List of allowed methods. Empty array = all methods allowed. |
+
+**Validation rules:**
+- Each method must be one of: `password`, `oauth2`, `magic_link`, `webauthn`
+- Cannot remove all enrolled methods (would lock the user out)
+- Empty array is valid and means "allow all methods" (reset to default behavior)
+
+**Response** — returns the same shape as GET, reflecting the new state.
+
+```json
+{
+  "auth_methods": ["password", "oauth2"],
+  "available_methods": ["password", "oauth2", "magic_link", "webauthn"],
+  "user_enrolled": [
+    { "method": "password", "enrolled": true },
+    { "method": "oauth2", "enrolled": true, "details": "accounts.google.com" },
+    { "method": "magic_link", "enrolled": true, "details": "john@acme.com" },
+    { "method": "webauthn", "enrolled": false }
+  ]
+}
+```
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X PUT http://localhost:8080/api/v1/tenants/ten_acme/members/mem_jane-doe_manager/auth-methods \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "auth_methods": ["oauth2"]
+    }'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type UpdateAuthMethodsRequest struct {
+      AuthMethods []string `json:"auth_methods"`
+  }
+
+  func updateAuthMethods(token, tenantID, memberID string, methods []string) (*AuthMethodsResponse, error) {
+      body, _ := json.Marshal(UpdateAuthMethodsRequest{AuthMethods: methods})
+      url := fmt.Sprintf("http://localhost:8080/api/v1/tenants/%s/members/%s/auth-methods",
+          tenantID, memberID)
+
+      req, _ := http.NewRequest(http.MethodPut, url, bytes.NewReader(body))
+      req.Header.Set("Authorization", "Bearer "+token)
+      req.Header.Set("Content-Type", "application/json")
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var result AuthMethodsResponse
+      if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+          return nil, err
+      }
+      return &result, nil
+  }
+
+  func main() {
+      // Restrict a manager to OAuth2 only
+      result, err := updateAuthMethods("eyJ...", "ten_acme", "mem_jane-doe_manager", []string{"oauth2"})
+      if err != nil {
+          panic(err)
+      }
+      fmt.Printf("Updated methods: %v\n", result.AuthMethods)
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function updateAuthMethods(token, tenantId, memberId, methods) {
+    const url = `http://localhost:8080/api/v1/tenants/${tenantId}/members/${memberId}/auth-methods`;
+    const response = await fetch(url, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ auth_methods: methods }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(`${error.code}: ${error.message}`);
+    }
+
+    return response.json();
+  }
+
+  // Restrict to OAuth2 only
+  await updateAuthMethods(token, 'ten_acme', 'mem_jane-doe_manager', ['oauth2']);
+
+  // Reset to all methods allowed
+  await updateAuthMethods(token, 'ten_acme', 'mem_jane-doe_manager', []);
+  ```
+  </TabItem>
+</Tabs>
+
+## Update via General Member Endpoint
+
+Auth methods can also be updated as part of a general membership update. This is useful when changing role and auth methods together.
+
+**`PUT /api/v1/tenants/{tenant_id}/members/{member_id}`**
+
+Pass `auth_methods` alongside other fields. Omitting `auth_methods` (or passing `null`) leaves them unchanged. The same validation and lockout protection apply.
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/tenants/ten_acme/members/mem_john-doe_admin \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "role_id": "role_manager",
+    "auth_methods": ["password", "oauth2"]
+  }'
+```
+
+## Use Cases
+
+### Enforce SSO for managers
+
+After rolling out SSO, restrict all managers to OAuth2 only:
+
+```bash
+# First, verify the member has enrolled OAuth2
+curl http://localhost:8080/api/v1/tenants/ten_acme/members/mem_jane-doe_manager/auth-methods \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# If oauth2 is enrolled, restrict to it
+curl -X PUT http://localhost:8080/api/v1/tenants/ten_acme/members/mem_jane-doe_manager/auth-methods \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "auth_methods": ["oauth2"] }'
+```
+
+Jane's next login must use SSO. Password login will be rejected.
+
+### Security incident response
+
+A member's password may be compromised. Restrict them to magic link while investigating:
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/tenants/ten_acme/members/mem_bob_mechanic/auth-methods \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "auth_methods": ["magic_link"] }'
+```
+
+Bob can still log in via email link, but password and OAuth2 are blocked immediately.
+
+### Gradual onboarding
+
+Invite new members with password only, then enable OAuth2 once SSO is configured:
+
+```bash
+# 1. Member is invited — starts with default_auth_methods (["password"])
+
+# 2. After SSO setup, add OAuth2
+curl -X PUT http://localhost:8080/api/v1/tenants/ten_acme/members/mem_alice_viewer/auth-methods \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "auth_methods": ["password", "oauth2"] }'
+
+# 3. Once the user has enrolled OAuth2, restrict to SSO only
+curl -X PUT http://localhost:8080/api/v1/tenants/ten_acme/members/mem_alice_viewer/auth-methods \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "auth_methods": ["oauth2"] }'
+```
+
+### Reset restrictions
+
+Remove all restrictions and allow any enrolled method:
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/tenants/ten_acme/members/mem_bob_mechanic/auth-methods \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{ "auth_methods": [] }'
+```
+
+## Configure Tenant Defaults
+
+New memberships (created directly or via invite acceptance) use the `default_auth_methods` tenant setting. Update it to change what methods new members start with.
+
+**`PUT /api/v1/tenants/{tenant_id}/settings/default_auth_methods?module=members`**
+
+```bash
+curl -X PUT "http://localhost:8080/api/v1/tenants/ten_acme/settings/default_auth_methods?module=members" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "value": "[\"password\",\"oauth2\"]"
+  }'
+```
+
+After this, all new members and accepted invites in this tenant will start with `["password", "oauth2"]`.
+
+| Default value | Behavior |
+|---|---|
+| `["password"]` | New members can only use password (platform default) |
+| `["password", "oauth2"]` | New members can use password or OAuth2 |
+| `[]` | New members can use any enrolled method |
+
+## Common Errors
+
+| Status | Code | Description |
+|---|---|---|
+| `400` | `MEMBERS.VALIDATION.UNKNOWN_AUTH_METHOD` | A method in the request is not one of `password`, `oauth2`, `magic_link`, `webauthn`. |
+| `403` | `CORE.AUTHORIZATION.FORBIDDEN` | The caller lacks the `members.manage_auth` permission (dedicated endpoints) or `members.update` (general endpoint). |
+| `404` | `CORE.NOT_FOUND.MEMBER` | The membership ID does not exist in this tenant. |
+| `422` | `MEMBERS.VALIDATION.WOULD_LOCK_OUT_USER` | The update would remove all methods the user has enrolled, locking them out. |
+
+**Lockout error example:**
+
+```json
+{
+  "code": "MEMBERS.VALIDATION.WOULD_LOCK_OUT_USER",
+  "message": "cannot remove all enrolled auth methods — user would be locked out",
+  "status": 422
+}
+```
+
+This occurs when the new `auth_methods` list doesn't include any method the user has actually set up. For example, setting `["webauthn"]` when the user has only enrolled `password` and `oauth2`.
+
+## How Enforcement Works
+
+When a user logs in, the `AuthManager.Login()` function checks:
+
+1. Resolve the user's membership for the requested tenant
+2. Read the `auth_methods` array from the membership
+3. If the array is non-empty, verify the login method is in the list
+4. If not allowed, reject with `CORE.AUTHENTICATION.METHOD_NOT_ALLOWED`
+
+This check happens on every login — changes take effect immediately with no restart or cache invalidation.
+
+## Related
+
+- [Authentication Guide](/api-guides/authentication) — JWT tokens, login, refresh, logout.
+- [User Management Guide](/api-guides/user-management) — creating and updating user accounts.
+- [Permissions Architecture](/architecture/permissions) — how permission scopes work.
