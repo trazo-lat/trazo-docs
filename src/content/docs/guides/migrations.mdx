@@ -1,338 +1,285 @@
 ---
 title: Migrations
-description: Writing, running, and managing Atlas-compatible database migrations in Trazo, including the single-file format, CLI commands, and multi-tenant schema considerations.
+description: How Trazo's three-tier declarative migration system works, where each kind of table lives, and how new tenants get provisioned.
 ---
 
 import { Aside, Steps } from '@astrojs/starlight/components';
 
-Trazo uses an Atlas-compatible SQL migration format managed through the `trazo migrate` CLI commands. Migrations are embedded into the module binary at compile time and applied per-tenant schema at runtime.
+Trazo uses a **declarative, desired-state** migration model powered by `pg-schema-diff`. Each `.sql` file describes what the schema should look like, not the steps to get there. There are no numbered prefixes and no `-- +down` markers — the diff engine computes the actual DDL needed to bring the live database in line with the files at run time.
+
+Migrations are split into three buckets based on **tenant portability**: anything that needs to travel with a tenant lives in the per-tenant tier; cross-tenant data lives in `public`.
 
 ---
 
-## Migration File Format
-
-Each migration is a single `.sql` file containing the `up` SQL followed by the `down` SQL, separated by the `-- +down` marker.
-
-```sql
--- 20240101000000_create_repairs.sql
-
-CREATE TABLE repairs (
-    id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   UUID         NOT NULL REFERENCES public.tenants(id),
-    vehicle_id  UUID         NOT NULL,
-    description TEXT,
-    status      VARCHAR(50)  NOT NULL DEFAULT 'pending',
-    created_by  UUID         NOT NULL,
-    assigned_to UUID,
-    resolution_notes TEXT,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    deleted_at  TIMESTAMPTZ
-);
-
-CREATE INDEX idx_repairs_tenant    ON repairs(tenant_id);
-CREATE INDEX idx_repairs_status    ON repairs(status);
-CREATE INDEX idx_repairs_assigned  ON repairs(assigned_to);
-CREATE INDEX idx_repairs_created   ON repairs(created_by);
-CREATE INDEX idx_repairs_vehicle   ON repairs(vehicle_id);
-
--- +down
-
-DROP TABLE IF EXISTS repairs;
-```
-
-### File Naming Convention
+## The Three Tiers
 
 ```
-<timestamp>_<description>.sql
+migrations/
+├── core/
+│   ├── public/        ← global, cross-tenant tables (applied once)
+│   └── tenant/        ← per-tenant core subsystem tables (applied to every tenant schema)
+└── modules/
+    └── <name>.sql     ← per-tenant module tables (applied to every tenant schema)
 ```
 
-| Segment | Format | Example |
-|---|---|---|
-| `timestamp` | `YYYYMMDDHHMMSS` (UTC) | `20240101120000` |
-| `description` | snake_case, brief | `create_repairs` |
+| Tier | Where it lives | What it holds | When applied |
+|------|---------------|---------------|--------------|
+| `migrations/core/public/` | `public` schema | Cross-tenant registries: tenants, users, memberships, roles, invitations, permission/scope definitions, tenant_modules, migration_history, platform/module translations, platform default notification rules | Once, via the bootstrap endpoint |
+| `migrations/core/tenant/` | every `tenant_<slug>` schema | Per-tenant core subsystems: sessions, audit logs, events outbox, event subscriptions/deliveries, tenant_hooks, dashboard_configs, in_app_notifications, tenant_notification_rules, tenant_settings, stored_files, search_index, approval_requests/steps, tenant_state_snapshots, tenant_translations | At tenant creation, for every new tenant |
+| `migrations/modules/<name>.sql` | every `tenant_<slug>` schema | Module-owned per-tenant tables (e.g., `agents`, `billing_*`, `conversations`, `documents_*`, `entities`) | At tenant creation for every module listed in `tenant.default_modules`; later via the SchemaProvisioner when a module is enabled |
 
-The CLI generates the timestamp automatically when you run `trazo migrate create`.
-
-<Aside type="caution">
-  Never modify a migration file after it has been applied in any environment. If you need to change the schema, create a new migration. The migration history is stored in a migrations table per schema and checked against file checksums.
+<Aside type="tip">
+The rule of thumb: **tenants must be physically portable**. If a table needs to move when a tenant is exported, restored, or deleted, put it in `core/tenant/` or `modules/`. If it holds cross-tenant data (e.g., the tenant registry itself), put it in `core/public/`.
 </Aside>
 
 ---
 
-## Where Migrations Live
+## File Format
 
-Each module embeds its own migrations. Store all `.sql` files under a `migrations/` subdirectory within the module package:
+Each migration is a plain SQL file that declares the desired state. No up/down separator, no transactions, no version prefix.
+
+```sql
+-- migrations/modules/repairs.sql
+
+CREATE TABLE IF NOT EXISTS repairs (
+    id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    vehicle_id      UUID         NOT NULL,
+    description     TEXT,
+    status          VARCHAR(50)  NOT NULL DEFAULT 'pending',
+    created_by      UUID         NOT NULL,
+    assigned_to     UUID,
+    resolution_notes TEXT,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_repairs_status   ON repairs(status);
+CREATE INDEX IF NOT EXISTS idx_repairs_assigned ON repairs(assigned_to);
+CREATE INDEX IF NOT EXISTS idx_repairs_vehicle  ON repairs(vehicle_id);
+```
+
+Notice what is **not** here:
+
+- No `tenant_id` column. Tables in `migrations/modules/` and `migrations/core/tenant/` live inside `tenant_<slug>` — the schema name is the tenancy boundary. Adding a redundant `tenant_id` column would only invite mistakes.
+- No `-- +down` block. To remove a column or table, delete it from the SQL file; the next diff will drop it.
+- No timestamp prefix in the filename. One file per logical concern: `documents.sql`, `entities.sql`, `agents.sql`, etc.
+
+<Aside type="caution">
+Public-schema tables (`migrations/core/public/`) **do** keep their `tenant_id` foreign keys where applicable — for example, `memberships`, `tenant_invitations`, and `service_principals` reference `public.tenants(id)`. That column is meaningful there because the table holds rows for many tenants.
+</Aside>
+
+---
+
+## File Naming
 
 ```
-internal/modules/domain/repairs/
-├── migrations/
-│   ├── 20240101000000_create_repairs.sql
-│   ├── 20240215083000_add_sla_deadline.sql
-│   └── 20240310140000_add_parts_table.sql
-├── module.go
-└── ...
+migrations/core/public/<topic>.sql
+migrations/core/tenant/<topic>.sql
+migrations/modules/<module-name>.sql
 ```
 
-The `module.go` file embeds the migrations directory:
+| Tier | Examples |
+|------|----------|
+| `core/public/` | `tenants.sql`, `users.sql`, `permissions.sql`, `translations.sql`, `notification_rules.sql` |
+| `core/tenant/` | `sessions.sql`, `audit_events.sql`, `notifications.sql`, `storage.sql`, `hooks.sql`, `settings.sql` |
+| `modules/` | `agents.sql`, `billing.sql`, `conversations.sql`, `documents.sql`, `entities.sql` |
 
-```go
-//go:embed migrations
-var migrationFiles embed.FS
+There is exactly **one** file per module. A single module file may declare several related tables (e.g., `documents.sql` declares `document_types`, `document_instances`, `document_signatures`, and `document_share_tokens`).
 
-func (m *RepairsModule) Migrations() embed.FS {
-    return migrationFiles
-}
+---
+
+## How a New Tenant Gets Provisioned
+
+`POST /api/v1/tenants` runs the entire flow inside a single transaction:
+
+<Steps>
+1. Insert a row into `public.tenants` with the new tenant's id, slug, and metadata.
+2. `CREATE SCHEMA tenant_<slug>`.
+3. Set `search_path` on the transaction to `tenant_<slug>, public`.
+4. Apply every file in `migrations/core/tenant/` to the new schema.
+5. For each module listed in `tenant.default_modules` (from `trazo.yaml`), apply `migrations/modules/<name>.sql` to the new schema.
+6. Seed the default roles (admin, member, etc.) for the tenant.
+7. Insert one row per provisioned module into `public.tenant_modules`.
+</Steps>
+
+If any step fails, the transaction rolls back: the schema is dropped, the `public.tenants` row is gone, and the system returns to the pre-call state.
+
+The `cmd/seed` binary mirrors this exact flow for local bootstrap. It creates the first tenant and admin user after `POST /api/v1/admin/migrations/bootstrap` has applied the public-schema tables.
+
+---
+
+## Bootstrapping the Public Schema
+
+The public-schema tables (`tenants`, `users`, `roles`, …) are applied **once** per database, not per tenant. Trigger this via the admin bootstrap endpoint:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/admin/migrations/bootstrap \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-The platform applies migrations from all registered modules in dependency order when `trazo migrate up` is run.
+The endpoint diffs `migrations/core/public/` against the live `public` schema and applies whatever DDL is needed to bring it in line. It is idempotent — running it on an already up-to-date database is a no-op.
+
+<Aside type="note">
+The bootstrap endpoint does **not** touch any `tenant_<slug>` schemas. Per-tenant migrations run at tenant-creation time (or via the `SchemaProvisioner` when a module is enabled for an existing tenant).
+</Aside>
+
+---
+
+## Enabling a Module on an Existing Tenant
+
+Modules listed in `tenant.default_modules` are provisioned automatically when a tenant is created. To enable a module on an existing tenant, the platform's `SchemaProvisioner` reads `migrations/modules/<name>.sql` and applies it to that tenant's schema only. The flow is:
+
+1. Insert a `tenant_modules` row for `(tenant_id, module_name)` in `public`.
+2. Set `search_path` to the tenant's schema.
+3. Apply `migrations/modules/<name>.sql`.
+
+The same diff engine ensures the module's tables only land in that one schema.
+
+---
+
+## Where Migration Files Live in the Repo
+
+```
+trazo-core-service/
+└── migrations/
+    ├── core/
+    │   ├── public/
+    │   │   ├── tenants.sql
+    │   │   ├── users.sql
+    │   │   ├── permissions.sql
+    │   │   ├── access_control.sql
+    │   │   ├── modules.sql
+    │   │   ├── invitations.sql
+    │   │   ├── migration_history.sql
+    │   │   ├── notification_rules.sql
+    │   │   └── translations.sql
+    │   └── tenant/
+    │       ├── sessions.sql
+    │       ├── audit_events.sql
+    │       ├── notifications.sql
+    │       ├── hooks.sql
+    │       ├── storage.sql
+    │       ├── settings.sql
+    │       ├── search_index.sql
+    │       ├── state_snapshots.sql
+    │       ├── approval_requests.sql
+    │       └── tenant_translations.sql
+    └── modules/
+        ├── agents.sql
+        ├── billing.sql
+        ├── conversations.sql
+        ├── documents.sql
+        └── entities.sql
+```
+
+The whole tree is embedded into the server binary via `//go:embed`. No external migration files need to ship alongside the binary at deploy time.
 
 ---
 
 ## CLI Commands
 
-### Create a New Migration
+The `trazo migrate` command surface manages the diff/apply loop and inspects state. The exact command flags are documented under [Migrate Commands](/cli/migrate-commands/); the important conceptual points are:
 
-```bash
-trazo migrate create <name>
-```
-
-Creates a new migration file with the current UTC timestamp in the module's `migrations/` directory. If multiple modules are present, you will be prompted to select the target module.
-
-```bash
-trazo migrate create add_sla_deadline --module repairs
-```
-
-Output:
-
-```
-Created: internal/modules/domain/repairs/migrations/20240215083000_add_sla_deadline.sql
-```
-
----
-
-### Apply Migrations
-
-```bash
-trazo migrate up
-```
-
-Applies all pending migrations for all tenants. The platform iterates over every active tenant schema and applies any unapplied migrations in timestamp order.
-
-To apply only a specific module's migrations:
-
-```bash
-trazo migrate up --module repairs
-```
-
-To apply to a specific tenant schema only:
-
-```bash
-trazo migrate up --tenant acme-corp
-```
-
-Expected output:
-
-```
-Applying migrations for tenant: acme-corp
-  [1/3] 20240101000000_create_repairs              OK
-  [2/3] 20240215083000_add_sla_deadline            OK
-  [3/3] 20240310140000_add_parts_table             OK
-All migrations applied for acme-corp.
-```
-
----
-
-### Roll Back Migrations
-
-```bash
-trazo migrate down
-```
-
-By default, rolls back the most recently applied migration across all tenants.
-
-```bash
-# Roll back the last N migrations
-trazo migrate down --steps 3
-
-# Roll back a specific migration by name
-trazo migrate down --to 20240101000000_create_repairs
-```
+- `trazo migrate status` reports which tables are present, missing, or drifted in `public` and in each tenant schema relative to the embedded SQL files.
+- `trazo migrate diff` is read-only: it prints the DDL the engine would run if asked.
+- The platform records every applied migration in `public.migration_history` keyed by tier, schema, and file hash.
 
 <Aside type="caution">
-  Rolling back in production is a destructive operation. The `-- +down` SQL typically drops tables. Always confirm that a rollback is the correct action and that you have a recent database backup before running `migrate down` on a non-development environment.
+Because migrations are declarative, **never** edit a deployed `.sql` file in a way that drops data without intention. Removing a column from the file is taken as "this column should not exist" and the next diff will issue an `ALTER TABLE ... DROP COLUMN`. Treat schema changes the same way you treat any code change: through a PR, with review.
 </Aside>
-
----
-
-### Check Migration Status
-
-```bash
-trazo migrate status
-```
-
-Lists all migrations for all tenants showing whether each has been applied:
-
-```
-Tenant: acme-corp
-  [applied] 20240101000000_create_repairs
-  [applied] 20240215083000_add_sla_deadline
-  [pending] 20240310140000_add_parts_table
-
-Tenant: beta-inc
-  [applied] 20240101000000_create_repairs
-  [pending] 20240215083000_add_sla_deadline
-  [pending] 20240310140000_add_parts_table
-```
-
----
-
-### View Migration History
-
-```bash
-trazo migrate history
-```
-
-Shows a timestamped log of every migration that has been applied, including who ran it and when:
-
-```
-2024-01-01 12:00:00 UTC  20240101000000_create_repairs        applied  (local)
-2024-02-15 08:30:00 UTC  20240215083000_add_sla_deadline      applied  (ci-pipeline)
-```
-
----
-
-### Diff Against Current Schema
-
-```bash
-trazo migrate diff
-```
-
-Compares the state that the migration files would produce against the current live schema and reports any discrepancies. Useful for detecting manual schema changes or missing migrations.
-
-```
-Schema drift detected in tenant: acme-corp
-  + Column repairs.notes_internal (TEXT) — not in any migration
-  Missing index: idx_repairs_vehicle
-```
 
 ---
 
 ## Writing Good Migrations
 
-### Adding a Column
+### Adding a Table
+
+Just declare it. The diff engine will create it the next time the relevant schema is reconciled.
 
 ```sql
--- 20240215083000_add_sla_deadline.sql
+CREATE TABLE IF NOT EXISTS parts (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    repair_id   UUID NOT NULL REFERENCES repairs(id) ON DELETE CASCADE,
+    name        VARCHAR(255) NOT NULL,
+    quantity    INT NOT NULL DEFAULT 1,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+```
 
+### Adding a Column
+
+Add it to the desired-state SQL:
+
+```sql
 ALTER TABLE repairs
-    ADD COLUMN sla_deadline TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS sla_deadline TIMESTAMPTZ;
 
-CREATE INDEX idx_repairs_sla ON repairs(sla_deadline)
+CREATE INDEX IF NOT EXISTS idx_repairs_sla
+    ON repairs(sla_deadline)
     WHERE sla_deadline IS NOT NULL AND status NOT IN ('completed', 'cancelled');
+```
 
--- +down
+Or — preferred — express the desired state directly in the table definition and let the diff engine compute the `ALTER TABLE` for you:
 
-DROP INDEX IF EXISTS idx_repairs_sla;
-
-ALTER TABLE repairs
-    DROP COLUMN IF EXISTS sla_deadline;
+```sql
+CREATE TABLE IF NOT EXISTS repairs (
+    ...
+    sla_deadline TIMESTAMPTZ,
+    ...
+);
 ```
 
 <Aside type="tip">
-  Use `ADD COLUMN ... DEFAULT NULL` (i.e., no DEFAULT, nullable) when adding a column to a large table. PostgreSQL can add a nullable column with no default without rewriting the table, making the migration fast and lock-free.
+Nullable columns with no default can be added to large tables without rewriting the table — PostgreSQL stores them lazily. Avoid `NOT NULL DEFAULT <constant>` on hot tables unless you know the rewrite cost.
 </Aside>
 
 ### Renaming a Column
 
-Rename operations require a multi-step migration to avoid breaking running application code:
+Pure renames cannot be inferred from a desired-state diff (the engine cannot tell a rename from a drop+add). Do this as a two-deploy migration:
 
 <Steps>
-1. Add the new column name as a copy of the old one:
-
-   ```sql
-   ALTER TABLE repairs ADD COLUMN resolution_notes TEXT;
-   UPDATE repairs SET resolution_notes = notes WHERE notes IS NOT NULL;
-   ```
-
-2. Deploy application code that writes to both columns.
-
-3. In a second migration, drop the old column:
-
-   ```sql
-   ALTER TABLE repairs DROP COLUMN notes;
-   ```
+1. Add the new column alongside the old one. Deploy code that writes to both.
+2. Backfill the new column from the old one in a one-off statement.
+3. Drop the old column in a follow-up SQL change once nothing reads from it.
 </Steps>
 
-### Adding an Enum Value
+### Adding a Status Value
 
-For `VARCHAR` status columns (Trazo's preferred approach), no migration is needed — status values are validated at the application layer. For `ENUM` types, add the value explicitly:
-
-```sql
-ALTER TYPE repair_status ADD VALUE IF NOT EXISTS 'on_hold';
-
--- +down
-
--- Note: PostgreSQL does not support removing enum values without recreating the type.
--- Document this limitation in the migration.
-```
-
-<Aside type="note">
-  Trazo stores status values as `VARCHAR(50)` rather than PostgreSQL `ENUM` types precisely to avoid this migration complexity. Only use `ENUM` if you have a specific reason.
-</Aside>
+Trazo stores status values as `VARCHAR(50)` precisely so they can be added without DDL. The validation lives in the application layer and in `module.yaml`'s `statuses` section. No migration is required.
 
 ---
 
-## Multi-Tenant Considerations
+## Cross-Schema References
 
-Every tenant has its own PostgreSQL schema named `tenant_<slug>`. The `trazo migrate up` command applies each migration to every tenant schema individually.
-
-The `SET search_path` mechanism ensures that unqualified table names in your SQL refer to the tenant schema automatically. You do not need to prefix table names with the schema name.
+Inside a `migrations/core/tenant/` or `migrations/modules/` file, bare table names refer to the **tenant schema** (because `search_path` is set to `tenant_<slug>, public` when the file is applied). To point at the public schema, use the fully qualified name:
 
 ```sql
--- This refers to `tenant_acme.repairs`, not `public.repairs`
-CREATE TABLE repairs (...);
+-- This refers to tenant_<slug>.repairs because search_path is tenant-scoped.
+CREATE TABLE repair_attachments (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    repair_id   UUID NOT NULL REFERENCES repairs(id) ON DELETE CASCADE,
+    file_id     UUID NOT NULL  -- references tenant_<slug>.stored_files (also in this schema)
+);
 ```
 
-To reference platform-level tables (in the `public` schema), always use the fully qualified name:
-
-```sql
--- Cross-schema foreign key
-tenant_id UUID NOT NULL REFERENCES public.tenants(id),
-```
-
-### New Tenant Provisioning
-
-When a new tenant is created, the platform applies all existing migrations to the new tenant schema in one pass. This means every migration must be idempotent with respect to the schema state (use `IF NOT EXISTS` and `IF EXISTS` guards where possible).
-
-```sql
--- Safe for new tenant provisioning
-CREATE TABLE IF NOT EXISTS repairs (...);
-CREATE INDEX IF NOT EXISTS idx_repairs_status ON repairs(status);
-
--- +down
-DROP TABLE IF EXISTS repairs;
-```
+There is generally no need for a `repair_attachments → public.tenants(id)` foreign key, because every row in `repair_attachments` is implicitly scoped to whichever schema it lives in.
 
 ---
 
-## Embedded Migrations at Compile Time
+## Embedding at Compile Time
 
-The `//go:embed migrations` directive in `module.go` embeds the entire `migrations/` directory into the compiled binary. The platform reads migration files from the `embed.FS` at startup, not from the filesystem.
+The migration tree is embedded into the server binary:
+
+```go
+//go:embed migrations/core/public/*.sql migrations/core/tenant/*.sql migrations/modules/*.sql
+var migrations embed.FS
+```
 
 This means:
 
-- No separate migration files need to ship alongside the binary in production.
-- Migration files are version-controlled alongside the code that depends on them.
-- The exact set of migrations in a binary is deterministic and reproducible.
+- Binaries are self-contained and reproducible.
+- Schema changes are version-controlled alongside the code that depends on them.
+- There is no separate "migrations volume" to mount in production.
 
-```go
-//go:embed migrations
-var migrationFiles embed.FS
-
-func (m *RepairsModule) Migrations() embed.FS {
-    return migrationFiles
-}
-```
-
-The platform iterates over the embedded filesystem, sorts files by name (which sorts by timestamp due to the naming convention), and applies them in order.
+The platform reads the embedded files at startup, hashes them, and compares the hashes to `public.migration_history` to decide what needs reconciling.

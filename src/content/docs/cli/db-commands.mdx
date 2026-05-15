@@ -84,14 +84,15 @@ Schemas  : public, tenant_acme, tenant_globex
 Schema: public
   users               (1,203 rows)
   tenants             (2 rows)
-  memberships         (48 rows)
+  tenant_memberships  (48 rows)
   roles               (6 rows)
-  sessions            (312 rows)
+  tenant_modules      (12 rows)
   service_principals  (1 row)
 
 Schema: tenant_acme
+  sessions            (312 rows)
   events_outbox       (0 rows)
-  audit_log           (87 rows)
+  audit_logs          (87 rows)
   ...
 ```
 

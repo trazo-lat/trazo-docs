@@ -1,90 +1,107 @@
 ---
 title: Your First Tenant
-description: Register a user, create a tenant, authenticate, and verify tenant schema isolation using the Trazo REST API.
+description: Bootstrap the public schema, seed the first tenant and admin user, authenticate, and verify tenant schema isolation.
 ---
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
-This walkthrough uses `curl` to exercise the Trazo API end-to-end: creating a user, provisioning a tenant, authenticating, and confirming that tenant schema isolation is working. Make sure the server is running on `localhost:8080` before you begin.
+This walkthrough takes a brand-new Trazo install from "empty database" to "first authenticated request." The platform uses a two-step provisioning flow:
+
+1. **Bootstrap the public schema** — applies `migrations/core/public/` once per database. Creates `tenants`, `users`, `roles`, and the other cross-tenant tables.
+2. **Seed the first tenant** — creates `tenant_<slug>`, applies `migrations/core/tenant/` and the default modules' `migrations/modules/<name>.sql`, then inserts the first admin user, role, and membership.
+
+Make sure the server is running on `localhost:8080` before you begin.
 
 <Aside type="tip">
-  All examples use `jq` to pretty-print JSON responses. Install it with `apt install jq` or `brew install jq`, or simply omit the `| jq` pipe if you prefer raw output.
+All examples use `jq` to pretty-print JSON responses. Install it with `apt install jq` or `brew install jq`, or omit the `| jq` pipe if you prefer raw output.
 </Aside>
 
 ---
 
 <Steps>
 
-1. ## Register a User
+1. ## Bootstrap the Public Schema
 
-   Create the first platform user. This user will later become the owner of the tenant.
+   The bootstrap endpoint reconciles `migrations/core/public/` against the database. It only touches the `public` schema — no tenant schemas are created here.
 
    ```bash
-   curl -s -X POST http://localhost:8080/api/v1/users \
-     -H "Content-Type: application/json" \
-     -d '{
-       "email": "alice@example.com",
-       "password": "SuperSecret123!",
-       "name": "Alice"
-     }' | jq
+   curl -s -X POST http://localhost:8080/api/v1/admin/migrations/bootstrap | jq
    ```
 
-   Response `201 Created`:
+   Response `200 OK`:
 
    ```json
    {
-     "id": "usr_01J9...",
-     "email": "alice@example.com",
-     "name": "Alice",
-     "created_at": "2026-03-03T10:05:00Z"
+     "status": "ok",
+     "applied": [
+       "tenants.sql",
+       "users.sql",
+       "access_control.sql",
+       "permissions.sql",
+       "modules.sql",
+       "invitations.sql",
+       "notification_rules.sql",
+       "translations.sql",
+       "migration_history.sql"
+     ]
    }
    ```
 
-   Save the returned `id` — you will need it when associating the user with the tenant.
-
-2. ## Create a Tenant
-
-   Provisioning a tenant creates a dedicated PostgreSQL schema (`tenant_<subdomain>`) and seeds it with the modules listed under `tenant.default_modules` in your config.
-
-   ```bash
-   curl -s -X POST http://localhost:8080/api/v1/tenants \
-     -H "Content-Type: application/json" \
-     -d '{
-       "name": "Acme Auto Repair",
-       "subdomain": "acme"
-     }' | jq
-   ```
-
-   Response `201 Created`:
-
-   ```json
-   {
-     "id": "ten_02K1...",
-     "name": "Acme Auto Repair",
-     "subdomain": "acme",
-     "schema": "tenant_acme",
-     "status": "active",
-     "created_at": "2026-03-03T10:06:00Z"
-   }
-   ```
-
-   Save the `id` value (`ten_02K1...`) as `TENANT_ID` for the next steps.
+   The endpoint is idempotent — running it on an already up-to-date database is a no-op (the `applied` list will be empty).
 
    <Aside type="note">
-     The `subdomain` must be unique across the platform. It is used as both the URL identifier and the PostgreSQL schema name suffix (`tenant_acme`).
+     Bootstrap creates the `public` schema only. It does **not** create any `tenant_<slug>` schemas, and does **not** insert any rows. The next step does both.
    </Aside>
+
+2. ## Seed the First Tenant and Admin
+
+   Run the `cmd/seed` binary. It connects using the database URL from `trazo.yaml` (or `TRAZO_DATABASE_URL`) and creates: the first tenant schema, the admin role, the admin user, and the membership that ties them together.
+
+   ```bash
+   go run ./cmd/seed \
+     --tenant "Acme Auto Repair" \
+     --email admin@acme.example \
+     --password "SuperSecret123!" \
+     --name "Alice"
+   ```
+
+   Or run it interactively and answer the prompts:
+
+   ```bash
+   go run ./cmd/seed
+   ```
+
+   Expected output:
+
+   ```
+   Tenant created: Acme Auto Repair (tenant_acme)
+   Admin user:    admin@acme.example
+   Membership:    role=admin, status=active
+   ```
+
+   Under the hood, the seed binary executes the same flow as `POST /api/v1/tenants`:
+
+   1. Insert a row into `public.tenants`.
+   2. `CREATE SCHEMA tenant_acme`.
+   3. Apply every file in `migrations/core/tenant/` to `tenant_acme`.
+   4. Apply `migrations/modules/<name>.sql` for every module listed under `tenant.default_modules` in `trazo.yaml`.
+   5. Seed the default roles.
+   6. Insert one row per provisioned module into `public.tenant_modules`.
+   7. Create the admin user and membership.
+
+   Everything runs inside a single transaction — if any step fails, the schema is dropped and the database is left in its previous state.
 
 3. ## Log In
 
-   Exchange credentials for an access token scoped to the tenant. Pass the `tenant_id` so the server resolves the correct schema and permission set.
+   Exchange credentials for an access token. The server resolves the tenant from the user's membership.
 
    ```bash
    curl -s -X POST http://localhost:8080/api/v1/auth/login \
      -H "Content-Type: application/json" \
      -d '{
-       "email": "alice@example.com",
+       "email": "admin@acme.example",
        "password": "SuperSecret123!",
-       "tenant_id": "ten_02K1..."
+       "subdomain": "acme"
      }' | jq
    ```
 
@@ -106,7 +123,7 @@ This walkthrough uses `curl` to exercise the Trazo API end-to-end: creating a us
 
 4. ## Check Your Identity
 
-   Confirm the token is valid and inspect the claims resolved by the server: user ID, tenant ID, and active permissions.
+   Confirm the token is valid and inspect the resolved claims: user, tenant, and active permissions.
 
    ```bash
    curl -s http://localhost:8080/api/v1/auth/me \
@@ -119,13 +136,14 @@ This walkthrough uses `curl` to exercise the Trazo API end-to-end: creating a us
    {
      "user": {
        "id": "usr_01J9...",
-       "email": "alice@example.com",
+       "email": "admin@acme.example",
        "name": "Alice"
      },
      "tenant": {
        "id": "ten_02K1...",
        "name": "Acme Auto Repair",
-       "subdomain": "acme"
+       "subdomain": "acme",
+       "schema_name": "tenant_acme"
      },
      "permissions": [
        "users:read",
@@ -137,7 +155,7 @@ This walkthrough uses `curl` to exercise the Trazo API end-to-end: creating a us
 
 5. ## Verify the Tenant Schema
 
-   The CLI can confirm that the tenant's schema was created and that its module migrations are up to date.
+   The CLI can confirm that the tenant's schema was created and that its core + module tables are present.
 
    ```bash
    trazo db status
@@ -147,14 +165,13 @@ This walkthrough uses `curl` to exercise the Trazo API end-to-end: creating a us
    Container:   trazo-local-db  [running]
    Database:    platform
 
-   Platform schema:
-     migrations applied: 8/8
+   Public schema:
+     migrations: applied (9 files)
 
    Tenant schemas:
      tenant_acme
-       status:     active
-       modules:    users, audit
-       migrations: 4/4
+       core/tenant:  applied (10 files)
+       modules:      users, audit
    ```
 
    You can also connect directly to verify with `psql`:
@@ -174,19 +191,42 @@ This walkthrough uses `curl` to exercise the Trazo API end-to-end: creating a us
 
 ## What Happened Under the Hood
 
-When you called `POST /api/v1/tenants`, the platform:
+When you ran the bootstrap endpoint, the platform diffed the embedded `migrations/core/public/` files against the live `public` schema and applied any DDL needed to bring it in line.
 
-1. Inserted a row in the `platform.tenants` table.
+When you ran `cmd/seed`, the platform:
+
+1. Inserted a row in `public.tenants` for the new tenant.
 2. Executed `CREATE SCHEMA tenant_acme`.
-3. Applied migrations for each module listed in `tenant.default_modules` (`users`, `audit`) into `tenant_acme`.
-4. Emitted a `tenant.created` domain event to the outbox, which the background worker will deliver to any registered subscribers.
+3. Set `search_path` to `tenant_acme, public` for the transaction.
+4. Applied every file in `migrations/core/tenant/` to the new schema (sessions, audit_logs, events_outbox, hooks, notifications, storage, settings, search, approvals, state snapshots, translations).
+5. Applied `migrations/modules/<name>.sql` for each module in `tenant.default_modules`.
+6. Inserted the admin role, user, and membership.
 
-Every subsequent authenticated request for this tenant sets `search_path = tenant_acme, platform` on the connection before executing queries, ensuring complete data isolation.
+From this point on, every authenticated request for this tenant runs inside a transaction with `SET LOCAL search_path = tenant_acme, public`. Unqualified table names route to `tenant_acme.*`; any reference to `public.users`, `public.tenants`, etc. falls through automatically.
+
+---
+
+## Adding More Tenants
+
+Once the platform is bootstrapped, additional tenants are created via the HTTP API rather than the seed binary:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/tenants \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Globex",
+    "subdomain": "globex"
+  }' | jq
+```
+
+The endpoint runs the same provisioning flow as the seed binary, minus the interactive admin-creation step.
 
 ---
 
 ## Next Steps
 
 - Explore the full [API Reference](/api/) to see all available endpoints.
-- Read the [Configuration](/getting-started/configuration/) guide to understand how to tune the server for staging and production.
+- Read [Schema-per-Tenant Isolation](/architecture/schema-per-tenant/) to understand how tenants stay isolated.
+- Read [Migrations](/guides/migrations/) for the three-tier migration layout in depth.
 - Learn how to build your own feature module in [Creating a Module](/guides/creating-a-module/).

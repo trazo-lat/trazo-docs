@@ -1,144 +1,179 @@
 ---
 title: Schema-per-Tenant Isolation
-description: How Trazo uses PostgreSQL schemas to isolate tenant data, the migration strategy, and the trade-offs involved.
+description: How Trazo uses PostgreSQL schemas to isolate tenant data, why per-tenant tables drop the tenant_id column, and how search_path routes unqualified queries.
 ---
 
-Trazo uses a schema-per-tenant isolation model in PostgreSQL. Every tenant gets its own schema, and all module-level tables for that tenant live exclusively within that schema. No tenant can ever read or write another tenant's data through normal application queries.
+Trazo uses a schema-per-tenant isolation model in PostgreSQL. Every tenant gets its own schema, and every table that holds per-tenant data lives exclusively within that schema. No tenant can ever read or write another tenant's data through normal application queries.
 
 ## Schema Layout
 
 ```
 PostgreSQL instance
-├── public schema                    ← shared platform tables
-│   ├── users
+├── public schema                    ← shared platform tables (cross-tenant)
 │   ├── tenants
-│   ├── memberships
+│   ├── users
+│   ├── tenant_memberships
+│   ├── tenant_invitations
 │   ├── roles
-│   ├── sessions
-│   └── service_principals
+│   ├── permission_definitions
+│   ├── scope_definitions
+│   ├── tenant_modules
+│   ├── notification_rules           ← platform default rules
+│   ├── translations                 ← platform/module default translations
+│   ├── service_principals
+│   └── migration_history
 │
 ├── tenant_acme schema               ← tenant: acme
-│   ├── repairs
-│   ├── inventory_items
-│   ├── audit_log
-│   ├── outbox
+│   ├── sessions
+│   ├── audit_logs
+│   ├── events_outbox
+│   ├── event_subscriptions
+│   ├── event_deliveries
+│   ├── tenant_hooks
+│   ├── in_app_notifications
+│   ├── tenant_notification_rules    ← tenant overrides for the public defaults
+│   ├── tenant_settings
+│   ├── stored_files
+│   ├── search_index
+│   ├── approval_requests
+│   ├── tenant_state_snapshots
+│   ├── tenant_translations          ← tenant/instance translation overrides
+│   ├── repairs                      ← module tables (per enabled module)
 │   └── ...
 │
 ├── tenant_globex schema             ← tenant: globex
-│   ├── repairs
-│   ├── inventory_items
-│   ├── audit_log
-│   ├── outbox
 │   └── ...
 │
-└── tenant_initech schema            ← tenant: initech
+└── tenant_initech schema
     └── ...
 ```
 
-Schema names follow the convention `tenant_<slug>` where `slug` is the URL-safe identifier assigned when the tenant is created. Slugs are immutable after creation.
+Schema names follow the convention `tenant_<slug>` where `slug` is the URL-safe identifier assigned at tenant creation. Slugs are immutable.
 
-## How Search Path Works
+## No `tenant_id` Inside Tenant Schemas
 
-At the start of every authenticated request, the `DatabaseManager` sets the PostgreSQL `search_path` for the connection:
+Every table inside a `tenant_<slug>` schema **does not** have a `tenant_id` column. Tenancy is encoded in the schema name itself — the column was redundant and risked drift between the row's `tenant_id` and the schema it lived in.
 
 ```sql
-SET search_path = tenant_acme, public;
+-- Before:
+CREATE TABLE audit_logs (
+    id          UUID PRIMARY KEY,
+    tenant_id   UUID NOT NULL,        -- redundant
+    actor_id    UUID NOT NULL,
+    ...
+);
+
+-- Now:
+CREATE TABLE audit_logs (
+    id          UUID PRIMARY KEY,
+    actor_id    UUID NOT NULL,
+    ...
+);
 ```
 
-With this in place:
+Tables in the `public` schema still keep `tenant_id` where appropriate — `tenant_memberships`, `tenant_invitations`, `service_principals`, `tenant_modules`, etc. — because those rows belong to many tenants and the column is the only thing distinguishing them.
+
+## How `search_path` Routes Queries
+
+At the start of every authenticated request the platform sets:
+
+```sql
+SET LOCAL search_path TO tenant_acme, public;
+```
+
+This happens inside a tenant-scoped transaction. `core.DB.{Get, Select, Exec, ExecN, ExecOne}` will auto-wrap a pool query in this transaction when `ctx` carries a tenant, so unqualified table names route to the tenant schema automatically.
 
 - A query like `SELECT * FROM repairs` resolves to `tenant_acme.repairs`.
 - A query like `SELECT * FROM users` falls through to `public.users` because there is no `users` table in the tenant schema.
 - There is no way to accidentally query another tenant's data through an unqualified table name.
 
-The search path is set once per request using the connection returned by `Core.DB.Conn(ctx)`. Repositories never set the search path themselves; they rely on the connection already being configured correctly by the time they receive it.
-
 :::caution
-Never use fully-qualified table names (e.g., `tenant_acme.repairs`) in module SQL. Always use unqualified names and let the search path do the routing. Hardcoding schema names couples the query to a specific tenant and breaks the isolation model.
+Never hardcode `tenant_acme.repairs` (or any specific schema name) in module SQL. Always use unqualified names and let `search_path` do the routing. Hardcoding schema names couples the query to a specific tenant and breaks the isolation model.
 :::
 
 ## Tenant Schema Provisioning
 
-When a new tenant is created, the platform runs the following sequence:
+`POST /api/v1/tenants` performs the following sequence inside a single transaction:
 
-1. Insert a record into `public.tenants`.
-2. Create the schema: `CREATE SCHEMA tenant_<slug>`.
-3. Run all foundation and enabled domain module migrations against the new schema.
-4. The tenant is ready to accept requests.
+1. Insert a row into `public.tenants`.
+2. `CREATE SCHEMA tenant_<slug>`.
+3. Set `search_path` on the transaction to `tenant_<slug>, public`.
+4. Apply every file in `migrations/core/tenant/` (sessions, audit_logs, events_outbox, hooks, storage, settings, etc.).
+5. For each module listed in `tenant.default_modules` (config), apply `migrations/modules/<name>.sql` to the new schema.
+6. Seed default roles for the tenant.
+7. Insert one row per provisioned module into `public.tenant_modules`.
 
-Schema creation and migration are transactional where possible. If a migration fails mid-provisioning, the platform rolls back and cleans up the partially created schema.
+If any step fails, the transaction rolls back and the schema is dropped — there are no partially provisioned tenants. The `cmd/seed` binary mirrors this exact flow for local bootstrap.
 
-## Migration Strategy
+## The Tenant in the Auth Middleware
 
-Because module tables exist in every tenant schema, migrations must be applied to each schema individually. The `trazo-cli` handles this.
+Because the `sessions` table now lives in the tenant schema, the auth middleware loads tenant context **before** it looks up the session:
 
-```bash
-# Run pending migrations for all tenants
-trazo migrate up
+1. Resolve the user from the access token.
+2. Resolve the tenant + membership from the token claims.
+3. Set the tenant on `ctx`, which sets `search_path` on subsequent queries.
+4. Look up the session record (this query now lands in `tenant_<slug>.sessions`).
 
-# Run migrations for a single tenant
-trazo migrate up --tenant acme
+## Public-Schema vs Tenant-Schema Tables
 
-# Roll back the last migration for all tenants
-trazo migrate down
-```
-
-:::note
-Migration execution is serial per-tenant by default to avoid lock contention. For large installations with many tenants, a `--parallel` flag is available, but concurrent migrations on the same PostgreSQL instance should be benchmarked before use in production.
-:::
-
-Each module embeds its migration files as an `embed.FS` so that the binary is self-contained:
-
-```go
-//go:embed migrations/*.sql
-var migrations embed.FS
-
-func (m *RepairsModule) Migrations() embed.FS {
-    return migrations
-}
-```
-
-The migration runner reads the embedded files, compares them against the `schema_migrations` table in each tenant schema, and applies only the pending ones.
-
-## Public Schema Tables
-
-The tables in the `public` schema are owned by the platform and managed by foundation module migrations. Module code should never write to these tables directly; access goes through the foundation services exposed via `*Core`.
+The `public` schema is managed by `migrations/core/public/`. These tables are global and shared across tenants. Module code should never write to most of them directly — access goes through services exposed via `*Core`.
 
 | Table | Purpose |
 |---|---|
+| `tenants` | Tenant registry |
 | `users` | Platform-wide user accounts |
-| `tenants` | Tenant registry and metadata |
-| `memberships` | User-to-tenant associations with role assignment |
-| `roles` | Role definitions (name, description, tenant-scoped) |
-| `sessions` | Active session records (IP, user agent, device type) |
-| `service_principals` | Non-human API identities for integrations |
+| `tenant_memberships` | User → tenant + role assignments |
+| `tenant_invitations` | Pending invitations into a tenant |
+| `roles` | Role definitions (tenant-scoped via `tenant_id`) |
+| `permission_definitions` | Module-registered permission keys |
+| `scope_definitions` | Module-registered scope filters |
+| `tenant_modules` | Which modules are enabled for which tenant |
+| `notification_rules` | Platform default notification rules |
+| `translations` | Platform/module default translations |
+| `service_principals` | Non-human API identities |
+| `migration_history` | Applied migration hashes per schema |
 
-## Per-Tenant Tables (in every tenant schema)
+Per-tenant tables (in every `tenant_<slug>` schema) come from `migrations/core/tenant/` and `migrations/modules/`:
 
-Each enabled module creates its own tables. The following are always present because foundation modules are always enabled:
-
-| Table | Module | Purpose |
+| Table | Origin | Purpose |
 |---|---|---|
-| `audit_log` | audit | Immutable audit entries with JSON Patch diffs |
-| `outbox` | events | Transactional outbox for domain events |
-| `permissions` | auth | Effective permission grants per role |
-| `notification_rules` | notifications | Event-to-channel routing rules |
-| `notifications` | notifications | In-app notification records |
+| `sessions` | core/tenant | Active user sessions |
+| `audit_logs` | core/tenant | Immutable audit trail with JSON Patch diffs |
+| `events_outbox` | core/tenant | Transactional outbox for domain events |
+| `event_subscriptions` | core/tenant | Per-event handler registrations |
+| `event_deliveries` | core/tenant | Per-event-per-handler delivery state |
+| `tenant_hooks` | core/tenant | Tenant-configured webhook/expression hooks |
+| `in_app_notifications` | core/tenant | Persistent in-app notifications |
+| `tenant_notification_rules` | core/tenant | Tenant overrides for platform notification rules |
+| `tenant_settings` | core/tenant | Tenant-managed module settings |
+| `stored_files` | core/tenant | File metadata for uploads |
+| `search_index` | core/tenant | Full-text search index |
+| `approval_requests`, `approval_steps` | core/tenant | Multi-step approval workflows |
+| `tenant_state_snapshots` | core/tenant | Snapshots of tenant state for restore |
+| `tenant_translations` | core/tenant | Tenant/instance translation overrides |
+| Module tables | modules/`<name>` | Module-owned domain tables (e.g., `repairs`, `documents_*`, `entities`) |
+
+## Migration Strategy
+
+Because per-tenant tables exist in every tenant schema, schema changes must be applied to every schema individually. Trazo's migration engine ([Migrations](/guides/migrations/)) is declarative — the SQL files describe the desired state and the engine computes the DDL needed per schema.
+
+- Public-schema tables are reconciled once via `POST /api/v1/admin/migrations/bootstrap`.
+- Per-tenant tables (core + module) are reconciled at tenant creation and on demand via the `SchemaProvisioner` when a module is later enabled.
 
 ## Benefits
 
-**Data isolation.** A bug, misconfiguration, or SQL injection in one tenant's request cannot read or modify another tenant's rows. The search path acts as a hard boundary at the database layer, independent of application-level access control.
+**Data isolation.** A bug, misconfiguration, or SQL injection in one tenant's request cannot read or modify another tenant's rows. `search_path` acts as a hard boundary at the database layer, independent of application-level access control.
 
-**Per-tenant backup and restore.** PostgreSQL's `pg_dump` supports schema-scoped dumps. A single tenant's data can be backed up, restored, or migrated to another instance without touching any other tenant.
+**Per-tenant backup and restore.** PostgreSQL's `pg_dump` supports schema-scoped dumps. A single tenant's data can be backed up, restored, or migrated to another instance without touching any other tenant. The lack of `tenant_id` columns inside the schema means the dump is self-contained — no FK fixup is needed at restore time.
 
-**Regulatory compliance.** When a tenant requires data residency or must be deleted under GDPR/right-to-erasure, dropping their schema (`DROP SCHEMA tenant_<slug> CASCADE`) removes all their data in a single, auditable operation with no risk of leaving orphaned rows in shared tables.
+**Regulatory compliance.** When a tenant requires data residency or must be deleted under GDPR/right-to-erasure, dropping their schema (`DROP SCHEMA tenant_<slug> CASCADE`) removes all their data in a single, auditable operation. The only follow-up is deleting the matching rows from `public.tenants`, `public.tenant_memberships`, etc.
 
-**Independent schema evolution.** In advanced scenarios, a specific tenant schema can be migrated ahead of others for canary deployments or custom module rollouts.
+**Independent schema evolution.** A specific tenant schema can be migrated ahead of others for canary deployments or custom module rollouts.
 
 ## Trade-offs
 
-**Migration overhead.** Every schema migration must run against every tenant schema. A platform with 500 tenants requires 500 migration executions per release. The CLI handles this, but deployment time scales with tenant count.
+**Migration overhead.** Every per-tenant schema change must run against every tenant schema. A platform with 500 tenants requires 500 reconciliations per release. The migration engine handles this, but deployment time scales with tenant count.
 
-**Connection pooling.** Standard connection poolers (e.g., PgBouncer in transaction mode) do not preserve session-level settings like `search_path`. Trazo requires a pooler that supports statement-level or connection-level `search_path` pinning, or uses per-tenant connection pools. This must be evaluated when configuring the pooler for production.
+**Connection pooling.** Standard connection poolers (e.g., PgBouncer in transaction mode) do not preserve session-level settings like `search_path`. Trazo uses `SET LOCAL search_path` inside a transaction so it is scoped to that transaction only and survives any reasonable pooler configuration. Per-request pooling (or session-mode pooling) is still recommended for production.
 
 **Schema count limits.** PostgreSQL has no hard limit on schema count, but very large numbers of schemas (thousands) can affect catalog query performance. Monitor `pg_catalog` query times as tenant count grows.

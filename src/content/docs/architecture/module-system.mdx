@@ -5,6 +5,8 @@ description: How Trazo modules are structured, the required and optional interfa
 
 Every piece of functionality in Trazo — whether it is a core platform capability or a domain-specific feature — is packaged as a module. All modules implement the same interface, follow the same file layout, and are registered in the same module registry. This uniformity means that adding a new domain area to the platform does not require modifying any framework code.
 
+Module migrations live in `migrations/modules/<name>.sql`, one file per module. They are applied to a tenant's schema when the module is provisioned for that tenant (either at tenant creation if listed in `tenant.default_modules`, or later via the `SchemaProvisioner` when the module is enabled).
+
 ## Module Types
 
 | Type | Description | Lifecycle |
@@ -13,7 +15,19 @@ Every piece of functionality in Trazo — whether it is a core platform capabili
 | `domain` | Business-specific features shipped with the platform | Enabled or disabled per tenant |
 | `custom` | Tenant-specific extensions developed for a single customer | Enabled only for the owning tenant |
 
-Foundation modules include: `users`, `tenants`, `auth`, `audit`, `events`, `notifications`.
+Foundation modules cover users, tenants, auth, audit, events, and notifications. They are backed by `migrations/core/public/` (cross-tenant tables) and `migrations/core/tenant/` (per-tenant subsystem tables), not by `migrations/modules/`.
+
+Domain modules bundled with the platform include `agents`, `billing`, `conversations`, `documents`, and `entities`. Each has its own SQL file at `migrations/modules/<name>.sql`.
+
+Which domain modules are provisioned automatically for new tenants is controlled by the `tenant.default_modules` list in `trazo.yaml`:
+
+```yaml
+tenant:
+  default_modules:
+    - users
+    - audit
+    # add additional domain modules here to provision them at tenant creation
+```
 
 ## The Module Interface
 
@@ -28,7 +42,6 @@ type Module interface {
 
     // Assets
     Config()     []byte    // contents of the embedded module.yaml
-    Migrations() embed.FS  // embedded SQL migration files
 
     // Lifecycle
     Init(core *Core) error
@@ -37,6 +50,8 @@ type Module interface {
     Shutdown(ctx context.Context) error
 }
 ```
+
+Modules no longer embed their own migration `embed.FS`. SQL files live at `migrations/modules/<name>.sql` and are embedded once at the binary level. The platform's `SchemaProvisioner` reads the appropriate file when it needs to apply a module to a tenant schema.
 
 | Method | Called when | Purpose |
 |---|---|---|
@@ -86,18 +101,23 @@ type MetricsProvider interface {
 All modules follow the same directory layout. This is enforced by the code generator in `trazo-cli`.
 
 ```
-modules/<type>/<name>/
+internal/modules/<type>/<name>/
 ├── module.yaml       # Declarative configuration
 ├── module.go         # Module interface implementation
 ├── service.go        # Business logic
 ├── handler.go        # HTTP handlers (Huma)
 ├── repository.go     # Data access (sqlx + squirrel)
 ├── models.go         # Domain types and DTOs
-├── migrations/
-│   ├── 001_create_<name>.sql
-│   └── 002_add_index.sql
 └── <name>_test.go    # Unit and integration tests
 ```
+
+The module's SQL lives at the **repo level**, not inside the module package:
+
+```
+migrations/modules/<name>.sql
+```
+
+One file per module. There are no numbered prefixes and no `-- +down` markers — Trazo uses declarative, desired-state migrations powered by `pg-schema-diff`. See [Migrations](/guides/migrations/) for the full layout and lifecycle.
 
 | File | Responsibility |
 |---|---|

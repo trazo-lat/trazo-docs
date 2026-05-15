@@ -7,6 +7,10 @@ import { Aside } from '@astrojs/starlight/components';
 
 The repository layer is responsible for all SQL generation and execution. Trazo repositories follow a strict set of conventions that make them predictable, testable, and safe in a multi-tenant environment.
 
+<Aside type="note">
+**Tenancy is enforced by the schema, not the row.** Every per-tenant table lives in a `tenant_<slug>` schema and the request transaction has `search_path = tenant_<slug>, public` set on it. Unqualified table references resolve to the active tenant automatically — repositories should **not** add `WHERE tenant_id = ?` clauses to queries against tenant-scoped tables, and tenant-scoped models should not include a `tenant_id` column. The only queries that need an explicit `tenant_id` filter are those that hit `public` tables (`memberships`, `service_principals`, `tenant_modules`, etc.).
+</Aside>
+
 ---
 
 ## Repository Struct
@@ -97,7 +101,6 @@ Hand-write `db:"column_name"` tags on every struct field that maps to a database
 ```go
 type Repair struct {
     ID          uuid.UUID  `json:"id"          db:"id"`
-    TenantID    uuid.UUID  `json:"-"           db:"tenant_id"`
     VehicleID   uuid.UUID  `json:"vehicle_id"  db:"vehicle_id"`
     Description string     `json:"description" db:"description"`
     Status      string     `json:"status"      db:"status"`
@@ -108,6 +111,8 @@ type Repair struct {
     DeletedAt   *time.Time `json:"-"           db:"deleted_at"`
 }
 ```
+
+No `TenantID` field — the row lives in `tenant_<slug>.repairs`, so tenancy is implicit. If your repository ever needs to write to a `public` table that does carry `tenant_id`, fetch the tenant from `ctx` (`core.TenantFromContext(ctx)`) and pass it explicitly.
 
 ---
 
