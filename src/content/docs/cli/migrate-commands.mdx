@@ -1,30 +1,34 @@
 ---
 title: Migrate Commands
-description: Reference for trazo migrate subcommands — running, rolling back, and inspecting Atlas-format schema migrations, and creating new migration files.
+description: Reference for trazo migrate subcommands — applying, rolling back, and inspecting Trazo's declarative three-tier schema migrations, and creating new migration files.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The `trazo migrate` command group manages database schema migrations using the [Atlas](https://atlasgo.io/) migration format. Migration files live in the `migrations/` directory of the `trazo-core-service` repository and are applied in sequence by their numeric prefix.
+The `trazo migrate` command group inspects and reconciles Trazo's declarative, desired-state SQL migrations. Migration files live under `migrations/` in the `trazo-core-service` repository, split into three tiers:
+
+- `migrations/core/public/` — global cross-tenant tables, applied once.
+- `migrations/core/tenant/` — per-tenant core subsystem tables, applied to every `tenant_<slug>` schema.
+- `migrations/modules/<name>.sql` — module-owned per-tenant tables, applied to each tenant schema where the module is enabled.
+
+See [Migrations](/guides/migrations/) for the full conceptual model.
 
 ## Migration File Format
 
-Trazo uses the Atlas SQL migration format. Each file contains an `-- +down` separator that divides the **up** (apply) and **down** (rollback) SQL statements:
+Each file is plain desired-state SQL. There are no numeric prefixes and no `-- +down` separator — Trazo uses `pg-schema-diff` to compute whatever DDL is needed to bring the live schema into agreement with the file.
 
 ```sql
--- 0003_create_repairs.sql
+-- migrations/modules/repairs.sql
 
-CREATE TABLE tenant_schema.repairs (
+CREATE TABLE IF NOT EXISTS repairs (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     vehicle_id  UUID NOT NULL,
     status      VARCHAR(50) NOT NULL DEFAULT 'pending',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
--- +down
-
-DROP TABLE IF EXISTS tenant_schema.repairs;
 ```
+
+Note: there is no `tenant_id` column. The table lives in `tenant_<slug>.repairs` once provisioned, and the schema name is the tenancy boundary.
 
 ---
 
@@ -63,7 +67,7 @@ trazo migrate up --to 0005
 
 ## `trazo migrate down`
 
-Rollback the most recently applied migration using its `-- +down` section.
+Roll the schema back to a previously recorded state. Because Trazo migrations are declarative, there is no per-file `-- +down` script; the engine instead diffs against the previous recorded snapshot in `migration_history` and emits the reverse DDL.
 
 ```bash
 trazo migrate down
@@ -139,30 +143,24 @@ Unlike `migrate status`, `history` shows all previously applied migrations regar
 
 ## `trazo migrate create <name>`
 
-Scaffold a new migration file in the `migrations/` directory. The file is prefixed with the next sequential version number and contains placeholder sections for the up and down SQL.
+Scaffold a new desired-state SQL file. The CLI places the file in the appropriate tier (`migrations/core/public/`, `migrations/core/tenant/`, or `migrations/modules/`) based on the flags you pass.
 
 ```bash
-trazo migrate create add_repair_photos
+trazo migrate create repairs --tier modules
 ```
 
-**Creates:** `migrations/0005_add_repair_photos.sql`
+**Creates:** `migrations/modules/repairs.sql`
 
 **File contents:**
 
 ```sql
--- 0005_add_repair_photos.sql
--- Created: 2026-03-03T10:00:00Z
-
--- Write your migration SQL here
-
-
--- +down
-
--- Write your rollback SQL here
+-- migrations/modules/repairs.sql
+-- Desired state for the repairs module.
+-- Edit this file to describe what the schema should look like.
 ```
 
 <Aside type="tip">
-The `<name>` argument should be lowercase and use underscores. The CLI automatically prepends the next available version number and appends `.sql`.
+The `<name>` argument should be lowercase and use underscores. There are no numeric prefixes and no `-- +down` separators — Trazo migrations describe the desired state and the diff engine computes the DDL needed to reach it.
 </Aside>
 
 ---
@@ -184,9 +182,9 @@ trazo migrate diff
 **Example output (differences detected):**
 
 ```
-[trazo] WARNING: Schema divergence detected.
-  Table "tenant_schema.repairs" has column "technician_notes" not present in any migration.
-  Run `trazo migrate create` to capture this change.
+[trazo] WARNING: Schema divergence detected in tenant_acme.
+  Table "repairs" has column "technician_notes" not present in migrations/modules/repairs.sql.
+  Update the SQL file to capture (or remove) this change.
 ```
 
 `migrate diff` is read-only and never modifies the database or migration files.

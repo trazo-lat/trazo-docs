@@ -3,7 +3,9 @@ title: Event Outbox
 description: How Trazo guarantees domain event delivery using the transactional outbox pattern, including the event structure, worker pool, retry policy, and dead letter queue.
 ---
 
-Trazo implements the transactional outbox pattern to ensure that domain events are never silently lost due to process crashes, network failures, or subscriber errors. Events are not dispatched directly into memory; they are first written to a durable outbox table within the same database transaction as the originating business operation, then delivered to subscribers by a background processor.
+Trazo implements the transactional outbox pattern to ensure that domain events are never silently lost due to process crashes, network failures, or subscriber errors. Events are not dispatched directly into memory; they are first written to a durable `events_outbox` table within the same database transaction as the originating business operation, then delivered to subscribers by a background processor.
+
+The `events_outbox` table lives **in each tenant's schema** (`tenant_<slug>.events_outbox`), defined by `migrations/core/tenant/audit_events.sql`. Because the tenancy boundary is the schema itself, the table has no `tenant_id` column — the schema name implicitly identifies the tenant.
 
 ## Why the Outbox Pattern
 
@@ -65,30 +67,34 @@ Both the `MarkComplete` update and the outbox insert succeed or fail together. T
 
 ## Event Structure
 
-Each record in the `outbox` table corresponds to one `Event` value:
+Each record in the `events_outbox` table corresponds to one `Event` value:
 
 | Field | Type | Description |
 |---|---|---|
 | `id` | UUID | Unique event identifier |
 | `name` | string | Dot-separated event name (e.g., `repairs.completed`) |
+| `version` | int | Schema version of the payload |
 | `module` | string | Module that emitted the event |
-| `tenant_id` | UUID | Tenant context for the event |
 | `aggregate_type` | string | The resource type affected (e.g., `repair`) |
 | `aggregate_id` | string | The ID of the affected resource |
-| `version` | int | Schema version of the payload |
 | `payload` | JSONB | The event payload (typically the full resource snapshot) |
 | `metadata` | JSONB | Arbitrary key-value pairs (e.g., trace IDs, causation ID) |
 | `occurred_at` | timestamp | When the event was created (UTC) |
-| `sequence` | int64 | Monotonically increasing sequence number per tenant |
+| `sequence` | int64 | Monotonically increasing sequence number per tenant (primary key) |
+| `processed` | bool | Whether the event has been delivered |
 | `processed_at` | timestamp | When the processor delivered the event (null if pending) |
 | `retry_count` | int | Number of delivery attempts so far |
-| `last_error` | string | Error message from the most recent failed attempt |
+| `next_retry_at` | timestamp | When the next retry is scheduled |
+| `error` | string | Error message from the most recent failed attempt |
+| `instance_name` | string | Module instance discriminator (multi-instance modules) |
+
+There is no `tenant_id` column: the row exists in `tenant_<slug>.events_outbox`, so the tenant is implicit.
 
 ## Outbox Processor
 
 The processor is started by calling `Core.Events.Start(ctx)` during application startup. It runs two loops:
 
-**Polling loop:** Scans the `outbox` table for rows where `processed_at IS NULL AND retry_count < max_retries`, ordered by `sequence ASC`. Rows are locked with `SELECT ... FOR UPDATE SKIP LOCKED` to support multiple processor instances without double-delivery.
+**Polling loop:** For each tenant schema, scans `events_outbox` for rows where `processed = FALSE AND next_retry_at <= NOW()`, ordered by `occurred_at ASC`. Rows are locked with `SELECT ... FOR UPDATE SKIP LOCKED` to support multiple processor instances without double-delivery.
 
 **Worker pool:** Delivers locked rows to their registered handlers using a configurable pool of goroutines.
 
@@ -137,11 +143,17 @@ func (m *NotificationsModule) Subscriptions() []core.EventSubscription {
 | `Async` | If true, the handler runs in a separate goroutine and does not block delivery |
 | `Priority` | Higher priority handlers are called first within the same event |
 
+## Per-Subscription Delivery State
+
+Each tenant schema also has an `event_subscriptions` table (which handlers are registered) and an `event_deliveries` table (one row per `(event, subscription)` pair with its own retry state). This means a single event can fail delivery to one subscriber and succeed for another, with independent backoff and dead-lettering per handler.
+
+The processor reads `event_deliveries.status` and `event_deliveries.next_retry_at` to decide what to attempt next.
+
 ## Retry Policy
 
 When a handler returns an error, the processor:
 
-1. Increments `retry_count` on the outbox row.
+1. Increments `retry_count` on the corresponding `event_deliveries` row.
 2. Records the error message in `last_error`.
 3. Schedules the next attempt with exponential backoff:
    - Attempt 1: immediate
@@ -150,11 +162,11 @@ When a handler returns an error, the processor:
    - Attempt 4: 1 hour
    - Attempt 5: 6 hours
 
-After the fifth failure, the row is moved to the dead letter queue.
+After the fifth failure, the `event_deliveries` row's `status` is set to `'dead_letter'`.
 
 ## Dead Letter Queue
 
-Events that exceed `max_retries` are marked as permanently failed and inserted into the `dead_letter` table. The platform provides an API to:
+Deliveries that exceed `max_retries` are marked `status = 'dead_letter'` in `event_deliveries`. The platform provides an API to:
 
 - List dead letter entries filtered by module, event name, or time range.
 - Inspect the full event payload and error history.

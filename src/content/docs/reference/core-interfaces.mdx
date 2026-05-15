@@ -7,6 +7,10 @@ import { Aside } from '@astrojs/starlight/components';
 
 Every Trazo module receives a `Core` struct at startup that exposes 11 sub-interfaces. These interfaces are the only coupling between a module and the platform — they can all be replaced by mock implementations in tests.
 
+<Aside type="note">
+The platform-level Go types referenced below (`Session`, `AuditEntry`, `Event`, …) used to live in a single `internal/core/types.go` file. As of the schema-per-tenant refactor that file has been split into focused files by domain: `types_identity.go`, `types_audit.go`, `types_events.go`, `types_hooks.go`, `types_notify.go`, `types_permissions.go`, `types_storage.go`, `types_db.go`, `types_module.go`, `types_errors.go`, `types_logger.go`, `types_pagination.go`, `types_agent.go`, `types_approvals.go`, `types_state.go`, `types_statemachine.go`, `types_search.go`, `types_metrics.go`, and `types_instance.go`. The package surface is unchanged — they all live in `package core` and resolve identically.
+</Aside>
+
 ```go
 type Core struct {
     Sessions    SessionManager

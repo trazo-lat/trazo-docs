@@ -3,7 +3,18 @@ title: Notification System
 description: How Trazo routes domain events to notification channels, configures per-tenant notification rules, and delivers messages asynchronously.
 ---
 
-Trazo's notification system connects domain events to delivery channels through a rule-based routing layer. When a domain event is emitted, the notifications module matches it against the tenant's configured `NotificationRule` records and delivers messages to the appropriate channels asynchronously.
+Trazo's notification system connects domain events to delivery channels through a rule-based routing layer. When a domain event is emitted, the notifications module matches it against the merged set of platform-default and tenant-override rules and delivers messages to the appropriate channels asynchronously.
+
+## Rule Storage: Platform Defaults and Tenant Overrides
+
+Notification rules live in two places:
+
+| Table | Schema | Purpose |
+|---|---|---|
+| `notification_rules` | `public` | Platform defaults shipped with the binary. Created/updated by `migrations/core/public/notification_rules.sql` and module-level rule seeding. |
+| `tenant_notification_rules` | `tenant_<slug>` | Per-tenant overrides. Managed via the API. |
+
+`Core.Notifications.MatchingRules(ctx, eventName)` returns the **union** of both tables. The tenant carried in `ctx` is authoritative — tenant overrides win on the most-specific scope (e.g., a tenant rule for `repairs.completed` shadows a platform rule for the same event). The tenant table has no `tenant_id` column; the tenancy is encoded in the schema.
 
 ## Channel Types
 
@@ -16,7 +27,7 @@ Trazo's notification system connects domain events to delivery channels through 
 
 ## NotificationRule
 
-A `NotificationRule` is a per-tenant record that maps an event to a delivery channel and a message template. Rules are managed through the API and are stored in the tenant schema.
+A `NotificationRule` maps an event to a delivery channel and a message template. Each row exists in either `public.notification_rules` (platform default) or `tenant_<slug>.tenant_notification_rules` (tenant override). Both tables have the same shape:
 
 ```
 NotificationRule {
@@ -24,7 +35,8 @@ NotificationRule {
     module      string      // module that emits the event (e.g., "repairs")
     event_name  string      // event to match (e.g., "repairs.completed")
     channel     string      // delivery channel: in_app | email | slack | webhook
-    template_id UUID        // reference to a NotificationTemplate record
+    template    string      // template name or inline template body
+    config      JSONB       // channel-specific config (recipient, URL, etc.)
     enabled     bool
     created_at  timestamp
     updated_at  timestamp
@@ -48,19 +60,18 @@ Field paths use dot notation to navigate nested payload fields. The `_links` nam
 
 ## In-App Notifications
 
-In-app notifications are stored as rows in the `notifications` table within the tenant schema:
+In-app notifications are stored as rows in the `in_app_notifications` table within the tenant schema:
 
 | Field | Type | Description |
 |---|---|---|
 | `id` | UUID | Unique identifier |
-| `recipient_id` | UUID | The user who should receive the notification |
+| `user_id` | UUID | The user who should receive the notification |
 | `title` | string | Rendered from the template title |
 | `body` | string | Rendered from the template body |
 | `link` | string | Optional deep link to the related resource |
 | `read` | bool | Whether the user has read the notification |
 | `read_at` | timestamp | When the notification was marked read (null if unread) |
-| `event_name` | string | The originating event name |
-| `event_id` | UUID | The originating event ID (for deduplication) |
+| `metadata` | JSONB | Additional rendering or routing data (event_name, event_id, etc.) |
 | `created_at` | timestamp | When the notification was created |
 
 Clients poll or subscribe (via WebSocket or SSE) to `/api/v1/notifications` to display unread counts and notification lists.
@@ -76,14 +87,16 @@ Outbox processor delivers event to notification module subscriber
     ▼
 NotificationService.Handle(ctx, event)
     │
-    ├── Query matching NotificationRules for tenant + event_name
+    ├── MatchingRules(ctx, event_name) — union of:
+    │     ├── public.notification_rules           (platform defaults)
+    │     └── tenant_<slug>.tenant_notification_rules (tenant overrides)
     │
     ├── For each matching rule:
     │     ├── Render template with event payload
     │     └── Dispatch to channel handler (async)
     │
     └── Channel handlers:
-          ├── in_app   → INSERT into notifications table
+          ├── in_app   → INSERT into in_app_notifications
           ├── email    → enqueue to mail provider
           ├── slack    → POST to Slack API
           └── webhook  → HTTP POST to configured URL
@@ -108,7 +121,9 @@ Rules require the permission `notifications.manage` (unscoped).
 
 ## Default Rules
 
-When a module is enabled for a tenant, the platform reads the `notifications` section of `module.yaml` and provisions default `NotificationRule` records if they do not already exist:
+Platform defaults declared in module manifests are inserted into `public.notification_rules` at startup (or when a module is registered). Tenants do not need to seed these themselves — they inherit them automatically through `MatchingRules`. A tenant override is created only when the tenant actually customizes a rule.
+
+When a module declares notification defaults in `module.yaml`, the platform upserts them into `public.notification_rules`:
 
 ```yaml
 # repairs/module.yaml
@@ -119,7 +134,7 @@ notifications:
     default_channel: email
 ```
 
-Default rules are created with `enabled: true`. Tenants can disable, modify, or extend them. Disabling a default rule does not prevent it from being re-created if the module is disabled and re-enabled; default rules are provisioned idempotently on module activation.
+Default rules are stored once in `public.notification_rules` with `enabled: true`. Tenants can disable, modify, or extend the platform defaults by creating rows in `tenant_notification_rules`; the union-and-merge in `MatchingRules` lets the tenant override shadow the platform default.
 
 :::tip
 When adding a new event to a domain module, always declare it in the `notifications` section of `module.yaml` with a sensible default channel. This ensures tenants have a working notification rule immediately when the module is updated, without requiring manual configuration.
@@ -133,7 +148,7 @@ The `webhook` channel performs an HTTP POST to the configured URL with the follo
 {
   "event": "repairs.completed",
   "module": "repairs",
-  "tenant_id": "...",
+  "tenant": { "id": "...", "subdomain": "acme" },
   "occurred_at": "2026-03-03T10:00:00Z",
   "payload": { ... }
 }

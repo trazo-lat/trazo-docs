@@ -34,9 +34,12 @@ The full module will have this layout when complete:
         - repository.go
         - service.go
         - handler.go
-        - migrations/
-          - 20240101000000_create_repairs.sql
+- migrations/
+  - modules/
+    - repairs.sql
 </FileTree>
+
+Notice that the SQL file lives at the **repo level** under `migrations/modules/`, not inside the module package. Trazo uses a declarative, three-tier migration layout — see [Migrations](/guides/migrations/) for the full picture.
 
 ---
 
@@ -143,7 +146,6 @@ package repairs
 
 import (
 	"context"
-	"embed"
 
 	"github.com/trazo-dev/trazo-core-service/internal/core"
 	"github.com/danielgtaylor/huma/v2"
@@ -151,9 +153,6 @@ import (
 
 //go:embed module.yaml
 var moduleConfig []byte
-
-//go:embed migrations
-var migrationFiles embed.FS
 
 type RepairsModule struct {
 	core    *core.Core
@@ -172,9 +171,6 @@ func (m *RepairsModule) Type() string { return "domain" }
 
 // Config returns the raw module.yaml bytes, embedded at compile time.
 func (m *RepairsModule) Config() []byte { return moduleConfig }
-
-// Migrations returns the embedded filesystem containing SQL migration files.
-func (m *RepairsModule) Migrations() embed.FS { return migrationFiles }
 
 // Init is called once at server startup after all modules are registered.
 // Use this to resolve cross-module dependencies and initialize internal state.
@@ -212,7 +208,42 @@ func New() *RepairsModule {
 ```
 
 <Aside type="tip">
-  The `//go:embed` directives embed the YAML and SQL files into the compiled binary. This means your migrations and module config ship inside the binary with no need for runtime file access.
+  The `//go:embed module.yaml` directive embeds the manifest into the compiled binary so the module can serve its declarative config at runtime. SQL files at `migrations/modules/<name>.sql` are embedded separately at the platform level — modules do not own their own migration `embed.FS`.
+</Aside>
+
+### Add the Module SQL File
+
+Create `migrations/modules/repairs.sql` at the repo root. This is a desired-state SQL file — no numeric prefix, no `-- +down` separator, no `tenant_id` column (the schema is the tenancy boundary):
+
+```sql
+-- migrations/modules/repairs.sql
+
+CREATE TABLE IF NOT EXISTS repairs (
+    id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    vehicle_id      UUID         NOT NULL,
+    description     TEXT,
+    status          VARCHAR(50)  NOT NULL DEFAULT 'pending',
+    created_by      UUID         NOT NULL,
+    assigned_to     UUID,
+    resolution_notes TEXT,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_repairs_status   ON repairs(status);
+CREATE INDEX IF NOT EXISTS idx_repairs_assigned ON repairs(assigned_to);
+CREATE INDEX IF NOT EXISTS idx_repairs_vehicle  ON repairs(vehicle_id);
+```
+
+<Aside type="tip">
+For multi-instance modules (a module that can be enabled more than once per tenant with different configurations), prefix the table names with `{{prefix}}` so each instance gets its own table set:
+
+```sql
+CREATE TABLE IF NOT EXISTS {{prefix}}repairs ( ... );
+```
+
+For single-instance modules, bare table names are fine. The CLI lint only flags **mixing** prefixed and unprefixed names in the same file.
 </Aside>
 
 ---
@@ -232,9 +263,9 @@ import (
 )
 
 // Repair is the primary domain entity for this module.
+// The row lives in tenant_<slug>.repairs, so there is no tenant_id column.
 type Repair struct {
 	ID              uuid.UUID  `json:"id"               db:"id"`
-	TenantID        uuid.UUID  `json:"-"                db:"tenant_id"`
 	VehicleID       uuid.UUID  `json:"vehicle_id"       db:"vehicle_id"`
 	Description     string     `json:"description"      db:"description"`
 	Status          string     `json:"status"           db:"status"`
@@ -602,9 +633,13 @@ When the server starts with your new module registered:
 
 1. The platform reads each module's `Config()` and builds a dependency graph.
 2. Modules are initialized in topological order via `Init()`.
-3. Each module's `Migrations()` are applied to the tenant schema.
-4. Each module's `RegisterRoutes()` is called to attach handlers to the router.
-5. Permissions declared in `module.yaml` are synced to the permissions table.
+3. Each module's `RegisterRoutes()` is called to attach handlers to the router.
+4. Permissions declared in `module.yaml` are synced to `public.permission_definitions`.
+
+The module's SQL (`migrations/modules/<name>.sql`) is **not** applied at server startup. It is applied to a tenant's schema by the `SchemaProvisioner` either:
+
+- at tenant creation, if the module is listed in `tenant.default_modules` in `trazo.yaml`, or
+- later, when the module is enabled for an existing tenant.
 
 Your module is now live and ready for tenant activation.
 
@@ -616,4 +651,4 @@ Your module is now live and ready for tenant activation.
 - [Service Patterns](/guides/service-patterns/) — the canonical 5-step service pattern in depth
 - [Handler Patterns](/guides/handler-patterns/) — Huma registration, request types, and error mapping
 - [Repository Patterns](/guides/repository-patterns/) — squirrel query building, scopes, and transactions
-- [Migrations](/guides/migrations/) — writing and running Atlas-compatible SQL migrations
+- [Migrations](/guides/migrations/) — the three-tier declarative migration layout in depth

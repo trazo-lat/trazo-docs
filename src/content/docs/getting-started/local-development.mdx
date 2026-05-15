@@ -1,6 +1,6 @@
 ---
 title: Local Development
-description: Start a local PostgreSQL database with the Trazo CLI, run migrations, and launch the API server for development.
+description: Start a local PostgreSQL database with the Trazo CLI, launch the API server, and bootstrap the public schema for development.
 ---
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -63,38 +63,11 @@ If `ping` fails, ensure Docker is running and the container started without erro
 
 ---
 
-## Step 2 — Run Migrations
+## Step 2 — Start the Server
 
-Apply the platform-level migrations (creates the `platform` schema, tenants table, users table, etc.):
+The server boots without the public schema being populated. It will refuse most API calls until you bootstrap the database in step 3, but it must be running first so the bootstrap endpoint is reachable.
 
-```bash
-trazo migrate up
-```
 
-```
-Applying migrations...
-  [1/8] create_platform_schema          OK
-  [2/8] create_tenants_table            OK
-  [3/8] create_users_table              OK
-  [4/8] create_sessions_table           OK
-  [5/8] create_audit_log_table          OK
-  [6/8] create_events_table             OK
-  [7/8] create_permissions_table        OK
-  [8/8] create_notifications_table      OK
-Migration complete. 8 migrations applied.
-```
-
-<Aside type="tip">
-  To check which migrations have already been applied without running them:
-
-  ```bash
-  trazo migrate status
-  ```
-</Aside>
-
----
-
-## Step 3 — Start the Server
 
 ```bash
 trazo-server
@@ -124,6 +97,18 @@ Override the port or log level without editing `trazo.yaml` using flags or envir
     ```
   </TabItem>
 </Tabs>
+
+---
+
+## Step 3 — Bootstrap the Public Schema
+
+With the server running, call the bootstrap endpoint to apply `migrations/core/public/` to the live database. This creates the `tenants`, `users`, `roles`, `permission_definitions`, etc. tables in the `public` schema. It is idempotent — running it again on an up-to-date database is a no-op.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/admin/migrations/bootstrap | jq
+```
+
+The endpoint touches the `public` schema only. Per-tenant schemas are created later, when you seed the first tenant (see [Your First Tenant](/getting-started/first-tenant/)).
 
 ---
 
@@ -162,7 +147,7 @@ trazo db local --destroy
 ```
 
 <Aside type="caution">
-  `--destroy` permanently deletes all local database data. You will need to re-run `trazo migrate up` afterwards.
+  `--destroy` permanently deletes all local database data. You will need to re-bootstrap the public schema (and re-seed any tenants) afterwards.
 </Aside>
 
 ---
@@ -172,13 +157,16 @@ trazo db local --destroy
 ```bash
 # Start everything
 trazo db local
-trazo migrate up
-trazo-server
+trazo-server &
+
+# Once, after a fresh database, bootstrap the public schema
+curl -X POST http://localhost:8080/api/v1/admin/migrations/bootstrap
 
 # Develop, make changes...
 
 # Stop when done
+kill %1
 trazo db local --stop
 ```
 
-Continue to [Your First Tenant](/getting-started/first-tenant/) to create a tenant and make your first authenticated API request.
+Continue to [Your First Tenant](/getting-started/first-tenant/) to seed the first tenant and admin user and make your first authenticated API request.

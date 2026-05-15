@@ -5,6 +5,8 @@ description: Tenant-configurable webhooks and expression-based hooks for extendi
 
 Hooks allow tenants to inject custom logic at defined points in a module's lifecycle without modifying the module code. Two hook types are supported: **webhooks** (external HTTP calls) and **expressions** (in-process evaluation).
 
+Hook configuration is stored in the per-tenant `tenant_hooks` table (`tenant_<slug>.tenant_hooks`, defined by `migrations/core/tenant/hooks.sql`). Because the table lives inside the tenant schema, it has no `tenant_id` column — the tenancy is encoded in the schema name.
+
 ## Hook Types
 
 | Type | Execution | Use Case |
@@ -35,7 +37,7 @@ When a webhook hook is triggered, the platform sends a POST request:
 ```json
 {
   "hook": "repairs.before_create",
-  "tenant_id": "t123",
+  "tenant": { "id": "t123", "subdomain": "acme" },
   "user_id": "u456",
   "request_id": "req-789",
   "timestamp": "2026-04-02T14:30:00Z",
@@ -93,18 +95,21 @@ amount > 1000 && status == "pending" ? {"priority": "high"} : {}
 
 ## Database Schema
 
+The `tenant_hooks` table lives **inside each tenant's schema**, so it has no `tenant_id` column. The schema name (`tenant_<slug>`) is the tenancy boundary.
+
 ```sql
 CREATE TABLE tenant_hooks (
-    id          TEXT PRIMARY KEY,
-    tenant_id   TEXT NOT NULL,
-    hook_name   TEXT NOT NULL,       -- "repairs.before_create"
-    hook_type   TEXT NOT NULL,       -- "webhook" or "expression"
-    url         TEXT,                -- webhook URL (null for expressions)
-    headers     JSONB,              -- custom webhook headers
-    expression  TEXT,                -- expr-lang expression
-    enabled     BOOLEAN DEFAULT true,
-    created_at  TIMESTAMPTZ,
-    updated_at  TIMESTAMPTZ
+    id          UUID PRIMARY KEY,
+    public_id   TEXT NOT NULL DEFAULT '',
+    hook_name   TEXT NOT NULL,                 -- "repairs.before_create"
+    hook_type   TEXT NOT NULL DEFAULT 'webhook', -- "webhook" or "expression"
+    url         TEXT NOT NULL DEFAULT '',      -- webhook URL (empty for expressions)
+    expression  TEXT NOT NULL DEFAULT '',      -- expr-lang expression
+    headers     JSONB NOT NULL DEFAULT '{}',   -- custom webhook headers
+    enabled     BOOLEAN NOT NULL DEFAULT true,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (hook_name)
 );
 ```
 
