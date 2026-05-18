@@ -1,0 +1,394 @@
+---
+title: HTTP API Reference
+description: Every /api/v1/billing/* endpoint — plans, plan quotas, tenant assignments, overrides, conditional rules, usage snapshot. Curl examples for each.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+All endpoints live under `/api/v1/billing/` for catalog-wide operations and `/api/v1/tenants/{tenant_id}/billing/` for tenant-scoped operations. Permissions are namespaced under `billing.*`.
+
+## Permissions
+
+| Permission | Grants |
+|---|---|
+| `billing.plans.read` | List + get plans, get a tenant's effective plan |
+| `billing.plans.write` | Create / replace plans, set / delete plan quota lines |
+| `billing.assign` | Assign a plan to a tenant, list / set / delete tenant overrides |
+| `billing.usage.read` | Read the tenant usage snapshot |
+| `billing.rules.write` | List / create / update / delete conditional quota rules |
+
+The `billing.rules.write` permission gates both reads and writes on rules — there's no separate `read` permission since rules carry sensitive limits an admin shouldn't see without write authority.
+
+## Plans
+
+### List plans
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/billing/plans
+```
+
+```json
+{
+  "plans": [
+    { "id": "plan_free",       "slug": "free",       "name": "Free",       "status": "active", "sort_order": 0,  "metadata": {} },
+    { "id": "plan_pro",        "slug": "pro",        "name": "Pro",        "status": "active", "sort_order": 10, "metadata": {} },
+    { "id": "plan_enterprise", "slug": "enterprise", "name": "Enterprise", "status": "active", "sort_order": 20, "metadata": {} }
+  ]
+}
+```
+
+### Get a single plan + its quota lines
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/billing/plans/pro
+```
+
+```json
+{
+  "plan": {
+    "id": "plan_pro", "slug": "pro", "name": "Pro",
+    "description": "Mid-tier plan with raised limits and channel access.",
+    "status": "active", "sort_order": 10, "metadata": {}
+  },
+  "quotas": [
+    { "plan_id": "...", "metric_key": "tenant.users.count",          "limit_value": 25,                "reset_period": "none"  },
+    { "plan_id": "...", "metric_key": "tenant.modules.enabled",      "limit_value": 10,                "reset_period": "none"  },
+    { "plan_id": "...", "metric_key": "tenant.storage.bytes",        "limit_value": 10737418240,       "reset_period": "month" },
+    { "plan_id": "...", "metric_key": "feature.whatsapp_channel",    "limit_value": 1,                 "reset_period": "none"  },
+    { "plan_id": "...", "metric_key": "feature.web_channel",         "limit_value": 1,                 "reset_period": "none"  }
+  ]
+}
+```
+
+### Create a plan
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "slug": "growth",
+       "name": "Growth",
+       "description": "Tier between pro and enterprise for scaling teams",
+       "sort_order": 15,
+       "status": "active"
+     }' \
+     https://api.example.com/api/v1/billing/plans
+```
+
+Returns `201 Created` with the new plan. Quota lines are added separately via `POST /billing/plans/{slug}/quotas`.
+
+### Replace a plan (full PUT)
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "name": "Pro (renamed)",
+       "description": "Updated description",
+       "sort_order": 10,
+       "status": "active"
+     }' \
+     https://api.example.com/api/v1/billing/plans/pro
+```
+
+PUT requires all fields. There is intentionally no PATCH on this resource — plan rows are small enough that partial-update semantics add complexity without buying much.
+
+### Set a plan quota line
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "metric_key": "conversations.messages",
+       "limit_value": 10000,
+       "reset_period": "month"
+     }' \
+     https://api.example.com/api/v1/billing/plans/pro/quotas
+```
+
+Upsert by `(plan_id, metric_key)`. Re-POSTing the same metric replaces the existing limit.
+
+### Delete a plan quota line
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/billing/plans/pro/quotas/conversations.messages
+```
+
+Returns `204 No Content`. After deletion, the engine falls through to the next resolution level (override → fallback default plan → unlimited).
+
+## Tenant plan assignment
+
+### Get the tenant's effective plan
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/plan
+```
+
+```json
+{
+  "plan": {
+    "id": "plan_pro", "slug": "pro", "name": "Pro",
+    "status": "active", "sort_order": 10, "metadata": {}
+  },
+  "plan_slug": "pro",
+  "is_default": false,
+  "assigned_at": "2026-03-12T14:08:00Z"
+}
+```
+
+`is_default: true` indicates no explicit assignment exists and the engine resolved to the configured fallback (`billing.default_plan` in `heyllave.yaml`).
+
+### Assign a tenant to a plan
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{ "plan_slug": "pro" }' \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/plan
+```
+
+Upserts the assignment row in `public.tenant_plans` and invalidates the engine's plan cache.
+
+## Tenant overrides
+
+### List active overrides
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/overrides
+```
+
+```json
+{
+  "overrides": [
+    {
+      "tenant_id": "...", "metric_key": "conversations.messages",
+      "limit_value": 15000, "reset_period": "month",
+      "reason": "approved expansion for May launch",
+      "expires_at": "2026-06-01T00:00:00Z",
+      "created_at": "2026-04-10T09:00:00Z",
+      "updated_at": "2026-04-10T09:00:00Z"
+    }
+  ]
+}
+```
+
+Expired rows are filtered out automatically.
+
+### Set / replace an override
+
+```bash
+curl -X PUT -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "limit_value": 15000,
+       "reset_period": "month",
+       "reason": "approved expansion for May launch",
+       "expires_at": "2026-06-01T00:00:00Z"
+     }' \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/overrides/conversations.messages
+```
+
+The `metric_key` lives in the URL — re-PUTting the same path is idempotent. Use `limit_value: -1` for unlimited, `0` for hard-zero.
+
+### Delete an override
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/overrides/conversations.messages
+```
+
+Returns `204 No Content`. After deletion, resolution falls through to the next level (any matching rule, then plan default).
+
+## Conditional rules
+
+See [Conditional rules](/billing/rules) for the predicate-language deep dive. The HTTP surface:
+
+### List rules
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/rules
+```
+
+```json
+{
+  "rules": [
+    {
+      "id": "qrule_conversations-messages-a4f81234",
+      "tenant_id": "...",
+      "metric_key": "conversations.messages",
+      "priority": 200,
+      "condition": "tenant.metadata.trial_ends_at>now()",
+      "limit_value": 500,
+      "reset_period": "day",
+      "label": "Trial bump",
+      "enabled": true,
+      "metadata": {},
+      "created_at": "...",
+      "updated_at": "..."
+    },
+    {
+      "id": "qrule_conversations-messages-b7c91234",
+      "tenant_id": "...",
+      "metric_key": "conversations.messages",
+      "priority": 100,
+      "condition": "tenant.metadata.region=EU",
+      "limit_value": 5000,
+      "reset_period": "month",
+      "label": "EU regional cap",
+      "enabled": true,
+      "metadata": {},
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ]
+}
+```
+
+Rules are sorted by `metric_key ASC`, `priority DESC` so the highest-priority gate per metric is first in the list.
+
+### Create a rule
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "metric_key": "conversations.messages",
+       "priority": 100,
+       "condition": "tenant.metadata.region=EU",
+       "limit_value": 5000,
+       "reset_period": "month",
+       "label": "EU regional cap"
+     }' \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/rules
+```
+
+`condition` is validated at write time — a malformed predicate returns `400 Bad Request` with the parser error. `enabled` defaults to `true` if omitted.
+
+### Update a rule (PATCH)
+
+```bash
+curl -X PATCH -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{ "priority": 150, "label": "EU regional cap (raised priority)" }' \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/rules/qrule_conversations-messages-b7c91234
+```
+
+PATCH accepts any subset of the rule fields (`priority`, `condition`, `limit_value`, `reset_period`, `label`, `enabled`). Changing the `condition` re-runs validation.
+
+### Delete a rule
+
+```bash
+curl -X DELETE -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/rules/qrule_conversations-messages-b7c91234
+```
+
+Returns `204 No Content`.
+
+## Usage snapshot
+
+### Read the tenant's current usage + effective limits
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/usage
+```
+
+```json
+{
+  "snapshots": [
+    {
+      "metric": { "key": "conversations.messages", "name": "Messages", "kind": "meter",
+                  "default_reset": "month", "unit": "messages", "module": "conversations" },
+      "limit": 5000, "current": 1247, "remaining": 3753,
+      "reset_period": "month",
+      "period_start": "2026-05-01T00:00:00Z",
+      "period_end":   "2026-06-01T00:00:00Z",
+      "source": "rule", "plan_slug": "pro",
+      "override_set": false,
+      "rule_id": "qrule_conversations-messages-b7c91234",
+      "rule_label": "EU regional cap"
+    },
+    {
+      "metric": { "key": "tenant.users.count", "name": "Users", "kind": "counter",
+                  "unit": "users", "module": "users" },
+      "limit": 25, "current": 12, "remaining": 13,
+      "reset_period": "none",
+      "source": "plan", "plan_slug": "pro",
+      "override_set": false
+    },
+    {
+      "metric": { "key": "feature.whatsapp_channel", "name": "WhatsApp channel", "kind": "flag",
+                  "module": "conversations" },
+      "limit": 1, "current": 0, "remaining": -1,
+      "reset_period": "none",
+      "source": "plan", "plan_slug": "pro",
+      "override_set": false
+    }
+  ]
+}
+```
+
+Every registered metric appears in the snapshot. `source` carries the provenance of the limit:
+
+| `source` | Meaning |
+|---|---|
+| `rule` | A conditional rule matched. `rule_id` and `rule_label` are populated. |
+| `override` | A `tenant_quota_overrides` row supplied the limit. |
+| `plan` | The plan's `plan_quotas` row supplied the limit. |
+| `unregistered` | No metric or no information — engine failed open with `limit: -1`. |
+
+`remaining: -1` is the sentinel for "unlimited" (counter/meter with `limit: -1`, or any flag — flags don't track usage).
+
+## Error responses
+
+Errors follow the platform's structured-error format. The HTTP status comes from the `Status` field on the `*core.Error`.
+
+| Code | HTTP | When |
+|---|---|---|
+| `CORE.QUOTA.EXCEEDED` | 402 | A counter or meter reservation would exceed the limit. Body includes `field` (the metric key) and `params` with `current` / `limit` / `requested` / `plan`. |
+| `CORE.QUOTA.DISABLED` | 402 | A flag metric is off for the tenant. Body includes `field` (the metric key). |
+| `CORE.QUOTA.NO_TENANT` | 500 | A counter/meter operation reached the engine without a tenant in context. |
+| `CORE.AUTHORIZATION.FORBIDDEN` | 403 | Caller lacks one of the `billing.*` permissions. |
+| `CORE.NOT_FOUND.PLAN` | 404 | Plan slug doesn't exist (on GET/PATCH/DELETE/PUT). |
+| `CORE.NOT_FOUND.RULE` | 404 | Rule public ID doesn't exist for the addressed tenant. |
+| Huma validation | 422 | Body fields fail validation tags (`validate:"required"`, etc.). |
+
+Example body for a `CORE.QUOTA.EXCEEDED`:
+
+```json
+{
+  "code": "CORE.QUOTA.EXCEEDED",
+  "message": "quota exceeded",
+  "field": "conversations.messages",
+  "params": {
+    "metric":    "conversations.messages",
+    "current":   5000,
+    "limit":     5000,
+    "requested": 1,
+    "plan":      "pro"
+  },
+  "request_id": "req-abc-123"
+}
+```
+
+The `params` are useful in client UIs — the platform's `T()` helper can interpolate them into a translated error string keyed by the message code.
+
+## Operational notes
+
+- **Idempotent writes**: PUT on a tenant plan / override is idempotent; POST on a plan / rule creates a new row.
+- **Cache invalidation is automatic**. Plan / quota / override / rule writes call `InvalidatePlanCache` on the engine. Direct SQL writes do not — restart the service or call the admin endpoint after manual DB edits.
+- **Audit**: every plan + override + rule mutation produces an audit entry. The before/after JSONB payloads include the full body, so reviewing rule edits is straightforward.
+- **No bulk endpoints in v1**. Editing many plan quotas requires many requests. A bulk admin endpoint may land later if the admin UI needs it.
+
+## See also
+
+- [Overview](/billing/overview) — concepts and the resolution chain
+- [Plans and overrides](/billing/plans) — when to use which knob
+- [Conditional rules](/billing/rules) — predicate-language deep dive
+- [Gating with the engine](/billing/gating) — calling the engine from a service

@@ -1,0 +1,126 @@
+---
+title: Billing Overview
+description: How the billing and quota subsystem gates per-tenant feature usage — metrics, plans, conditional rules, and decision provenance.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The billing subsystem gates and tracks per-tenant feature usage. Every tenant is implicitly subject to the engine — there is no enable/disable. Modules register the metrics they care about, plans attach default limits, and admins layer per-tenant overrides or conditional rules on top.
+
+This page is the conceptual entry point. For task-focused docs, see:
+
+- [Defining metrics](/billing/metrics) — `quotas:` section in `module.yaml`
+- [Gating with the engine](/billing/gating) — calling `Reserve` / `Release` / `Record` / `IsEnabled` from a service
+- [Plans and overrides](/billing/plans) — plan catalog, seeding, tenant assignment, single-value overrides
+- [Conditional rules](/billing/rules) — query-language predicates for splitting limits by attribute
+- [HTTP API reference](/billing/api) — every `/billing/*` endpoint with curl examples
+
+## Three primitives
+
+| Primitive | Storage | Use case |
+|---|---|---|
+| **Metric** | in-memory registry | The name + kind + unit of a thing being measured (e.g. `tenant.users.count`, `feature.whatsapp_channel`). |
+| **Plan / plan_quota** | `public.plans`, `public.plan_quotas` | Per-tier limits assigned to tenants by `tenant_plans`. |
+| **Quota rule** | `public.quota_rules` | Conditional per-tenant limit overrides gated by a query predicate. First match by priority wins. |
+
+## Metric kinds
+
+| Kind | Storage shape | Semantics |
+|---|---|---|
+| **counter** | absolute value | `Reserve` increments, `Release` decrements, limit caps the absolute total. Example: number of seats. |
+| **meter** | current value within a rolling window (day / month / year) | `Reserve` and `Record` both add to the window's current value; the engine rolls the window forward when expired. Example: API calls per month. |
+| **flag** | boolean (`limit_value` 0 = off, non-zero = on) | `IsEnabled` reads plan + rules; no usage tracking. Example: `feature.whatsapp_channel`. |
+
+`limit_value = -1` is the sentinel for "unlimited" on counters and meters. `Reserve` always succeeds for unlimited limits.
+
+See [Defining metrics](/billing/metrics) for the full kind-selection guide.
+
+## Resolution chain
+
+When `Reserve(ctx, metric_key, amount)` runs, the engine resolves the effective limit in priority order. The first level that produces a value wins:
+
+```
+1. quota_rules   — first enabled rule (priority DESC) whose condition matches the request context
+2. tenant_quota_overrides — non-expired override row for (tenant, metric)
+3. plan_quotas   — limit attached to the tenant's effective plan
+4. unlimited     — engine fails open when no information exists (unknown metric or unconfigured tenant)
+```
+
+Unknown metric keys always fail open: a typo in a caller cannot block writes. Compile errors in a rule's condition are logged and the rule is skipped for that request, so a single bad rule never blocks `Reserve` for the whole tenant.
+
+<Aside type="tip">
+Rules sit on top of overrides which sit on top of plan quotas. If you only need "this one tenant gets a different cap for this one metric," reach for an [override](/billing/plans#tenant-overrides) — it's simpler. Use [rules](/billing/rules) when the cap depends on a runtime attribute (region, role, plan tier, time of day).
+</Aside>
+
+## Storage map
+
+| Table | Schema | Purpose |
+|---|---|---|
+| `public.plans` | global | Catalog of plan tiers (free, pro, enterprise...). |
+| `public.plan_quotas` | global | Per-plan limit per metric. PK `(plan_id, metric_key)`. |
+| `public.tenant_plans` | global | Which plan each tenant is on. PK `(tenant_id)`. |
+| `public.tenant_quota_overrides` | global | Per-tenant single-value override for a metric. PK `(tenant_id, metric_key)`. |
+| `public.quota_rules` | global | Per-tenant **conditional** overrides. Multiple rows per `(tenant_id, metric_key)`. |
+| `tenant_<slug>.quota_usage` | per-tenant | Current usage counters and meter windows. Lives in the tenant schema. |
+
+The split — definitions in `public`, usage in `tenant_<slug>` — keeps the tenant physically portable: a tenant's live usage moves with their schema, while plan and rule definitions stay with the platform.
+
+## Decision provenance
+
+Every `QuotaDecision` (returned by `Check` / `Reserve`) and every `QuotaSnapshot` (returned by `/billing/usage`) carries enough provenance for an operator to trace any limit back to its origin:
+
+```json
+{
+  "metric_key": "conversations.messages",
+  "allowed": true,
+  "limit": 5000,
+  "current": 1247,
+  "remaining": 3753,
+  "requested": 1,
+  "reset_period": "month",
+  "period_start": "2026-05-01T00:00:00Z",
+  "period_end":   "2026-06-01T00:00:00Z",
+  "source": "rule",
+  "plan_slug": "pro",
+  "rule_id": "qrule_conversations-messages-a4f81234",
+  "rule_label": "EU regional cap"
+}
+```
+
+`source` is one of:
+
+| Value | Meaning |
+|---|---|
+| `rule` | A conditional rule matched. `rule_id` and `rule_label` are populated. |
+| `override` | A `tenant_quota_overrides` row supplied the limit. |
+| `plan` | The plan's `plan_quotas` row supplied the limit. `plan_slug` is populated. |
+| `unregistered` | No metric or no information — engine failed open with `limit: -1`. |
+
+## Configuration
+
+```yaml
+# heyllave.yaml
+quotas:
+  default_plan: "free"      # slug applied to tenants with no tenant_plans row
+  plan_cache_ttl: 60s       # in-memory cache for resolved plan bundles
+```
+
+`InvalidatePlanCache` is called automatically when a plan, plan quota, override, or tenant assignment changes via the admin API, so cached limits are never stale for more than a handler hop.
+
+## Operational notes
+
+- **Failure-open by design**: unregistered metrics and missing plan rows resolve to `unlimited`. A typo in a caller never blocks writes.
+- **One rule cannot block the tenant**: a runtime error in a single rule's expression is logged and the rule is skipped; the next rule in priority order still runs.
+- **Idempotent registration**: re-registering the same metric key is a no-op; conflicting kinds for the same key log a warning and keep the first registration. This makes hot-reload and module re-init safe.
+- **Counter / meter writes need a tenant in context**. Flag reads work without one (they read plan + rules only). Calling `Reserve` for a counter without a tenant returns `CORE.QUOTA.NO_TENANT`.
+
+## When to use what
+
+| You want to… | Read |
+|---|---|
+| Add a new gated feature to your module | [Defining metrics](/billing/metrics) + [Gating with the engine](/billing/gating) |
+| Spin up a new plan tier | [Plans and overrides](/billing/plans) |
+| Give one tenant a different limit | [Plans and overrides → overrides](/billing/plans#tenant-overrides) |
+| Split a plan limit by region / role / trial status | [Conditional rules](/billing/rules) |
+| Wire an admin UI for the catalog | [HTTP API reference](/billing/api) |
+| Understand which row produced a limit in production | [Decision provenance](#decision-provenance) on this page |

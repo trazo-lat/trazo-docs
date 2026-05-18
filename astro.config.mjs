@@ -103,9 +103,25 @@ export default defineConfig({
               items: [
                 { label: 'Audit Trail', slug: 'architecture/audit-trail' },
                 { label: 'File Storage', slug: 'architecture/storage' },
-                { label: 'Quotas and Usage', slug: 'architecture/quotas' },
               ],
             },
+          ],
+        },
+        {
+          label: 'Billing',
+          items: [
+            { label: 'Overview', slug: 'billing/overview' },
+            { label: 'Defining Metrics', slug: 'billing/metrics' },
+            { label: 'Gating with the Engine', slug: 'billing/gating' },
+            { label: 'Plans & Overrides', slug: 'billing/plans' },
+            { label: 'Conditional Rules', slug: 'billing/rules' },
+            { label: 'HTTP API Reference', slug: 'billing/api' },
+          ],
+        },
+        {
+          label: 'Invoicing',
+          items: [
+            { label: 'Overview', slug: 'invoicing/overview' },
           ],
         },
         {
