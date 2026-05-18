@@ -1,0 +1,267 @@
+---
+title: Examples Cookbook
+description: Working queries for common search and filter patterns, with the data shape and expected matches for each.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every snippet on this page is a real query that compiles against the field schemas shown. The runnable equivalents live in [`examples/`](https://github.com/heyllave/query/tree/main/examples) in the query repo — `go run ./examples/<name>` prints the output.
+
+---
+
+## Field Config
+
+The examples share this schema unless otherwise noted:
+
+```go
+fields := []validate.FieldConfig{
+    {Name: "state",       Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "name",        Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "description", Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "tags",        Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "year",        Type: validate.TypeInteger, AllowedOps: validate.NumericOps},
+    {Name: "total",       Type: validate.TypeDecimal, AllowedOps: validate.NumericOps},
+    {Name: "active",      Type: validate.TypeBoolean, AllowedOps: validate.BoolOps},
+    {Name: "created_at",  Type: validate.TypeDate,    AllowedOps: validate.DateOps},
+    {Name: "ttl",         Type: validate.TypeText,    AllowedOps: validate.TextOps, Nested: true},
+    {Name: "labels",      Type: validate.TypeText,    AllowedOps: validate.TextOps, Nested: true},
+    {Name: "orders",      Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "status",      Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "price",       Type: validate.TypeDecimal, AllowedOps: validate.NumericOps},
+}
+```
+
+---
+
+## Search Bar Patterns
+
+### Filter by state and amount
+
+```
+state=draft AND total>=50000
+```
+
+### Date window
+
+```
+created_at:2026-01-01..2026-03-31
+created_at>=now()-30d
+created_at:daysAgo(30)..now()
+```
+
+### Partial-name search
+
+```
+name=John*                # prefix
+name=*son                 # suffix
+name=*urgent*             # contains
+"customer name"="Acme Corp"   # exact, including spaces
+```
+
+### Multi-value filter
+
+```
+state IN (draft, issued, paid)
+year IN (2024, 2025, 2026)
+state=draft year IN (2025, 2026)          # implicit AND
+```
+
+### Boolean fields
+
+```
+active=true
+NOT active=true                # also matches missing field
+```
+
+---
+
+## Compound Expressions
+
+### AND / OR with precedence
+
+```
+(state=draft OR state=issued) AND total>=50000
+state=draft AND (year=2025 OR year=2026)
+```
+
+### Implicit AND for terse queries
+
+```
+state=draft total>1000 year>=2025         # three implicit ANDs
+NOT cancelled total>1000                  # NOT then implicit AND
+```
+
+### Negation that respects missing fields
+
+```
+total!>50000          # NOT total>50000 — matches when total is missing
+year!>=2020           # NOT year>=2020
+```
+
+---
+
+## Nested Fields
+
+```
+labels.dev=jane
+labels.env=prod
+ttl.duration>1d
+(labels.dev=jane OR labels.env=bar) AND NOT labels.region=eu
+```
+
+The parent field must be configured with `Nested: true` on the `FieldConfig`. Dotted segments after the first do not need their own entries.
+
+---
+
+## Arithmetic in Value Position
+
+```
+total>=50000*1.1                    # 55000
+total>=(50000+1000)*1.1             # 56100
+created_at>=now()-7d                # last week
+created_at>=now()-7d*2              # last two weeks
+ttl.duration>=4h*3                  # ≥ 12 hours
+```
+
+<Aside type="note">
+Bare field references are not valid arithmetic operands. To scale a field by a factor, register a custom function: `eval.WithFunctions(eval.Func{Name: "scaled", Call: ...})`, then write `scaled(total)>50000`.
+</Aside>
+
+---
+
+## Functions
+
+### As field transforms
+
+```
+lower(name)=john*
+upper(state)=DRAFT
+trim(description)=*urgent*
+len(name)>5
+year(created_at)=2026
+month(created_at) IN (1, 2, 3)            # Q1 only
+```
+
+### As value generators
+
+```
+created_at>=now()
+created_at>=daysAgo(7)
+created_at:daysAgo(30)..now()
+total>=threshold()                         # custom function returning a number
+```
+
+### As boolean predicates
+
+```
+contains(tags, "urgent")
+startsWith(name, prefix)                   # two fields
+endsWith(name, "-doe")
+```
+
+### Ternary / nullish
+
+```
+coalesce(nickname, name)="John"            # picks nickname if non-empty, else name
+if(active, "on", "off")="on"               # ternary
+coalesce(name, "anonymous")=*Doe*          # default value
+```
+
+---
+
+## Selectors over List Fields
+
+Data shape: each record has an `orders` field that is a `[]map[string]any` or a `[]Struct` with `query:"..."` tags.
+
+```
+orders@first                                  # at least one order
+orders@(status=shipped)                       # at least one shipped (EXISTS)
+orders@any(status=shipped)                    # alias of @(...)
+orders@all(price>0)                           # every order is non-zero
+orders@none(status=cancelled)                 # nothing cancelled
+orders@(status=shipped AND qty>=2)            # compound inner
+orders@all(price>0) AND orders@none(status=cancelled)
+NOT line_items@(price>100)                    # outer negation
+```
+
+### Edge cases
+
+| Selector | Empty list | Missing field |
+|----------|-----------|---------------|
+| `@first`, `@last`, `@(...)`, `@any` | `false` | `false` |
+| `@all(...)` | `true` (vacuous truth) | `false` |
+| `@none(...)` | `true` | `true` (treated as empty list) |
+
+---
+
+## Quoted Strings
+
+```
+name="John Doe"
+description="urgent: handle ASAP"
+description="line1\nline2"
+description="a > b"
+name="contains a \"quote\" inside"
+```
+
+The escape set is `\"`, `\\`, `\n`, `\t`, `\r`. Quoted strings work anywhere a value is accepted, including inside function args (`contains(tags, "urgent")`), `IN` lists (`name IN ("John Doe", "Jane")`), and ranges.
+
+---
+
+## Query Sandboxing
+
+When exposing the language to end users (public API, multi-tenant SaaS), restrict what they can do:
+
+```go
+// Public API: only specific fields
+prog, err := eval.Compile(q, fields,
+    eval.WithAllowedFields("state", "total", "year"),
+)
+
+// Read-only: equality and presence only
+prog, err := eval.Compile(q, fields,
+    eval.WithAllowedOps(validate.OpEq, validate.OpNeq, validate.OpPresence),
+)
+
+// DoS protection
+prog, err := eval.Compile(q, fields,
+    eval.WithMaxDepth(3),     // bounds the AST nesting
+    eval.WithMaxLength(256),  // bounds the input string length
+)
+```
+
+Pair with a custom `AstValidator` for per-tenant field allowlists — see the [Syntax Reference](/query/syntax/#custom-rules) section on custom rules.
+
+---
+
+## Struct Binding
+
+For type-safe compilation against a Go struct:
+
+```go
+type Invoice struct {
+    State     string    `query:"state"`
+    Total     float64   `query:"total"`
+    CreatedAt time.Time `query:"created_at"`
+    Internal  string    // no tag → not queryable
+}
+
+prog, err := eval.CompileFor[Invoice]("state=draft AND total>=50000")
+prog.MatchStruct(Invoice{State: "draft", Total: 60000})
+
+// Caught at compile time:
+_, err = eval.CompileFor[Invoice]("total=notanumber")  // type mismatch
+_, err = eval.CompileFor[Invoice]("Internal=secret")   // unknown field
+```
+
+`CompileFor[T]` walks the struct tags once and feeds the field set into the validator, so typos surface during compilation rather than at the first `Match` call.
+
+---
+
+## What This Doesn't Do
+
+Intentionally out of scope (see [Coverage & Tradeoffs](/query/coverage/) for the full list):
+
+- String concatenation — use a custom function (`fullName(first, last)`).
+- Field references as arithmetic operands — use a custom function (`scaled(total)>1.1`).
+- Hot-path bytecode evaluation — the engine is closure-based; compile once, match many.

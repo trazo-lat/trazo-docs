@@ -1,0 +1,316 @@
+---
+title: Query Syntax Reference
+description: Complete reference for every operator, value type, and grammatical construct supported by the Heyllave query language.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+This page is the canonical reference for what parses. If something compiles here and fails at runtime, it's an evaluation issue (missing field, type coercion) — not a syntax issue. For higher-level patterns and worked examples, see [Examples](/query/examples/).
+
+---
+
+## Grammar at a Glance
+
+```
+expr        := orExpr
+orExpr      := andExpr ( "OR" andExpr )*
+andExpr     := unaryExpr ( ( "AND" | <implicit> ) unaryExpr )*
+unaryExpr   := "NOT" unaryExpr | primary
+primary     := group | inExpr | qualifier | presence | selector | funcCall
+group       := "(" expr ")"
+inExpr      := ident "IN" "(" valueList ")"
+qualifier   := field cmpOp value | field ":" value ".." value
+presence    := field
+selector    := field "@" selectorKind
+selectorKind:= "first" | "last" | "(" expr ")"
+             | "any" "(" expr ")" | "all" "(" expr ")" | "none" "(" expr ")"
+funcCall    := ident "(" [ funcArg ( "," funcArg )* ] ")"
+funcArg     := field | value | funcCall
+value       := literal | quotedString | funcCall | arithExpr
+arithExpr   := arithSum
+arithSum    := arithMul ( ( "+" | "-" ) arithMul )*
+arithMul    := arithPrimary ( ( "*" | "/" | "%" ) arithPrimary )*
+arithPrimary:= literal | funcCall | "(" arithExpr ")"
+cmpOp       := "=" | "!=" | ">" | ">=" | "<" | "<=" | "!>" | "!>=" | "!<" | "!<="
+```
+
+Keywords `AND`, `OR`, `NOT`, `IN` are case-insensitive. Whitespace between top-level terms acts as implicit `AND`.
+
+---
+
+## Value Types
+
+| Type | Examples | Notes |
+|------|----------|-------|
+| String | `draft`, `customer_john-doe`, `*.com` | Hyphens, underscores, dots OK; spaces require quoting |
+| Quoted string | `"hello world"`, `"a > b"`, `"line1\nline2"` | Supports `\"`, `\\`, `\n`, `\t`, `\r` escapes |
+| Integer | `42`, `-10`, `2026` | |
+| Float | `3.14`, `50000.50`, `-0.5` | |
+| Boolean | `true`, `false` | |
+| Date | `2026-01-01` | ISO format, naive (no time zone) |
+| Duration | `7d`, `4h`, `30m`, `15s`, `2h30m` | Standard Go duration syntax plus `d` for days |
+| Wildcard | `John*`, `*son`, `*urgent*` | `*` at start, end, or both. Not in the middle (`a*b*c` is invalid) |
+| Function call | `now()`, `daysAgo(7)`, `lower(name)` | Evaluated at match time against a function registry |
+| Arithmetic | `50000*1.1`, `now()-7d`, `(a+b)*c` | Operands are literals, function calls, or sub-arithmetic |
+
+---
+
+## Comparison Operators
+
+| Operator | Allowed types | Description |
+|----------|---------------|-------------|
+| `=` | all | Equality (or wildcard match when the value has `*`) |
+| `!=` | all | Not equal |
+| `>` `>=` `<` `<=` | number, date, duration | Ordered comparison |
+| `!>` `!>=` `!<` `!<=` | number, date, duration | Negated comparison — desugars to `NOT (field op value)` |
+
+The negated comparisons exist so missing-field semantics are correct.
+`total!>50000` returns **`true`** when `total` is missing (because `total>50000` is `false`, and `NOT false = true`). A naive operator flip — `total<=50000` — would return `false` for missing fields, which is rarely what end users mean.
+
+```
+state=draft               # equality
+state!=cancelled          # not equal
+total>50000               # comparison
+total!>50000              # equivalent to NOT total>50000
+name=John*                # wildcard (prefix)
+name=*son                 # wildcard (suffix)
+name=*urgent*             # wildcard (contains)
+```
+
+---
+
+## Range
+
+```
+created_at:2026-01-01..2026-03-31     # inclusive on both ends
+total:1000..5000                       # numeric range
+ttl.duration:30s..5m                   # duration range
+created_at:daysAgo(30)..now()          # function endpoints
+```
+
+A range parses as a single qualifier with both `Value` and `EndValue` populated, so `Visitor[T]` implementations get to render it as `BETWEEN`, `>=...AND...<=`, or whatever the target prefers.
+
+---
+
+## Presence
+
+```
+tire_size       # field exists and is non-empty
+```
+
+Presence sits at the boundary of "search bar terms" — `tire_size` reads naturally as "items that have a tire size." The field config must allow `OpPresence` for the bare-field form to validate. Selectors over list fields do **not** require `OpPresence` on the list field.
+
+---
+
+## Logical Operators
+
+```
+state=draft AND total>1000
+state=draft OR state=issued
+NOT state=cancelled
+(state=draft OR state=issued) AND total>50000
+state=draft total>1000                 # implicit AND (juxtaposition)
+state=draft and total>1000             # case-insensitive
+```
+
+Precedence (high → low): `NOT` > `AND` (and juxtaposition) > `OR`. Use parentheses to override.
+
+<Aside type="caution">
+Implicit AND lets `state=draft total>1000` parse the same as the explicit form. This is intentional for search bars but means a typo like `state= draft` (extra space) becomes two terms ANDed together — the parser will reject because `draft` alone is not a valid presence target unless `draft` is a declared field. Validate early.
+</Aside>
+
+---
+
+## `IN` Shorthand
+
+```
+state IN (draft, issued, paid)
+year IN (2020, 2021, 2022)
+name IN ("John Doe", "Jane Smith")
+```
+
+`IN` desugars to an OR chain at parse time, so any operator-aware code generator handles it for free. The left side must be a bare field; the right side accepts any mix of literal value types (numbers, dates, durations, quoted strings).
+
+The desugared AST is left-leaning:
+
+```
+state IN (a, b, c)   →   (state=a OR state=b) OR state=c
+```
+
+This affects how round-trip rendering displays the query — `ast.String` emits the OR form, not the original `IN`.
+
+---
+
+## Selectors
+
+Selectors apply a predicate to a list-valued field.
+
+| Form | Meaning | Empty list | Missing field |
+|------|---------|------------|---------------|
+| `field@first` | List exists and has ≥ 1 element | `false` | `false` |
+| `field@last` | Same as `@first` but distinct for codegen | `false` | `false` |
+| `field@(inner)` | EXISTS — at least one element satisfies `inner` | `false` | `false` |
+| `field@any(inner)` | Alias of `@(inner)` | `false` | `false` |
+| `field@all(inner)` | Universal — every element satisfies `inner` | `true` (vacuous) | `false` |
+| `field@none(inner)` | No element satisfies `inner` | `true` | `true` (≡ empty list) |
+
+```
+orders@first                              # non-empty list
+orders@(status=shipped)                   # at least one shipped
+orders@all(price>0)                       # every order has a positive price
+orders@none(status=cancelled)             # nothing cancelled
+orders@(status=shipped AND qty>=2)        # compound inner predicate
+(orders@(status=shipped) OR orders@(status=delivered)) AND total>500
+NOT line_items@(price>100)
+```
+
+Inside `@(...)`, `@any`, `@all`, `@none`, the element shape can be:
+
+- `map[string]any` — inner fields resolve by key
+- A Go struct with `query:"..."` tags — inner fields resolve by tag
+- Any other type — inner field lookups return `(nil, false)` and never match
+
+<Aside type="note">
+`Visitor[T]` codegen for selectors is the consumer's responsibility — the library does not translate `@(...)` into SQL `EXISTS` or JSON path queries. See `examples/sql/main.go` in the query repo for a translation to correlated `EXISTS` subqueries (with double-negation for `@all`).
+</Aside>
+
+---
+
+## Functions
+
+Functions appear in three positions:
+
+### As a field transform
+
+```
+lower(name)=john*           # case-insensitive prefix
+upper(name)=JOHN
+trim(description)=hello
+len(name)>5
+year(created_at)=2026
+month(created_at)=3
+day(created_at)=15
+```
+
+The function's first argument is the field being transformed. The qualifier validates the function's field references but treats the return type as opaque — the comparison is done at match time after the function runs.
+
+### As a boolean predicate
+
+```
+contains(tags, "urgent")           # field contains literal
+startsWith(name, prefix)           # field starts with another field's value
+endsWith(name, suffix)
+```
+
+Standalone calls evaluate to `true`/`false` directly.
+
+### As a value generator
+
+```
+created_at>=now()                  # function in value position
+total>=daysAgo(7)                  # used as a date
+created_at:daysAgo(30)..now()      # functions on both ends of a range
+coalesce(nickname, name)="John"    # falls through to name when nickname is empty
+if(active, "on", "off")="on"       # ternary via builtin
+```
+
+`coalesce(a, b, c)` returns the first non-`nil`, non-empty argument. `if(cond, a, b)` returns `a` if `cond` is truthy, else `b`. Both fill the ternary/nullish gap without adding new syntax.
+
+### Built-in functions
+
+| Function | Purpose |
+|----------|---------|
+| `lower`, `upper`, `trim`, `len` | String transforms |
+| `contains`, `startsWith`, `endsWith` | String predicates |
+| `year`, `month`, `day` | Date component extraction |
+| `now`, `today`, `daysAgo(n)` | Date generators |
+| `coalesce`, `if` | Nullish / ternary |
+
+Disable the built-in registry with `eval.WithNoBuiltins()` if you want full control. Register your own with `eval.WithFunctions(...)`:
+
+```go
+prog, err := eval.Compile(q, fields,
+    eval.WithFunctions(eval.Func{
+        Name: "wordCount",
+        Call: func(args ...any) (any, error) {
+            return int64(len(strings.Fields(fmt.Sprint(args[0])))), nil
+        },
+    }),
+)
+```
+
+---
+
+## Arithmetic in Value Position
+
+```
+total>=50000*1.1                         # 55000
+total>=(50000+1000)*1.1                  # 56100 — parens override precedence
+created_at>=now()-7d                     # date minus duration → date
+created_at>=now()-7d*2                   # duration * number → duration
+created_at:daysAgo(30)..now()-1d         # range with arithmetic endpoints
+```
+
+Operands can be numeric literals, durations, dates, function calls, or sub-arithmetic in parens. Precedence is `* / % > + -`; parens override.
+
+Type promotion mirrors Go:
+
+| Operand types | Result |
+|---------------|--------|
+| `int op int` | `int` (except `/` which is always float) |
+| `int op float` or `float op int` | `float` |
+| `time ± duration` | `time` |
+| `duration ± duration` | `duration` |
+| `duration * number` or `number * duration` | `duration` |
+
+Division and modulo by zero return `nil`, which makes the surrounding comparison short-circuit to `false`.
+
+<Aside type="caution">
+Bare field references are **not** valid arithmetic operands — `total>=base*1.1` does not parse. This is intentional: hyphenated field names (`customer_id-suffix`) would collide with subtraction. Use a custom function: `scaled(total)>50000`.
+</Aside>
+
+---
+
+## Validation Rules
+
+Every parsed expression is validated against a `[]validate.FieldConfig`. Validation runs three checks per qualifier:
+
+1. **Field exists** — the field name must be declared (or marked `Nested: true` for dotted paths like `labels.dev`).
+2. **Operator allowed** — `AllowedOps` on the config gates which operators apply. Convenience presets: `TextOps`, `NumericOps`, `DateOps`, `DurationOps`, `BoolOps`.
+3. **Type compatible** — the literal value's parsed type must match the declared field type. Function- and arithmetic-valued operands skip this check (the return type is opaque); field references inside them are still validated.
+
+A single `Validate` call collects every error rather than failing on the first one, so users see all issues at once.
+
+### Custom rules
+
+For rules beyond field/type/op (per-tenant access, cross-field constraints, value ranges), implement `validate.AstValidator` and wire it via `eval.WithCustomValidator`:
+
+```go
+type tenantValidator struct{ /* ... */ }
+
+func (t *tenantValidator) GetFieldConfig(name string) (validate.FieldConfig, bool) {
+    if t.denied[name] {
+        return validate.FieldConfig{}, false   // hides a declared field
+    }
+    cfg, ok := t.fields[name]
+    return cfg, ok
+}
+
+func (t *tenantValidator) ValidateCustomRules(root ast.Expression) error {
+    // Walk the AST. Return *validate.Error or validate.ErrorList to preserve
+    // positions and kinds; any other error is wrapped as ErrCustomRule.
+    return nil
+}
+```
+
+---
+
+## Round-Trip Fidelity
+
+`ast.String(ast.Parse(q))` returns a canonical string equal to `q` for every normalized query — including arithmetic, function calls, quoted strings with escapes, and nested selectors. Two known normalizations:
+
+- `state IN (a, b)` → `state=a OR state=b`
+- `total!>50000` → `NOT total>50000`
+- `a=1 and b=2` → `a=1 AND b=2` (keyword case normalized)
+
+These are deliberate: the IN form and the negated comparison are pure syntactic sugar that doesn't survive AST construction; the AST stores the canonical structural form.
