@@ -150,6 +150,7 @@ export default defineConfig({
             { label: 'Hooks', slug: 'guides/hooks' },
             { label: 'Approval Workflows', slug: 'guides/approvals' },
             { label: 'Translations (i18n)', slug: 'guides/i18n' },
+            { label: 'Using Entities', slug: 'guides/using-entities' },
           ],
         },
         {
