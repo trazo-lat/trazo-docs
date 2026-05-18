@@ -1,0 +1,320 @@
+---
+title: Building Notification Rule Builder UIs
+description: How a UI discovers the catalog needed to compose tenant-side notification rules — events, channels, state-machine DAGs, target/action enums, predicate grammar and entity types — without hardcoding anything per tenant.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The notifications module ships a tenant-scoped, read-only metadata API under `/api/v1/tenants/{tenant_id}/notifications/metadata/*` so an admin UI can compose notification rules entirely from server-supplied catalogs. Nothing about which events exist, which channels are registered, which entity types a tenant uses, or which operators the predicate language supports is hardcoded in the client.
+
+This guide is for the engineer building the rule-builder UI. The companion guide [Sending Notifications](/guides/notifications) covers the runtime side — registering channels, dispatching rules and rendering templates.
+
+---
+
+## Sub-resources at a Glance
+
+| Endpoint | Returns | What the UI uses it for |
+|---|---|---|
+| `GET .../metadata/events` | Events emitted per enabled module, with optional payload schema | Trigger picker; predicate field selector; target-field selector; template variable picker |
+| `GET .../metadata/channels` | Registered channels + per-channel config schema | Channel dropdown; channel-specific config form |
+| `GET .../metadata/state-machines` | State machines per enabled module (statuses + transitions) | DAG visualization of status flow; `action_kind: resource` action picker |
+| `GET .../metadata/enums` | `target_type`, `action_kind`, `action_style`, `channel_type` with config schemas | Dropdowns; per-target / per-action-kind config forms |
+| `GET .../metadata/query-grammar` | Predicate DSL operators, logical combinators, value types, examples | Predicate / where-clause editor |
+| `GET .../metadata/entity-types` | Entity types registered for the tenant (via the entities module) | Entity-type filter for rules that scope by `(type_name, public_id)` |
+
+All six gate on the `notifications.rules.read` permission and filter to modules enabled for the tenant.
+
+<Aside type="note">
+A malformed `module.yaml` skips that module rather than failing the whole response — partial catalogs are surfaceable, never a 500.
+</Aside>
+
+---
+
+## Choosing a Trigger: `/events`
+
+The events endpoint groups every emittable event by its owning module. Each event optionally carries a payload schema, which the rule builder uses to populate downstream pickers.
+
+```http
+GET /api/v1/tenants/t1/notifications/metadata/events
+```
+
+```json
+{
+  "modules": [
+    {
+      "module": "documents",
+      "events": [
+        {
+          "name": "documents.signed",
+          "version": 1,
+          "description": "Fired when a signature is added to a document",
+          "payload": [
+            { "name": "document_id", "type": "string", "required": true, "description": "Public ID of the signed document" },
+            { "name": "signed_by",   "type": "string", "required": true, "description": "User ID of the signer" },
+            { "name": "signed_at",   "type": "date",   "required": true }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Payload field types
+
+| Type | UI input control |
+|---|---|
+| `string` | Text input. Wildcards (`*`) allowed in predicate values. |
+| `integer` / `float` | Numeric input. |
+| `boolean` | Checkbox. |
+| `date` | Date picker (ISO `YYYY-MM-DD`). |
+| `duration` | Duration input (e.g. `1d`, `4h`, `30m`, `2w`). |
+| `id` | Treat as an opaque reference; if `entity_type` is also set, render an entity-type-scoped picker. |
+| `object` / `array` | Treat as opaque for now; surface as a JSON path expression in the predicate editor. |
+
+<Aside type="tip">
+Modules opt in to payload schemas incrementally. An event with no `payload` is valid — render the predicate editor as a free-text field with grammar hints from `/query-grammar` instead of a typed field picker.
+</Aside>
+
+---
+
+## Rendering the Status Flow as a DAG: `/state-machines`
+
+When a rule wants to fire on a state transition, the UI needs the full graph for that resource. `/state-machines` returns each registered state machine per enabled module — the same `core.StateMachineConfig` the platform uses internally.
+
+```http
+GET /api/v1/tenants/t1/notifications/metadata/state-machines
+```
+
+```json
+{
+  "modules": [
+    {
+      "module": "documents",
+      "state_machines": [
+        {
+          "key": "status",
+          "statuses": {
+            "base": [
+              { "key": "draft",     "type": "initial" },
+              { "key": "published", "type": "active" },
+              { "key": "archived",  "type": "terminal" }
+            ]
+          },
+          "transitions": [
+            { "from": "draft",     "to": "published", "action": "publish", "label": "Publish" },
+            { "from": "published", "to": "archived",  "action": "archive", "label": "Archive", "style": "destructive" }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+### DAG rendering recipe
+
+- **Nodes**: one per entry in `statuses.base` (plus `statuses.custom` if the tenant has extended the machine). Style by `type`: `initial` → entry node, `terminal` → exit node, `active` → standard.
+- **Edges**: one per transition. Show the `label` on the edge; fall back to `action` if missing. The `style` field (`default` | `confirm` | `destructive` | `warning`) gives the edge color.
+- **Wildcards**: a transition with `from: "*"` applies from every state except those listed in `exclude_from`. Render it as a multi-source edge.
+- **Action picker for rules**: the same transition list doubles as the action vocabulary for `action_kind: resource`. The `action` field is the value to submit; `label`, `style`, `confirm`, `confirm_message` are direct UI hints.
+
+---
+
+## Channels: `/channels`
+
+```http
+GET /api/v1/tenants/t1/notifications/metadata/channels
+```
+
+```json
+{
+  "channels": [
+    { "type": "email",   "description": "Deliver the notification by email through the configured SMTP/Resend provider." },
+    { "type": "in_app",  "description": "Deliver the notification to the user's in-app inbox." },
+    { "type": "slack",   "description": "Post the notification to a Slack channel via the incoming webhook URL.",
+      "config_schema": [{ "key": "webhook_url", "type": "string", "required": true, "description": "Slack incoming-webhook URL." }] },
+    { "type": "webhook", "description": "POST a JSON payload to the configured webhook URL.",
+      "config_schema": [{ "key": "webhook_url", "type": "string", "required": true, "description": "HTTPS endpoint that receives the rendered payload." }] }
+  ]
+}
+```
+
+`config_schema` is optional. When present, render one field per entry into the channel-specific config form. The `type` field is JSON-Schema-ish (`string` / `boolean` / etc.) and maps directly to input controls.
+
+The channel set is deployment-dynamic: if a deployment doesn't configure SMTP, `email` is absent. Don't hardcode a fixed channel list — render from this endpoint.
+
+---
+
+## Targets and Actions: `/enums`
+
+```http
+GET /api/v1/tenants/t1/notifications/metadata/enums
+```
+
+The four enum vocabularies the rule builder needs. `target_types` and `action_kinds` carry `config_schema` so the per-target and per-action-kind forms are server-driven (no hardcoded "if kind=link then ask for URL" branches on the client).
+
+```json
+{
+  "target_types": [
+    { "value": "user_field",  "description": "Resolve a single user from a user ID in the event payload.",
+      "config_schema": [{ "key": "field", "type": "string", "required": true, "description": "Payload field name that holds the user ID (e.g. \"assigned_to\")." }] },
+    { "value": "role",        "description": "Deliver to every active member with the given role in the tenant.",
+      "config_schema": [{ "key": "role",  "type": "string", "required": true, "description": "Role name (matches roles.name)." }] },
+    { "value": "email_field", "description": "Send to a raw email address taken from the event payload.",
+      "config_schema": [{ "key": "field", "type": "string", "required": true }] }
+  ],
+  "action_kinds": [
+    { "value": "link",     "description": "Navigate to a URL or in-app route.",
+      "config_schema": [
+        { "key": "url",             "type": "string",  "required": true, "description": "Absolute URL or in-app route. Supports {{payload.*}} interpolation." },
+        { "key": "open_in_new_tab", "type": "boolean" }
+      ] },
+    { "value": "rest",     "description": "Issue an HTTP request to a registered endpoint.",
+      "config_schema": [
+        { "key": "endpoint",      "type": "string", "required": true, "description": "Registered endpoint key (matches an entry in tenant_endpoints)." },
+        { "key": "method",        "type": "string" },
+        { "key": "body_template", "type": "string" }
+      ] },
+    { "value": "resource", "description": "Delegate to the state-machine engine for a referenced resource.",
+      "config_schema": [
+        { "key": "action",      "type": "string", "required": true, "description": "Transition action name from the resource's state machine (see /state-machines)." },
+        { "key": "machine_key", "type": "string" }
+      ] },
+    { "value": "dismiss",  "description": "Mark the notification read with no other side effect." }
+  ],
+  "action_styles": [
+    { "value": "default" }, { "value": "confirm" }, { "value": "destructive" }, { "value": "warning" }
+  ],
+  "channel_types": [
+    { "value": "email" }, { "value": "in_app" }, { "value": "slack" }, { "value": "webhook" }
+  ]
+}
+```
+
+### Wiring `target_type=user_field` to a payload field selector
+
+When the user picks `user_field` as the target, the UI needs to choose which payload field holds the user ID. Cross-reference the chosen event's `payload` (from `/events`) — present fields where `type=="string"` (or `type=="id"`) as the options.
+
+### Wiring `action_kind=resource` to the action picker
+
+`resource` actions come from a state machine's `transitions`. After the user picks `resource`, look up the triggering event's owning module in `/state-machines` and present the union of `transitions[].action` values. Show the transition's `label` as the dropdown label, fall back to `action`.
+
+---
+
+## Predicate Editor: `/query-grammar`
+
+Rules can carry a `where:` predicate evaluated by `github.com/heyllave/query`. The grammar endpoint surfaces the supported operator set, logical combinators, value types and example queries so the predicate editor can validate input without bundling the parser.
+
+```http
+GET /api/v1/tenants/t1/notifications/metadata/query-grammar
+```
+
+```json
+{
+  "operators": [
+    { "symbol": "=",  "description": "Equals.",     "applies_to": ["string", "integer", "float", "boolean", "date", "duration"] },
+    { "symbol": "!=", "description": "Not equal.",  "applies_to": ["string", "integer", "float", "boolean", "date", "duration"] },
+    { "symbol": ">",  "description": "Greater than.", "applies_to": ["string", "integer", "float", "date", "duration"] },
+    { "symbol": ">=", "description": "Greater than or equal.", "applies_to": ["string", "integer", "float", "date", "duration"] },
+    { "symbol": "<",  "description": "Less than.",   "applies_to": ["string", "integer", "float", "date", "duration"] },
+    { "symbol": "<=", "description": "Less than or equal.", "applies_to": ["string", "integer", "float", "date", "duration"] },
+    { "symbol": "..", "description": "Range (inclusive). Example: `amount 100..500`.", "applies_to": ["string", "integer", "float", "date", "duration"] },
+    { "symbol": ":",  "description": "Equality with wildcard support in strings. Example: `name:Acme*`.", "applies_to": ["string"] }
+  ],
+  "logical_operators": [
+    { "value": "AND", "description": "Both operands must hold." },
+    { "value": "OR",  "description": "At least one operand must hold." },
+    { "value": "NOT", "description": "Negate the operand." }
+  ],
+  "value_types": [
+    { "value": "string",   "description": "Quoted or bare string. Wildcards (*) allowed inside strings." },
+    { "value": "integer" },
+    { "value": "float" },
+    { "value": "boolean" },
+    { "value": "date",     "description": "ISO date (YYYY-MM-DD)." },
+    { "value": "duration", "description": "Relative duration (e.g. 1d, 4h, 30m, 2w)." }
+  ],
+  "examples": [
+    "status = \"draft\"",
+    "amount > 1000 AND currency = \"USD\"",
+    "signed_at .. 2026-01-01..2026-12-31",
+    "NOT (state = \"archived\")"
+  ]
+}
+```
+
+### Building a typed predicate editor
+
+When the chosen event has a `payload` schema, the UI can render a field-picker → operator-picker → value-input flow:
+
+1. **Field picker** lists payload field names. Track each field's `type`.
+2. **Operator picker** filters `operators` by `applies_to` matching the picked field's `type`.
+3. **Value input** picks the input control by the field's `type` (text, number, date, duration, boolean).
+4. **Combinators** (`AND` / `OR` / `NOT`) are added between predicates from the `logical_operators` list.
+
+For events with no payload schema, fall back to a free-text input and show the `examples` array as inline hints.
+
+---
+
+## Scoping by Entity Type: `/entity-types`
+
+When the tenant uses the [entities](/guides/using-entities) module, rules may target events that reference an entity type. `/entity-types` lists the types registered for the tenant — types installed from the catalog (`vehicle`, `customer`, `patient`, ...) and types the tenant has defined custom.
+
+```http
+GET /api/v1/tenants/t1/notifications/metadata/entity-types
+```
+
+```json
+{
+  "entity_types": [
+    { "type_name": "customer", "display_name": "Customer", "active": true,  "from_catalog": true },
+    { "type_name": "vehicle",  "display_name": "Vehicle",  "active": true,  "from_catalog": true },
+    { "type_name": "case_file", "display_name": "Case File", "description": "Tenant-defined", "active": false }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `type_name` | Stable identifier. Use this when posting back to rule CRUD. |
+| `display_name` | Human label. Render in dropdowns. |
+| `active` | Whether the type accepts new entity instances. Inactive types are still surfaced — the UI decides whether to grey them out or hide. |
+| `from_catalog` | `true` if installed from the platform catalog; `false` if tenant-defined. |
+
+<Aside type="note">
+If the tenant has the entities module disabled (or the deployment doesn't ship it), the endpoint returns an empty list — same shape, no error. Hide the entity-type filter in that case.
+</Aside>
+
+When an event's payload field has `"type": "id"` and `"entity_type": "vehicle"`, the rule editor can wire that picker to filter entity instances of that type — via the entities module's own list endpoints, not via these metadata endpoints.
+
+---
+
+## Putting It All Together
+
+A typical rule-builder flow:
+
+1. **Load catalogs in parallel** on mount: `/events`, `/channels`, `/state-machines`, `/enums`, `/query-grammar`, `/entity-types`.
+2. **Trigger section**: pick a module → pick an event → if the event has a payload, surface the field list for later steps.
+3. **Where section (optional)**: render the typed predicate editor against the event's payload, or fall back to free text with grammar hints.
+4. **Target section**: pick a `target_type` from enums → render the corresponding `config_schema` form. For `user_field` / `email_field`, the `field` selector reads from the event's payload.
+5. **Channel section**: pick one or more `channel_type` values from enums → render each channel's `config_schema` form.
+6. **Action section** (per channel or per rule): pick an `action_kind` → render its `config_schema`. For `action_kind: resource`, the `action` field reads from the relevant state machine's transitions.
+7. **Submit**: post the assembled rule to the rules CRUD endpoint (not covered here).
+
+All catalogs are cacheable per-tenant for the session — they only change when modules are enabled/disabled, channels reconfigured, entity types added, or state machines updated.
+
+---
+
+## Permissions
+
+Every metadata endpoint requires `notifications.rules.read`. Grant this to any role that should reach the rule-builder UI — typically the same role that gets `notifications.rules.write` for save.
+
+---
+
+## Related
+
+- [Sending Notifications](/guides/notifications) — runtime side: channels, dispatching rules, template rendering.
+- [Status Machines](/guides/status-machines) — declarative state-machine config (the source of `/state-machines`).
+- [Using Entities in Modules](/guides/using-entities) — entities module consumption guide; explains the `entity_type` field on payloads.
+- [Hooks](/guides/hooks) — tenant-side webhook / expression hooks. **Not** how rules block operations; rules respond to events.

@@ -146,6 +146,7 @@ export default defineConfig({
           label: 'Subsystem Guides',
           items: [
             { label: 'Sending Notifications', slug: 'guides/notifications' },
+            { label: 'Building Notification Rule Builder UIs', slug: 'guides/notification-rule-builder' },
             { label: 'Status Machines', slug: 'guides/status-machines' },
             { label: 'Hooks', slug: 'guides/hooks' },
             { label: 'Approval Workflows', slug: 'guides/approvals' },
