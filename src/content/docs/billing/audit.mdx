@@ -1,0 +1,150 @@
+---
+title: Revenue Audit Log
+description: Immutable per-tenant log of every billing boundary event. The source of truth for finance reconciliation, SLA evidence, and dispute investigation.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Every threshold crossing, quota-exceeded hit, period rollover, and contract lifecycle transition is mirrored to a per-tenant **billing_audit_events** table at the moment the engine emits the corresponding event. The outbox is for external subscribers (which can lag or fall behind); the audit log is internal bookkeeping that finance / revenue can trust as the source of truth.
+
+## Table layout
+
+`tenant_<slug>.billing_audit_events` — lives in the tenant schema so the trail moves with the tenant if it is extracted to its own database (per the three-tier portability rule).
+
+```sql
+CREATE TABLE billing_audit_events (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    occurred_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    event_name      TEXT NOT NULL,
+    aggregate_type  TEXT NOT NULL DEFAULT '',
+    aggregate_id    TEXT NOT NULL DEFAULT '',
+    metric_key      TEXT NOT NULL DEFAULT '',
+    source          TEXT NOT NULL DEFAULT '',
+    payload         JSONB NOT NULL DEFAULT '{}',
+    context         JSONB NOT NULL DEFAULT '{}'
+);
+```
+
+Append-only by convention. The application layer has no UPDATE / DELETE paths against this table; retention pruning would be a separate explicit job (not implemented in v1).
+
+## What gets logged
+
+| Event name | Source | Fired when |
+|---|---|---|
+| `billing.quota.threshold_crossed` | engine.Reserve | usage crosses `warn_at_pct` for a metric in the current period |
+| `billing.quota.exceeded` | engine.Reserve | usage crosses the hard limit (whether allowed via grace or denied) |
+| `billing.quota.period_rolled` | engine.Reserve | a meter's previous window closed during this Reserve |
+| `tenant.contract.created` | contracts.Create | new contract created for a tenant |
+| `tenant.contract.renewed` | contracts.Renew | active contract extended (and optionally swapped plans) |
+| `tenant.contract.expired` | contracts.ProcessExpirations | active/trial contract crossed its `ends_at` |
+| `tenant.contract.cancelled` | contracts.Cancel | contract terminated (tenant or platform) |
+| `tenant.contract.payment_status_changed` | contracts.SetPaymentStatus | payment state transitioned |
+
+Each row captures:
+
+- `payload` — the same JSON the outbox subscriber receives (metric_key, limits, plan_slug, etc.)
+- `context` — a snapshot of `tenant_id`, `tenant_slug`, `tenant_status`, `user_id`, `membership_role`, `request_id` at emission time
+
+The context snapshot makes the audit log **self-contained** — you can replay the state of the tenant + acting user at the moment of every event without joining against rows that may have changed since.
+
+## Read API
+
+```http
+GET /api/v1/tenants/tnt_acme/billing/audit
+    ?since=2026-05-01T00:00:00Z
+    &event_name=billing.quota.exceeded
+    &metric_key=conversations.messages
+    &limit=100
+```
+
+| Param | Type | Default | Notes |
+|---|---|---|---|
+| `since` | RFC3339 timestamp | (unfiltered) | Only return events at or after this time |
+| `event_name` | string | (unfiltered) | Exact match on the event name |
+| `metric_key` | string | (unfiltered) | Filter to one metric |
+| `limit` | int | 100 | Min 1, capped at 1000 |
+
+Permission `billing.usage.read`. Sorted `occurred_at DESC`.
+
+```json
+{
+  "events": [
+    {
+      "occurred_at": "2026-05-18T14:30:21Z",
+      "event_name": "billing.quota.exceeded",
+      "aggregate_type": "quota_usage",
+      "aggregate_id": "conversations.messages",
+      "metric_key": "conversations.messages",
+      "source": "rule",
+      "payload": {
+        "current": 5001,
+        "limit": 5000,
+        "effective_cap": 5500,
+        "grace_active": true,
+        "plan_slug": "pro"
+      },
+      "context": {
+        "tenant_id": "tnt_acme",
+        "tenant_slug": "acme",
+        "tenant_status": "active",
+        "user_id": "usr_alice",
+        "membership_role": "role_admin",
+        "request_id": "req-abc-123"
+      }
+    }
+  ]
+}
+```
+
+## Use cases
+
+### Finance reconciliation
+
+> "Charge the EU-region $0.001 overage rate for every `billing.quota.exceeded` event on `conversations.messages` last month."
+
+```http
+GET /api/v1/tenants/tnt_acme/billing/audit
+    ?since=2026-05-01T00:00:00Z
+    &event_name=billing.quota.exceeded
+    &metric_key=conversations.messages
+    &limit=1000
+```
+
+Pull the page, sum `payload.current - payload.limit` per row, multiply by the rate, send to billing provider. The `context` lets you cross-reference which user / request triggered each overage.
+
+### SLA evidence
+
+> "Prove we didn't deny any messages above 99.5% availability."
+
+```http
+GET /api/v1/tenants/tnt_acme/billing/audit
+    ?event_name=billing.quota.exceeded
+    &since=2026-04-01T00:00:00Z
+```
+
+Filter rows where `payload.grace_active = false` — those are real denials. Compute the ratio against the meter's recorded volume from the same window.
+
+### Dispute investigation
+
+> "Customer says they got a 402 yesterday at 14:30. What happened?"
+
+```http
+GET /api/v1/tenants/tnt_acme/billing/audit
+    ?since=2026-05-17T14:25:00Z
+    &event_name=billing.quota.exceeded
+```
+
+The row's `context` shows who was acting, which request ID, and the `payload` shows which limit source matched (rule / override / plan) — so you can trace whether the right cap was in effect.
+
+## Operational notes
+
+- **Writes are best-effort.** A failed audit insert logs but never blocks `Reserve` or any contract operation. In rare cases a successful event emission may not have a corresponding audit row — subscribers should treat the audit log as "high-fidelity ground truth, not strict deduplication."
+- **No public ID exposure.** Audit rows are not addressable individually — they're only streamed back chronologically via the list endpoint. The internal UUID is intentionally hidden from JSON.
+- **Indexed for two hot paths.** `occurred_at DESC` for chronological pagination, `(event_name, occurred_at DESC)` for filtered scans, `(metric_key, occurred_at DESC)` for per-metric reports. Other filters trigger table scans — acceptable for admin tooling, not for end-user APIs.
+- **Retention is on you.** The table grows linearly with activity. A retention job (not implemented in v1) would prune rows older than your finance / compliance window.
+
+## See also
+
+- [Thresholds and grace](/billing/thresholds) — what triggers the quota events captured here
+- [Contracts](/billing/contracts) — what triggers the contract events captured here
+- [HTTP API reference](/billing/api) — the full `/billing/audit` endpoint surface

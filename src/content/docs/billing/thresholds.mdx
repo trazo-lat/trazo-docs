@@ -1,0 +1,186 @@
+---
+title: Soft Limits, Thresholds, and Grace
+description: Warn admins before they hit a hard cap. Configure per-metric warning thresholds and per-limit grace allowances so tenants see "approaching cap" before they see a 402.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A pure hard-limit system is binary: under the cap, allowed; at the cap, 402. Real billing systems need a gradient — warn at 80%, hard-block at 100%, optionally allow 10% overage with the bill flagged for review. Quotas express this through two knobs:
+
+| Knob | Where it lives | Purpose |
+|---|---|---|
+| `warn_at_pct` | on the metric definition (module.yaml) | The percentage of the effective limit at which `Decision.Warning` flips to true and `billing.quota.threshold_crossed` fires |
+| `grace_pct` | on each limit source (plan quota, override, rule) | Extra band above the raw limit where Reserve still succeeds but `Decision.GraceActive` is true |
+
+Both default to 0 (no soft warn, no grace) — the engine is back-compatible with hard-cap-only setups.
+
+## Declaring a warning threshold
+
+`warn_at_pct` belongs to the metric because it's a property of the kind of thing being measured, not a property of any single limit. Put it in your `module.yaml`:
+
+```yaml
+quotas:
+  - key: conversations.messages
+    name: Messages
+    kind: meter
+    default_reset: month
+    unit: messages
+    warn_at_pct: 80      # fire threshold_crossed at 80% of effective limit
+
+  - key: tenant.users.count
+    name: Users
+    kind: counter
+    unit: users
+    warn_at_pct: 90      # cooler metric — warn closer to the line
+```
+
+The engine fires `billing.quota.threshold_crossed` **once per period** (deduped via `quota_usage.last_threshold_at_pct`) the first time usage crosses the line. Subsequent Reserves above the line don't re-fire — the warning is a one-shot signal.
+
+## Declaring grace on a limit
+
+`grace_pct` belongs to the limit source because grace is a commercial decision admins make per-plan, per-tenant, or per-rule.
+
+### Plan-wide grace
+
+```http
+POST /api/v1/billing/plans/pro/quotas
+{
+  "metric_key": "conversations.messages",
+  "limit_value": 10000,
+  "reset_period": "month",
+  "grace_pct": 10              # allow up to 11,000 with grace_active=true
+}
+```
+
+### Per-tenant grace via override
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/overrides/conversations.messages
+{
+  "limit_value": 10000,
+  "reset_period": "month",
+  "grace_pct": 25,             # be lenient for this customer
+  "reason": "good standing customer, 25% grace approved by sales"
+}
+```
+
+### Per-condition grace via rule
+
+```http
+POST /api/v1/tenants/tnt_acme/billing/rules
+{
+  "metric_key": "conversations.messages",
+  "priority": 100,
+  "condition": "plan.slug=enterprise",
+  "limit_value": 50000,
+  "reset_period": "month",
+  "grace_pct": 20,
+  "label": "Enterprise — generous grace"
+}
+```
+
+When a rule matches, its `grace_pct` overrides whatever grace was set at the plan / override level. The matched limit source's grace is the only one that counts.
+
+## Decision shape
+
+Every Check / Reserve decision carries the soft-limit state so callers can branch on it without re-reading the metric:
+
+```json
+{
+  "metric_key": "conversations.messages",
+  "allowed": true,
+  "limit": 10000,
+  "current": 8500,
+  "remaining": 1500,
+  "warning": true,
+  "warn_at_pct": 80,
+  "effective_cap": 11000,
+  "grace_pct": 10,
+  "grace_active": false
+}
+```
+
+| Field | When set |
+|---|---|
+| `warning` | usage has crossed the metric's `warn_at_pct` line |
+| `warn_at_pct` | mirror of the metric's setting, for context |
+| `effective_cap` | `limit * (1 + grace_pct/100)` — the hard gate Reserve uses |
+| `grace_pct` | mirror of the matched limit's setting |
+| `grace_active` | reservation succeeded only because of grace (`current > limit && current ≤ effective_cap`) |
+
+`Allowed=true && Warning=true && GraceActive=false` is the "warning band" — usage between 80% and 100% of the limit. `Allowed=true && GraceActive=true` is the "grace band" — usage between 100% and `effective_cap`. `Allowed=false` always means the effective cap was hit.
+
+## Threshold events
+
+The engine emits structured events to the transactional outbox at every meaningful boundary. Subscribe via `core.Events.SubscribeScoped` to wire warnings into notifications, dunning workflows, or custom audit pipelines.
+
+| Event | Fired when | Dedup window |
+|---|---|---|
+| `billing.quota.threshold_crossed` | usage first crosses `warn_at_pct` in the current period | once per period per metric |
+| `billing.quota.exceeded` | usage first crosses the hard limit (allowed via grace *or* denied) | once per period per metric |
+| `billing.quota.period_rolled` | a meter's previous window closed during this Reserve | per period rollover |
+
+Payload examples:
+
+```json
+// billing.quota.threshold_crossed
+{
+  "metric_key": "conversations.messages",
+  "current": 8501,
+  "limit": 10000,
+  "warn_at_pct": 80,
+  "source": "plan",
+  "plan_slug": "pro",
+  "effective_cap": 11000
+}
+
+// billing.quota.exceeded (allowed via grace)
+{
+  "metric_key": "conversations.messages",
+  "current": 10001,
+  "limit": 10000,
+  "effective_cap": 11000,
+  "grace_active": true,
+  "source": "plan",
+  "plan_slug": "pro"
+}
+
+// billing.quota.period_rolled
+{
+  "metric_key": "conversations.messages",
+  "previous_period_start": "2026-04-01T00:00:00Z",
+  "previous_period_end":   "2026-05-01T00:00:00Z",
+  "previous_value": 9237,
+  "plan_slug": "pro",
+  "limit": 10000
+}
+```
+
+<Aside type="tip">
+Threshold events live on the same transactional outbox as every other platform event. Subscribers get at-least-once delivery and can fall behind without losing data. The engine also mirrors every event row to the per-tenant [audit log](/billing/audit) so finance / revenue have an immutable record even if a subscriber drops.
+</Aside>
+
+## End-to-end example
+
+A pro-tier tenant is approaching their 10,000 message-per-month cap. The plan has `grace_pct: 10` and the metric has `warn_at_pct: 80`. Here's the sequence:
+
+1. Message #8,000 arrives. `Reserve` returns `Warning=false, Allowed=true`.
+2. Message #8,001 arrives. Crossing 80% of 10,000. `Warning=true, Allowed=true`. **`billing.quota.threshold_crossed` fires.** Subscriber sends a "you're approaching your cap" email.
+3. Messages #8,002 … #10,000. Each returns `Warning=true, Allowed=true`. Event does *not* re-fire (deduped via `last_threshold_at_pct`).
+4. Message #10,001 arrives. Just crossed the hard limit but within grace. `Warning=true, Allowed=true, GraceActive=true`. **`billing.quota.exceeded` fires.** Subscriber surfaces "you're over your limit" in the admin UI.
+5. Messages #10,002 … #11,000. Each returns `GraceActive=true, Allowed=true`. No re-fire.
+6. Message #11,001 arrives. Past the effective cap. `Allowed=false`. Reserve returns 402.
+7. Period ends. Next Reserve in the new period: `period_rolled` fires with `previous_value: 11000`. `last_threshold_at_pct` resets, the cycle starts over.
+
+## Operational notes
+
+- **Threshold events are best-effort.** A failed Emit logs a warning but never blocks `Reserve`. The audit log row is also best-effort — if it fails, the operation still succeeds.
+- **Dedup is per-period.** `last_threshold_at_pct` is reset on period rollover for meters. Counters track it across the lifetime of the metric (counters don't roll), so a re-armed threshold event needs an explicit reset (admin endpoint TBD).
+- **Grace is not free.** Grace consumption is still tracked in `quota_usage.current_value` — the post-period telemetry sees the full overage. A billing-provider integration can charge it back via webhook on the `exceeded` event.
+- **Grace doesn't apply to flag metrics.** Flags are binary; the `grace_pct` field is silently ignored when set on a flag's plan quota.
+
+## See also
+
+- [Conditional rules](/billing/rules) — rules can carry their own `grace_pct` to give specific tenant/role/region combinations more lenient overage
+- [Audit log](/billing/audit) — every threshold + exceeded + period event is mirrored to the immutable per-tenant log
+- [HTTP API reference → Plans + Overrides](/billing/api) — `grace_pct` field in request bodies

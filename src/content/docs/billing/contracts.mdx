@@ -1,0 +1,171 @@
+---
+title: Subscription Contracts
+description: The temporal layer over plan assignment. Tracks start / end dates, auto-renewal, and payment status separately from the engine's read path so finance has a clean source of truth.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A **contract** is the platform's commercial agreement with one tenant: when did their term start, when does it end, are they auto-renewing, and what's their payment state? It's distinct from the [`tenant_plans`](/billing/plans) assignment (which the engine reads on every Reserve) — contracts add the temporal + payment dimensions on top.
+
+| Concern | Where it lives |
+|---|---|
+| Which plan is the engine using right now? | `tenant_plans` (engine hot path) |
+| When did this term start, when does it end? | `tenant_contracts.started_at` / `ends_at` |
+| Is the tenant paying? | `tenant_contracts.payment_status` |
+| Should we charge them again at term end? | `tenant_contracts.auto_renew` |
+
+Multiple contracts can exist per tenant historically; the **active one** (status in `trial` / `active` / `past_due`) is the source of truth for the current period.
+
+## Contract status
+
+```
+trial ───────────renew────────────▶ active
+  │                                   │
+  │                                   ├─cancel──▶ cancelled
+  │                                   │
+  │                              payment past_due
+  │                                   │
+  │                                   ▼
+  │                                past_due ──cancel──▶ cancelled
+  │                                   │              ──payment current──▶ active
+  │                                   ▼
+  │                               suspended
+  │
+  └─ends_at past──▶ expired
+```
+
+| Status | Type | Meaning |
+|---|---|---|
+| `trial` | active | Pre-paid evaluation period |
+| `active` | active | Paid, in-period |
+| `past_due` | active | Payment overdue, still serving (grace before suspension) |
+| `suspended` | terminal-ish | Service halted pending payment (admins control re-activation) |
+| `cancelled` | terminal | Ended by tenant or platform |
+| `expired` | terminal | Term ended at `ends_at` without renewal |
+
+## Payment status
+
+Tracked separately from contract status because they're updated by different signals:
+
+| Payment status | Updated by | Meaning |
+|---|---|---|
+| `current` | webhook / manual | Latest invoice paid |
+| `pending` | webhook | Payment in flight |
+| `past_due` | webhook | Invoice overdue |
+| `failed` | webhook | Last charge failed |
+| `unknown` | default | No payment signal yet (e.g. trial) |
+
+`SetPaymentStatus` implements one auto-flip rule:
+
+- `payment=past_due` → contract flips to `past_due`
+- `payment=current` from `past_due` → contract restores to `active`
+
+Other payment transitions don't flip contract status, because admins typically want to keep an active tenant serving during a transient `pending` or `failed` window while a webhook catches up.
+
+## Lifecycle events
+
+The engine emits five events on `core.Events`. Subscribe via `core.Events.SubscribeScoped` to drive renewals, dunning workflows, or revenue audit:
+
+| Event | Fired by |
+|---|---|
+| `tenant.contract.created` | `Create` |
+| `tenant.contract.renewed` | `Renew` |
+| `tenant.contract.expired` | `ProcessExpirations` |
+| `tenant.contract.cancelled` | `Cancel` |
+| `tenant.contract.payment_status_changed` | `SetPaymentStatus` (only when status actually changes) |
+
+Each payload includes:
+
+```json
+{
+  "contract_id": "contract_pro-...",
+  "tenant_id": "<uuid>",
+  "plan_slug": "pro",
+  "status": "active",
+  "payment_status": "current",
+  "started_at": "...",
+  "ends_at": "..."
+}
+```
+
+`payment_status_changed` adds `previous_payment_status` and `new_payment_status`.
+
+## Calling the engine
+
+The Go API mirrors the schema closely. From an admin handler or a webhook receiver:
+
+```go
+// Trial signup
+c, err := core.Contracts.Create(ctx, core.CreateContractInput{
+    TenantInternalID: tenant.InternalID,
+    PlanSlug:         "pro",
+    Status:           core.ContractStatusTrial,
+    Currency:         "USD",
+    BillingEmail:     "billing@acme.com",
+    AutoRenew:        true,
+    StartedAt:        time.Now().UTC(),
+    EndsAt:           ptr(time.Now().UTC().AddDate(0, 0, 14)), // 14-day trial
+})
+
+// Promote trial to paid on first invoice payment
+_, err = core.Contracts.SetPaymentStatus(ctx, c.ID, core.PaymentStatusCurrent)
+
+// Renew at term end (auto-renew worker or admin click)
+_, err = core.Contracts.Renew(ctx, c.ID, core.RenewContractInput{
+    EndsAt: ptr(time.Now().UTC().AddDate(1, 0, 0)),
+})
+
+// Process expirations on a schedule (cron, worker)
+count, err := core.Contracts.ProcessExpirations(ctx)
+```
+
+## Plan changes at renewal
+
+`Renew` accepts an optional `PlanSlug` field. Setting it switches the contract to a different plan as part of the renewal:
+
+```go
+core.Contracts.Renew(ctx, c.ID, core.RenewContractInput{
+    PlanSlug: "enterprise",
+    EndsAt:   ptr(time.Now().AddDate(1, 0, 0)),
+})
+```
+
+<Aside type="caution">
+Renewing the contract **does not** automatically update `tenant_plans`. In v1, admins must explicitly call `PUT /api/v1/tenants/{tenant_id}/billing/plan` to change the plan assignment. A future commit will make contracts the source of truth for plan resolution; for now they live in parallel.
+</Aside>
+
+## Storage
+
+The `public.tenant_contracts` table denormalises `plan_id` + `plan_slug` so a contract row survives plan catalog edits (rename, archive). Three indexes support the hot paths:
+
+- `(tenant_id, started_at DESC)` — list contracts for a tenant
+- `(tenant_id) WHERE status IN ('trial','active','past_due')` — find the active contract
+- `(ends_at) WHERE ends_at IS NOT NULL AND status IN ('trial','active')` — `ProcessExpirations` batch
+
+Contracts are global (in `public`, not the tenant schema) because finance often runs cross-tenant reports — total ARR, contracts by plan tier, renewal pipeline. Moving the table to per-tenant would force fan-out queries for revenue ops.
+
+## End-to-end flow
+
+A new tenant signs up for a pro trial:
+
+1. **Signup** → `Create` with `status=trial`, `ends_at=now+14d`, `auto_renew=true`. `tenant.contract.created` fires.
+2. **Day 1–13** → Engine reads `tenant_plans` (set to `pro` by the signup flow), serves traffic.
+3. **Day 14** → Webhook from billing provider: `charge.succeeded`. Handler calls `SetPaymentStatus(c.ID, current)`. Contract auto-promotes from `trial` → `active`. `payment_status_changed` fires.
+4. **Day 14–365** → Normal operation.
+5. **Day 350** → Worker queries contracts with `ends_at < now+15d AND auto_renew=true`, schedules renewal jobs.
+6. **Day 365** → Renewal job calls `Renew(c.ID, {ends_at: +1y})`. `contract.renewed` fires.
+7. **Some later day** → Webhook: `charge.failed`. Handler: `SetPaymentStatus(c.ID, past_due)`. Contract auto-flips to `past_due`. `payment_status_changed` fires.
+8. **N days later** → If still `past_due`, admin manually transitions to `suspended` via `Cancel(c.ID, "non-payment")`. `contract.cancelled` fires.
+
+## Operational notes
+
+- **`ProcessExpirations` is scheduler-friendly.** It batches the entire UPDATE in one SQL statement (using `RETURNING`) and emits per-contract events outside the transaction. Run it on cron / worker, not per-request.
+- **`Cancel` is idempotent.** Re-cancelling a cancelled contract is a no-op; the engine returns the existing row unchanged.
+- **Contract events live on the same transactional outbox as quota events.** Subscribers get at-least-once delivery; the [audit log](/billing/audit) captures every emission immutably for finance reconciliation.
+- **No webhook adapter ships in core.** Wiring `charge.succeeded` from Stripe / Paddle / etc. to `SetPaymentStatus` is the integrator's job — see the [roadmap](/billing/roadmap) for the planned adapter module.
+
+## See also
+
+- [Plans and overrides](/billing/plans) — what the engine reads on Reserve
+- [Audit log](/billing/audit) — contract lifecycle events are mirrored to the immutable per-tenant log
+- [Roadmap](/billing/roadmap) — Stripe adapter, usage-based pricing, and other deferred work

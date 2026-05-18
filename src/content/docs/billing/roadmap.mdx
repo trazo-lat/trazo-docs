@@ -1,0 +1,121 @@
+---
+title: Roadmap and Deferred Work
+description: What the v1 billing engine doesn't yet ship, and what would be needed to add it. Honest accounting of the gaps the gap audit surfaced.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The v1 billing engine ships: metrics, plans, overrides, conditional rules, soft limits with grace, threshold events, lifecycle events, an audit log, a policy engine for cross-entity invariants, and subscription contracts as a temporal layer. This page is the honest list of what didn't make v1 and what it would take to add it.
+
+## Stripe / payment-provider adapter
+
+**Status**: not implemented.
+
+**What's needed**:
+- A new module (probably `internal/modules/domain/billing-stripe/` or a separate plugin repo) that owns the Stripe API key and webhook secret.
+- Webhook receiver for `invoice.payment_succeeded`, `invoice.payment_failed`, `subscription.deleted`, etc.
+- Mapping table: `tenant_id ↔ stripe_customer_id ↔ stripe_subscription_id`.
+- Each webhook handler calls `core.Contracts.SetPaymentStatus` (already exists) to flow state changes into the platform.
+- Reverse direction: when the platform changes a plan / cancels a contract, the adapter syncs to Stripe.
+
+**Why deferred**: needs a real Stripe account, API keys, webhook infrastructure (signed-payload verification, retries, dedup), and a configuration surface for which-tenant-uses-what-provider. Out of scope for a single engine PR. The `core.Contracts.SetPaymentStatus` API was designed with this adapter in mind — adding the adapter later doesn't require engine changes.
+
+## Usage-based pricing (tiered metering)
+
+**Status**: not implemented.
+
+**What's needed**:
+- Tiered pricing per metric: "first 1000 free, then $0.01/each up to 10000, then $0.005/each beyond." Either as new columns on `plan_quotas` or a separate `pricing_rules` table.
+- Currency + unit price decoupled from cap (existing `limit_value` is units, not money).
+- Usage rollup per billing period — summing `quota_usage` snapshots between `period_start` and `period_end`.
+- Spend cap predicates ("warn / cap at $X projected spend").
+
+**Why deferred**: requires the contract foundation (just landed in v1) plus a currency / money model the platform doesn't have yet. The contract's `currency` field is in place; pricing math is the missing layer.
+
+## Trend dashboards and forecasting
+
+**Status**: not implemented (in core).
+
+**What's needed**:
+- A read-side aggregate on top of `billing_audit_events` + `quota_usage` history. Probably backed by materialized views or a time-series store.
+- Forecast model: linear / EMA on the meter window to project end-of-period usage.
+- UI in the admin app to render trend lines, alert when projected usage exceeds the limit.
+
+**Why deferred**: this is admin-UI work in a separate repo (`trazo-admin-app`), not an engine concern. The audit log + snapshot endpoints in core give the UI everything it needs to compute forecasts client-side.
+
+## Long-lived reservations
+
+**Status**: not implemented.
+
+**What's needed**:
+- A `quota_reservations` table holding short-TTL holds against a metric: `(tenant, metric, amount, expires_at)`.
+- `Engine.HoldReserve(ctx, metric, amount, ttl) → reservationID` that increments `current_value` but records the hold.
+- `Engine.CommitReservation(id)` zeros the hold (usage stays charged).
+- `Engine.ReleaseReservation(id)` decrements `current_value` and removes the hold.
+- A janitor that auto-releases expired holds.
+
+**Why deferred**: specialized engineering work. The current `Reserve` + `Release` pair is sufficient for the synchronous request paths quotas were originally designed for. Long-lived reservations matter when an admin starts a 10-minute bulk export and wants to pre-allocate quota — a v2 concern.
+
+## Distributed quotas (multi-region same tenant)
+
+**Status**: not implemented.
+
+**What's needed**:
+- A coordination strategy for `quota_usage` rows across regions (e.g. CRDT, central DB, or eventual-consistency with a reconciler).
+- Reserve semantics that tolerate cross-region lag (probably soft-quotas with a reconciler nudging stragglers).
+- Per-region usage attribution in the audit log.
+
+**Why deferred**: premature unless a single tenant actively serves traffic from multiple regions in parallel. The current single-region model is correct and simple; multi-region adds latency + correctness trade-offs that aren't worth eating until they bite.
+
+## Plan versioning and grandfathering
+
+**Status**: partial (plan `status: archived` exists).
+
+**What's needed**:
+- Explicit versioning: `pro@2026-01` vs `pro@2026-05` as distinct rows, with tenants pinned to a version at contract time.
+- Renewal flow that asks "keep current version, or migrate to latest?".
+- A migration audit trail (which tenant migrated when, from / to which version).
+
+**Why deferred**: the workaround in v1 is "create a new plan slug per version" (e.g. `pro-2026`). It's not as clean as first-class versioning but works for small catalogs. Real versioning needs a contract-aware migration UX which depends on the contract surface being mature.
+
+## Bulk validation / multi-metric dry-run
+
+**Status**: partial (single-metric dry-run shipped).
+
+**What's needed**:
+- An endpoint that takes a list of `{metric_key, amount}` pairs and returns a decision per metric in one round-trip. Useful for batch import previews ("would this 500-row CSV with 12 different metrics fit?").
+
+**Why deferred**: small additive feature, not blocking. The single-metric dry-run covers 90% of admin-UI cases.
+
+## Webhook for threshold events
+
+**Status**: not implemented (events fire on the internal outbox).
+
+**What's needed**:
+- A tenant-configurable webhook destination per event name, similar to the [hook system](/architecture/hooks).
+- Signed payload + retry policy.
+
+**Why deferred**: the existing `core.Hooks` subsystem handles the equivalent for module lifecycle events. Wiring the billing outbox into hooks is a small bridge job — straightforward but not blocking.
+
+## "Why" decisions, summarised
+
+| Gap | Why it's not in v1 | What's blocking |
+|---|---|---|
+| Stripe adapter | needs real keys + webhook infra | environment-specific config |
+| Usage pricing | needs contracts (now shipped) + currency model | currency / money types |
+| Trend dashboards | UI work in a separate repo | n/a — core API is sufficient |
+| Long-lived reservations | specialised engineering | demand from a real use case |
+| Distributed quotas | multi-region not active | multi-region rollout |
+| Plan versioning | plan-slug-per-version workaround works | a clean migration UX |
+| Bulk dry-run | additive, single-metric covers 90% | n/a — easy follow-up |
+| Threshold webhooks | hooks subsystem handles it | bridge work to outbox |
+
+<Aside type="note">
+This list is the honest gap audit, not a commitment to ship any specific item. Priorities will move as real customer needs surface. If you're integrating against the engine today, design against the v1 surface and assume the items above are 3-6 month follow-ups rather than promised features.
+</Aside>
+
+## See also
+
+- [Overview](/billing/overview) — what *is* shipping in v1
+- [Contracts](/billing/contracts) — the foundation usage-based pricing will build on
+- [Audit log](/billing/audit) — the source data trend dashboards will read
