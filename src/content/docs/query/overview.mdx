@@ -6,9 +6,11 @@ description: Unified query syntax used across Heyllave clients (CLI, Web UI, API
 import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 import { Image } from 'astro:assets';
 import FlowDiagram from '../../../components/FlowDiagram';
-import heroImg from '../../../assets/query-hero.webp';
+import heroDark from '../../../assets/query-overview-hero.webp';
+import heroLight from '../../../assets/query-overview-hero-light.webp';
 
-<Image src={heroImg} alt="A search bar parses into an abstract syntax tree that fans out into SQL, JSON, and Go predicate targets." style={{ borderRadius: '12px', border: '1px solid #2B2A28', marginBottom: '1.5rem' }} />
+<Image src={heroDark}  alt="A search bar parses into an abstract syntax tree that fans out into SQL, JSON, and Go predicate targets." class="hero-dark" />
+<Image src={heroLight} alt="A search bar parses into an abstract syntax tree that fans out into SQL, JSON, and Go predicate targets." class="hero-light" />
 
 Heyllave ships a single query language shared by every client surface: the search bar in the Web UI, the `?q=` parameter on API endpoints, the CLI `query explain` command, the VS Code extension, and the WASM bundle that runs in the browser. The library lives at [`github.com/heyllave/query`](https://github.com/heyllave/query).
 

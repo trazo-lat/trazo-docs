@@ -7,12 +7,12 @@ maps to a page and a pair of WebP files (dark + light variants).
 
 | Page | Dark variant | Light variant | Prompt file |
 |------|--------------|---------------|-------------|
-| `query/overview` | ✅ `query-hero.webp` (Gemini, 2400×712) | ⬜ `query-overview-hero-light.webp` | `/tmp/query-hero-overview.md` |
-| `query/syntax` | ⬜ `query-syntax-hero.webp` | ⬜ `query-syntax-hero-light.webp` | `/tmp/query-hero-syntax.md` |
+| `query/overview` | ✅ `query-overview-hero.webp` (Gemini) | ✅ `query-overview-hero-light.webp` (Gemini) | `/tmp/query-hero-overview.md` |
+| `query/syntax` | ⬜ `query-syntax-hero.webp` | ✅ `query-syntax-hero-light.webp` (Gemini, has @last duplicate in Row 4 — acceptable for now) | `/tmp/query-hero-syntax.md` |
 | `query/examples` | ⬜ `query-examples-hero.webp` | ⬜ `query-examples-hero-light.webp` | `/tmp/query-hero-examples.md` |
 | `query/codegen` | ⬜ `query-codegen-hero.webp` | ⬜ `query-codegen-hero-light.webp` | `/tmp/query-hero-codegen.md` |
 | `query/faq` | ⬜ `query-faq-hero.webp` | ⬜ `query-faq-hero-light.webp` | `/tmp/query-hero-faq.md` |
-| `query/coverage` | ✅ `query-coverage-hero.webp` (Gemini, 2400×712) | ⬜ `query-coverage-hero-light.webp` | `/tmp/query-hero-coverage.md` |
+| `query/coverage` | ✅ `query-coverage-hero.webp` (Gemini) | ⬜ `query-coverage-hero-light.webp` | `/tmp/query-hero-coverage.md` |
 
 Note: `/tmp/` is the local machine; copy the prompt files somewhere durable
 before relying on them (they don't survive a reboot).
