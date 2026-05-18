@@ -179,15 +179,28 @@ declare global {
 
 let loaderPromise: Promise<QueryAPI> | null = null;
 
+// Build the WASM URLs from import.meta.env.BASE_URL so the playground works
+// regardless of whether the site is deployed at the root or under a subpath.
+// import.meta.env.BASE_URL always ends with "/" so we strip a leading slash
+// from the asset paths.
+function wasmAssetUrl(asset: "query.wasm" | "wasm_exec.js"): string {
+  const base =
+    typeof import.meta.env !== "undefined" && import.meta.env.BASE_URL
+      ? import.meta.env.BASE_URL
+      : "/";
+  return `${base}query/${asset}`.replace(/\/+/g, "/");
+}
+
 async function loadWasmExec(): Promise<void> {
   if (typeof window === "undefined") return;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   if ((globalThis as any).Go) return;
+  const url = wasmAssetUrl("wasm_exec.js");
   await new Promise<void>((resolve, reject) => {
     const s = document.createElement("script");
-    s.src = "/query/wasm_exec.js";
+    s.src = url;
     s.onload = () => resolve();
-    s.onerror = () => reject(new Error("failed to load /query/wasm_exec.js"));
+    s.onerror = () => reject(new Error(`failed to load wasm_exec.js (${url})`));
     document.head.appendChild(s);
   });
 }
@@ -202,8 +215,19 @@ export function loadQueryWasm(): Promise<QueryAPI> {
     await loadWasmExec();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const go = new (globalThis as any).Go();
-    const resp = await fetch("/query/query.wasm");
-    if (!resp.ok) throw new Error(`fetch /query/query.wasm: ${resp.status}`);
+    const url = wasmAssetUrl("query.wasm");
+    let resp: Response;
+    try {
+      resp = await fetch(url);
+    } catch (e) {
+      throw new Error(
+        `fetch ${url} failed: ${(e as Error).message}. ` +
+          `If you just added the WASM, restart the Astro dev server.`,
+      );
+    }
+    if (!resp.ok) {
+      throw new Error(`fetch ${url}: ${resp.status} ${resp.statusText}`);
+    }
     const bytes = await resp.arrayBuffer();
     const inst = await WebAssembly.instantiate(bytes, go.importObject);
     // Don't await — main() blocks forever on select{}.
