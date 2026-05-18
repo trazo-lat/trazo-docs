@@ -1,11 +1,11 @@
 ---
 title: Authentication
-description: Learn how to authenticate with the Trazo API using JWT tokens, refresh tokens, and session management.
+description: Learn how to authenticate with the Heyllave API using JWT tokens, refresh tokens, and session management.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-The Trazo API uses JWT-based authentication. Every request to a protected endpoint must include a valid `Authorization: Bearer <access_token>` header. Access tokens are short-lived (15 minutes), and a refresh token (valid for 7 days) is provided to obtain new access tokens without re-authenticating.
+The Heyllave API uses JWT-based authentication. Every request to a protected endpoint must include a valid `Authorization: Bearer <access_token>` header. Access tokens are short-lived (15 minutes), and a refresh token (valid for 7 days) is provided to obtain new access tokens without re-authenticating.
 
 ## Login
 

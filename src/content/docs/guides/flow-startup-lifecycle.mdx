@@ -1,0 +1,128 @@
+---
+title: Application Startup Flow
+description: What happens from `heyllave server start` to the first accepted HTTP request — config, Core construction, module Init, background workers.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Server startup is deterministic and ordered. Each phase must succeed before the next begins; a failure aborts the boot with a structured error so the process never serves traffic with a half-built dependency graph.
+
+---
+
+## Boot Phases
+
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={380}
+  nodes={[
+    {
+      id: 'cfg',
+      label: '1. Load Config',
+      sub: 'viper → validate',
+    },
+    {
+      id: 'db',
+      label: '2. Open DB Pool',
+      variant: 'db',
+      sub: 'pgx + migration check',
+    },
+    {
+      id: 'core',
+      label: '3. Build Core',
+      variant: 'accent',
+      sub: '11 sub-interfaces wired',
+    },
+    {
+      id: 'modules',
+      label: '4. Init Modules',
+      sub: 'topo-sort + Init(core)',
+    },
+    {
+      id: 'workers',
+      label: '5. Start Workers',
+      sub: 'outbox, hooks, notifications',
+    },
+    {
+      id: 'accept',
+      label: '6. Accept Traffic',
+      variant: 'coral',
+      sub: 'bind listener → ready',
+    },
+  ]}
+  edges={[
+    { source: 'cfg', target: 'db' },
+    { source: 'db', target: 'core' },
+    { source: 'core', target: 'modules' },
+    { source: 'modules', target: 'workers' },
+    { source: 'workers', target: 'accept' },
+  ]}
+/>
+
+---
+
+## The Flow
+
+<Steps>
+
+1. **Load configuration.** Viper merges, in order: defaults → `heyllave.yaml` → environment variables (`HEYLLAVE_*`) → command-line flags. The merged config is validated; missing required fields fail the boot immediately. See the [Configuration Reference](/reference/configuration-reference/).
+
+2. **Open the database pool.** The server connects to PostgreSQL using `pgx` and verifies the `public` schema is at the expected migration version. If the schema is behind, the server refuses to start and points the operator at `heyllave migrate apply`. See [Schema-per-Tenant](/architecture/schema-per-tenant/).
+
+3. **Construct the `Core` struct.** The Core is the single dependency carrier passed into every module. Its 11 sub-interfaces (sessions, permissions, audit, events, modules, hooks, storage, db, config, errors, log) are wired up here, with mocks substitutable for tests. See [Core Struct](/architecture/core-struct/).
+
+4. **Discover and initialize modules.** The module registry reads each `module.yaml`, builds a dependency graph, topologically sorts it, and calls each module's `Init(core)` in order. `Init` registers HTTP routes, event subscriptions, hooks, and any scheduled jobs. Foundation modules always init before domain modules. See [Module System](/architecture/module-system/).
+
+5. **Start background workers.** The event-outbox worker, notification dispatcher, hook executor, and audit recorder all spin up. Each runs in its own goroutine pool with graceful-shutdown hooks. See [Event Outbox](/architecture/event-outbox/).
+
+6. **Bind the listener and accept traffic.** The HTTP server binds to the configured port and announces ready. From this point, requests flow through the [Request Lifecycle](/guides/flow-request-lifecycle/).
+
+</Steps>
+
+---
+
+## What's in `Init`?
+
+Every module's `Init(core *core.Core)` does the same kinds of things — only the specifics differ:
+
+```go
+func Init(core *core.Core) {
+    // Register HTTP routes
+    huma.Register(core.API, /* operation */, handler.CreateRepair)
+
+    // Declare event subscriptions
+    core.Events.Subscribe("repairs.created", service.OnRepairCreated)
+
+    // Register hooks
+    core.Hooks.Register("repairs.before_create", validateIntakeForm)
+
+    // Wire repository, service, handler
+}
+```
+
+Subscriptions and hooks declared here become active **after** Phase 5, because the outbox/hook workers haven't started yet during module Init.
+
+---
+
+## Failure Modes
+
+| Phase | What fails | What you see |
+|---|---|---|
+| 1 | Missing required env var | `config: HEYLLAVE_DATABASE_URL is required` |
+| 2 | Schema behind | `migrate apply needed: public is at v12, code expects v15` |
+| 3 | Dependency cycle in Core wiring | Compile error — never reaches runtime |
+| 4 | Module cycle or missing dep | `module repairs depends on vehicles which is not registered` |
+| 5 | Worker pool can't start | `events: failed to start outbox worker (postgres unreachable)` |
+
+<Aside type="tip">
+  Every startup error is structured (level, code, hint) so log scrapers and oncall dashboards can route it without regex.
+</Aside>
+
+---
+
+## Related Flows
+
+- [Local Dev Setup](/guides/flow-local-dev-setup/) — getting to your first successful boot.
+- [Request Lifecycle](/guides/flow-request-lifecycle/) — what happens after Phase 6.
+- [Event Propagation](/guides/flow-event-propagation/) — when the workers from Phase 5 do their work.

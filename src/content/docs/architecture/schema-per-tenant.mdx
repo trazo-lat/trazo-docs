@@ -1,52 +1,46 @@
 ---
 title: Schema-per-Tenant Isolation
-description: How Trazo uses PostgreSQL schemas to isolate tenant data, why per-tenant tables drop the tenant_id column, and how search_path routes unqualified queries.
+description: How Heyllave uses PostgreSQL schemas to isolate tenant data, why per-tenant tables drop the tenant_id column, and how search_path routes unqualified queries.
 ---
 
-Trazo uses a schema-per-tenant isolation model in PostgreSQL. Every tenant gets its own schema, and every table that holds per-tenant data lives exclusively within that schema. No tenant can ever read or write another tenant's data through normal application queries.
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Heyllave uses a schema-per-tenant isolation model in PostgreSQL. Every tenant gets its own schema, and every table that holds per-tenant data lives exclusively within that schema. No tenant can ever read or write another tenant's data through normal application queries.
 
 ## Schema Layout
 
-```
-PostgreSQL instance
-├── public schema                    ← shared platform tables (cross-tenant)
-│   ├── tenants
-│   ├── users
-│   ├── tenant_memberships
-│   ├── tenant_invitations
-│   ├── roles
-│   ├── permission_definitions
-│   ├── scope_definitions
-│   ├── tenant_modules
-│   ├── notification_rules           ← platform default rules
-│   ├── translations                 ← platform/module default translations
-│   ├── service_principals
-│   └── migration_history
-│
-├── tenant_acme schema               ← tenant: acme
-│   ├── sessions
-│   ├── audit_logs
-│   ├── events_outbox
-│   ├── event_subscriptions
-│   ├── event_deliveries
-│   ├── tenant_hooks
-│   ├── in_app_notifications
-│   ├── tenant_notification_rules    ← tenant overrides for the public defaults
-│   ├── tenant_settings
-│   ├── stored_files
-│   ├── search_index
-│   ├── approval_requests
-│   ├── tenant_state_snapshots
-│   ├── tenant_translations          ← tenant/instance translation overrides
-│   ├── repairs                      ← module tables (per enabled module)
-│   └── ...
-│
-├── tenant_globex schema             ← tenant: globex
-│   └── ...
-│
-└── tenant_initech schema
-    └── ...
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={620}
+  nodes={[
+    { id: 'pg', label: 'PostgreSQL instance', variant: 'coral' },
+    { id: 'public', label: 'public schema', sub: 'shared / cross-tenant', variant: 'accent' },
+    { id: 'pub_registry', label: 'Tenant & user registry', sub: 'tenants, users, memberships, invitations', variant: 'db' },
+    { id: 'pub_authz', label: 'Authz & modules', sub: 'roles, permission_defs, scope_defs, tenant_modules', variant: 'db' },
+    { id: 'pub_defaults', label: 'Platform defaults', sub: 'notification_rules, translations', variant: 'db' },
+    { id: 'pub_other', label: 'Identities & history', sub: 'service_principals, migration_history', variant: 'db' },
+    { id: 't_acme', label: 'tenant_acme schema', sub: 'tenant: acme', variant: 'accent' },
+    { id: 'acme_core', label: 'Core/tenant tables', sub: 'sessions, audit_logs, outbox, hooks…', variant: 'db' },
+    { id: 'acme_overrides', label: 'Tenant overrides', sub: 'settings, notification_rules, translations', variant: 'db' },
+    { id: 'acme_modules', label: 'Module tables', sub: 'repairs, …  (per enabled module)', variant: 'db' },
+    { id: 't_globex', label: 'tenant_globex schema', sub: 'tenant: globex', variant: 'muted' },
+    { id: 't_initech', label: 'tenant_initech schema', sub: 'tenant: initech', variant: 'muted' },
+  ]}
+  edges={[
+    { source: 'pg', target: 'public' },
+    { source: 'pg', target: 't_acme' },
+    { source: 'pg', target: 't_globex' },
+    { source: 'pg', target: 't_initech' },
+    { source: 'public', target: 'pub_registry' },
+    { source: 'public', target: 'pub_authz' },
+    { source: 'public', target: 'pub_defaults' },
+    { source: 'public', target: 'pub_other' },
+    { source: 't_acme', target: 'acme_core' },
+    { source: 't_acme', target: 'acme_overrides' },
+    { source: 't_acme', target: 'acme_modules' },
+  ]}
+/>
 
 Schema names follow the convention `tenant_<slug>` where `slug` is the URL-safe identifier assigned at tenant creation. Slugs are immutable.
 
@@ -55,15 +49,6 @@ Schema names follow the convention `tenant_<slug>` where `slug` is the URL-safe 
 Every table inside a `tenant_<slug>` schema **does not** have a `tenant_id` column. Tenancy is encoded in the schema name itself — the column was redundant and risked drift between the row's `tenant_id` and the schema it lived in.
 
 ```sql
--- Before:
-CREATE TABLE audit_logs (
-    id          UUID PRIMARY KEY,
-    tenant_id   UUID NOT NULL,        -- redundant
-    actor_id    UUID NOT NULL,
-    ...
-);
-
--- Now:
 CREATE TABLE audit_logs (
     id          UUID PRIMARY KEY,
     actor_id    UUID NOT NULL,
@@ -143,7 +128,8 @@ Per-tenant tables (in every `tenant_<slug>` schema) come from `migrations/core/t
 | `event_subscriptions` | core/tenant | Per-event handler registrations |
 | `event_deliveries` | core/tenant | Per-event-per-handler delivery state |
 | `tenant_hooks` | core/tenant | Tenant-configured webhook/expression hooks |
-| `in_app_notifications` | core/tenant | Persistent in-app notifications |
+| `in_app_notifications` | core/tenant | Persistent in-app notifications + their action buttons |
+| `notification_action_invocations` | core/tenant | Audit + analytics row per click on a notification action |
 | `tenant_notification_rules` | core/tenant | Tenant overrides for platform notification rules |
 | `tenant_settings` | core/tenant | Tenant-managed module settings |
 | `stored_files` | core/tenant | File metadata for uploads |
@@ -155,7 +141,7 @@ Per-tenant tables (in every `tenant_<slug>` schema) come from `migrations/core/t
 
 ## Migration Strategy
 
-Because per-tenant tables exist in every tenant schema, schema changes must be applied to every schema individually. Trazo's migration engine ([Migrations](/guides/migrations/)) is declarative — the SQL files describe the desired state and the engine computes the DDL needed per schema.
+Because per-tenant tables exist in every tenant schema, schema changes must be applied to every schema individually. Heyllave's migration engine ([Migrations](/guides/migrations/)) is declarative — the SQL files describe the desired state and the engine computes the DDL needed per schema.
 
 - Public-schema tables are reconciled once via `POST /api/v1/admin/migrations/bootstrap`.
 - Per-tenant tables (core + module) are reconciled at tenant creation and on demand via the `SchemaProvisioner` when a module is later enabled.
@@ -174,6 +160,6 @@ Because per-tenant tables exist in every tenant schema, schema changes must be a
 
 **Migration overhead.** Every per-tenant schema change must run against every tenant schema. A platform with 500 tenants requires 500 reconciliations per release. The migration engine handles this, but deployment time scales with tenant count.
 
-**Connection pooling.** Standard connection poolers (e.g., PgBouncer in transaction mode) do not preserve session-level settings like `search_path`. Trazo uses `SET LOCAL search_path` inside a transaction so it is scoped to that transaction only and survives any reasonable pooler configuration. Per-request pooling (or session-mode pooling) is still recommended for production.
+**Connection pooling.** Standard connection poolers (e.g., PgBouncer in transaction mode) do not preserve session-level settings like `search_path`. Heyllave uses `SET LOCAL search_path` inside a transaction so it is scoped to that transaction only and survives any reasonable pooler configuration. Per-request pooling (or session-mode pooling) is still recommended for production.
 
 **Schema count limits.** PostgreSQL has no hard limit on schema count, but very large numbers of schemas (thousands) can affect catalog query performance. Monitor `pg_catalog` query times as tenant count grows.

@@ -1,60 +1,59 @@
 ---
 title: Architecture Overview
-description: High-level architecture of the Trazo platform, covering the two-repository structure, request lifecycle, and key architectural patterns.
+description: High-level architecture of the Heyllave platform, covering the two-repository structure, request lifecycle, and key architectural patterns.
 ---
 
-Trazo is a multi-tenant SaaS platform built in Go. The system is organized into two repositories with clearly separated responsibilities and designed around a small set of composable architectural patterns.
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Heyllave is a multi-tenant SaaS platform built in Go. The system is organized into two repositories with clearly separated responsibilities and designed around a small set of composable architectural patterns.
 
 ## Repository Structure
 
 | Repository | Purpose |
 |---|---|
-| `trazo-core-service` | Main HTTP API server, all modules, and the database layer |
-| `trazo-cli` | Developer tooling: code generation, migration management, module scaffolding |
-| `trazo-admin-app` | Flutter cross-platform admin app (Android, iOS, Windows, macOS, Linux) |
-| `trazo-e2e` | Black-box E2E test suite with custom test harness |
-| `trazo-docs` | Astro/Starlight documentation site (this site) |
-| `trazo-claude-plugin` | Claude Code skills and agents for development workflows |
+| `heyllave-core-service` | Main HTTP API server, all modules, and the database layer |
+| `heyllave-cli` | Developer tooling: code generation, migration management, module scaffolding |
+| `heyllave-admin-app` | Flutter cross-platform admin app (Android, iOS, Windows, macOS, Linux) |
+| `heyllave-e2e` | Black-box E2E test suite with custom test harness |
+| `heyllave-docs` | Astro/Starlight documentation site (this site) |
+| `heyllave-claude-plugin` | Claude Code skills and agents for development workflows |
 
-The API server is the runtime artifact deployed to production. The CLI is a development-time tool that reads `module.yaml` files to generate boilerplate, sync permissions, and manage schema migrations. The Flutter app is the primary user interface. Migrations live exclusively in `trazo-cli`.
+The API server is the runtime artifact deployed to production. The CLI is a development-time tool that reads `module.yaml` files to generate boilerplate, sync permissions, and manage schema migrations. The Flutter app is the primary user interface. Migrations live exclusively in `heyllave-cli`.
 
 ## Request Lifecycle
 
 Every HTTP request passes through a fixed middleware chain before reaching a Huma handler, then flows downward through the service and repository layers.
 
-```
-HTTP Request
-    │
-    ▼
-RecoveryMiddleware        ← catches panics, returns 500
-    │
-    ▼
-CORSMiddleware            ← sets CORS headers
-    │
-    ▼
-RequestIDMiddleware       ← attaches X-Request-ID
-    │
-    ▼
-CanonicalLogMiddleware    ← structured request/response logging
-    │
-    ▼
-JWTAuthMiddleware         ← validates token, loads session into context
-    │
-    ▼
-RateLimitMiddleware       ← token bucket: per-IP, per-tenant, path overrides
-    │
-    ▼
-Huma Handler              ← input validation, OpenAPI binding
-    │
-    ▼
-Service Layer             ← business logic, permission checks, audit recording
-    │
-    ▼
-Repository Layer          ← SQL via sqlx + squirrel
-    │
-    ▼
-PostgreSQL                ← tenant schema isolated via search_path
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={640}
+  nodes={[
+    { id: 'req', label: 'HTTP Request', variant: 'accent' },
+    { id: 'recovery', label: 'RecoveryMiddleware', sub: 'catches panics, returns 500' },
+    { id: 'cors', label: 'CORSMiddleware', sub: 'sets CORS headers' },
+    { id: 'reqid', label: 'RequestIDMiddleware', sub: 'attaches X-Request-ID' },
+    { id: 'log', label: 'CanonicalLogMiddleware', sub: 'structured request/response logging', width: 240 },
+    { id: 'jwt', label: 'JWTAuthMiddleware', sub: 'validates token, loads session', width: 240 },
+    { id: 'ratelimit', label: 'RateLimitMiddleware', sub: 'IP · tenant · path overrides', width: 240 },
+    { id: 'huma', label: 'Huma Handler', sub: 'input validation · OpenAPI binding', variant: 'coral', width: 240 },
+    { id: 'service', label: 'Service Layer', sub: 'business logic · perms · audit', variant: 'accent', width: 240 },
+    { id: 'repo', label: 'Repository Layer', sub: 'SQL via sqlx + squirrel', variant: 'accent', width: 240 },
+    { id: 'pg', label: 'PostgreSQL', sub: 'tenant schema via search_path', variant: 'db', width: 240 },
+  ]}
+  edges={[
+    { source: 'req', target: 'recovery' },
+    { source: 'recovery', target: 'cors' },
+    { source: 'cors', target: 'reqid' },
+    { source: 'reqid', target: 'log' },
+    { source: 'log', target: 'jwt' },
+    { source: 'jwt', target: 'ratelimit' },
+    { source: 'ratelimit', target: 'huma' },
+    { source: 'huma', target: 'service' },
+    { source: 'service', target: 'repo' },
+    { source: 'repo', target: 'pg' },
+  ]}
+/>
 
 All request-scoped data (current user, tenant, permissions, request ID) is available through the `Core` struct passed into every service and handler. Handlers never reach into the database directly; all data access goes through the repository layer.
 
@@ -96,12 +95,12 @@ See [Audit Trail](/architecture/audit-trail) for the recording API and query mod
 
 ## Module Types
 
-Trazo organizes all functionality into modules. Every module follows the same interface and file layout convention.
+Heyllave organizes all functionality into modules. Every module follows the same interface and file layout convention.
 
 | Type | Purpose | Examples |
 |---|---|---|
 | `foundation` | Core platform capabilities required by all tenants | users, tenants, audit, auth |
-| `domain` | Business-specific functionality shipped with the platform | repairs, inventory, billing |
+| `domain` | Business-specific functionality bundled with the platform | repairs, inventory, billing |
 | `custom` | Tenant-specific extensions developed per-customer | custom workflows, integrations |
 
 Foundation modules are always enabled. Domain and custom modules can be enabled or disabled per tenant through the module registry.

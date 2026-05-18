@@ -1,49 +1,49 @@
 ---
 title: Local Development
-description: Start a local PostgreSQL database with the Trazo CLI, launch the API server, and bootstrap the public schema for development.
+description: Start a local PostgreSQL database with the Heyllave CLI, launch the API server, and bootstrap the public schema for development.
 ---
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
-This guide assumes you have completed [Installation](/getting-started/installation/) and have `trazo` and `trazo-server` available on your `PATH` (or are prefixing commands with the binary path).
+This guide assumes you have completed [Installation](/getting-started/installation/) and have `heyllave` and `heyllave-server` available on your `PATH` (or are prefixing commands with the binary path).
 
 ---
 
 ## Step 1 — Start the Local Database
 
-The `trazo db local` command starts a PostgreSQL 15 container named `trazo-local-db` using Docker. It creates the platform database and the default platform user automatically.
+The `heyllave db local` command starts a PostgreSQL 15 container named `heyllave-local-db` using Docker. It creates the platform database and the default platform user automatically.
 
 ```bash
-trazo db local
+heyllave db local
 ```
 
 Expected output:
 
 ```
-Starting trazo-local-db...
-Container trazo-local-db started on port 5432
+Starting heyllave-local-db...
+Container heyllave-local-db started on port 5432
 Platform database ready.
 ```
 
 <Aside type="note">
-  The container is configured to match the default `trazo.yaml` connection string:
+  The container is configured to match the default `heyllave.yaml` connection string:
   `postgres://platform:platform@localhost:5432/platform?sslmode=disable`
 
   If you change the port or credentials in your config, pass the corresponding flags:
 
   ```bash
-  trazo db local --port 5433 --password mysecret
+  heyllave db local --port 5433 --password mysecret
   ```
 </Aside>
 
 ### Check Database Status
 
 ```bash
-trazo db status
+heyllave db status
 ```
 
 ```
-Container:  trazo-local-db  [running]
+Container:  heyllave-local-db  [running]
 Host:       localhost:5432
 Database:   platform
 User:       platform
@@ -52,14 +52,14 @@ User:       platform
 ### Verify Connectivity
 
 ```bash
-trazo db ping
+heyllave db ping
 ```
 
 ```
 OK  connected to postgres://platform:****@localhost:5432/platform
 ```
 
-If `ping` fails, ensure Docker is running and the container started without errors (`docker ps | grep trazo-local-db`).
+If `ping` fails, ensure Docker is running and the container started without errors (`docker ps | grep heyllave-local-db`).
 
 ---
 
@@ -70,30 +70,30 @@ The server boots without the public schema being populated. It will refuse most 
 
 
 ```bash
-trazo-server
+heyllave-server
 ```
 
 The server starts and listens on `0.0.0.0:8080` by default. You should see structured log output similar to:
 
 ```json
-{"level":"info","ts":"2026-03-03T10:00:00Z","msg":"Trazo server starting","env":"local","port":8080}
+{"level":"info","ts":"2026-03-03T10:00:00Z","msg":"Heyllave server starting","env":"local","port":8080}
 {"level":"info","ts":"2026-03-03T10:00:01Z","msg":"Module registered","module":"users"}
 {"level":"info","ts":"2026-03-03T10:00:01Z","msg":"Module registered","module":"audit"}
 {"level":"info","ts":"2026-03-03T10:00:01Z","msg":"Event worker pool started","workers":10}
 {"level":"info","ts":"2026-03-03T10:00:01Z","msg":"Server ready","addr":"0.0.0.0:8080"}
 ```
 
-Override the port or log level without editing `trazo.yaml` using flags or environment variables:
+Override the port or log level without editing `heyllave.yaml` using flags or environment variables:
 
 <Tabs>
   <TabItem label="Flags">
     ```bash
-    trazo-server --port 9090 --log-level debug
+    heyllave-server --port 9090 --log-level debug
     ```
   </TabItem>
   <TabItem label="Environment Variables">
     ```bash
-    TRAZO_SERVER_PORT=9090 TRAZO_LOG_LEVEL=debug trazo-server
+    HEYLLAVE_SERVER_PORT=9090 HEYLLAVE_LOG_LEVEL=debug heyllave-server
     ```
   </TabItem>
 </Tabs>
@@ -131,19 +131,19 @@ A `200 OK` response confirms the server is up and connected to the database.
 When you are done developing, stop the container:
 
 ```bash
-trazo db local --stop
+heyllave db local --stop
 ```
 
 ```
-Container trazo-local-db stopped.
+Container heyllave-local-db stopped.
 ```
 
-The container and its data volume are preserved. The next time you run `trazo db local` it will restart in seconds without re-running migrations.
+The container and its data volume are preserved. The next time you run `heyllave db local` it will restart in seconds without re-running migrations.
 
 To destroy the container and its data entirely (useful for a clean slate):
 
 ```bash
-trazo db local --destroy
+heyllave db local --destroy
 ```
 
 <Aside type="caution">
@@ -156,8 +156,8 @@ trazo db local --destroy
 
 ```bash
 # Start everything
-trazo db local
-trazo-server &
+heyllave db local
+heyllave-server &
 
 # Once, after a fresh database, bootstrap the public schema
 curl -X POST http://localhost:8080/api/v1/admin/migrations/bootstrap
@@ -166,7 +166,7 @@ curl -X POST http://localhost:8080/api/v1/admin/migrations/bootstrap
 
 # Stop when done
 kill %1
-trazo db local --stop
+heyllave db local --stop
 ```
 
 Continue to [Your First Tenant](/getting-started/first-tenant/) to seed the first tenant and admin user and make your first authenticated API request.

@@ -5,7 +5,7 @@ description: Bootstrap the public schema, seed the first tenant and admin user, 
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
-This walkthrough takes a brand-new Trazo install from "empty database" to "first authenticated request." The platform uses a two-step provisioning flow:
+This walkthrough takes a brand-new Heyllave install from "empty database" to "first authenticated request." The platform uses a two-step provisioning flow:
 
 1. **Bootstrap the public schema** — applies `migrations/core/public/` once per database. Creates `tenants`, `users`, `roles`, and the other cross-tenant tables.
 2. **Seed the first tenant** — creates `tenant_<slug>`, applies `migrations/core/tenant/` and the default modules' `migrations/modules/<name>.sql`, then inserts the first admin user, role, and membership.
@@ -55,7 +55,7 @@ All examples use `jq` to pretty-print JSON responses. Install it with `apt insta
 
 2. ## Seed the First Tenant and Admin
 
-   Run the `cmd/seed` binary. It connects using the database URL from `trazo.yaml` (or `TRAZO_DATABASE_URL`) and creates: the first tenant schema, the admin role, the admin user, and the membership that ties them together.
+   Run the `cmd/seed` binary. It connects using the database URL from `heyllave.yaml` (or `HEYLLAVE_DATABASE_URL`) and creates: the first tenant schema, the admin role, the admin user, and the membership that ties them together.
 
    ```bash
    go run ./cmd/seed \
@@ -84,7 +84,7 @@ All examples use `jq` to pretty-print JSON responses. Install it with `apt insta
    1. Insert a row into `public.tenants`.
    2. `CREATE SCHEMA tenant_acme`.
    3. Apply every file in `migrations/core/tenant/` to `tenant_acme`.
-   4. Apply `migrations/modules/<name>.sql` for every module listed under `tenant.default_modules` in `trazo.yaml`.
+   4. Apply `migrations/modules/<name>.sql` for every module listed under `tenant.default_modules` in `heyllave.yaml`.
    5. Seed the default roles.
    6. Insert one row per provisioned module into `public.tenant_modules`.
    7. Create the admin user and membership.
@@ -158,11 +158,11 @@ All examples use `jq` to pretty-print JSON responses. Install it with `apt insta
    The CLI can confirm that the tenant's schema was created and that its core + module tables are present.
 
    ```bash
-   trazo db status
+   heyllave db status
    ```
 
    ```
-   Container:   trazo-local-db  [running]
+   Container:   heyllave-local-db  [running]
    Database:    platform
 
    Public schema:

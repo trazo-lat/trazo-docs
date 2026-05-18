@@ -5,7 +5,7 @@ description: View and update allowed authentication methods per membership, conf
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Trazo supports multiple authentication methods — `password`, `oauth2`, `magic_link`, and `webauthn`. By default, every membership allows all methods. The auth method management API lets tenant admins **restrict which methods each member can use** and **configure tenant-wide defaults** for new memberships.
+Heyllave supports multiple authentication methods — `password`, `oauth2`, `magic_link`, and `webauthn`. By default, every membership allows all methods. The auth method management API lets tenant admins **restrict which methods each member can use** and **configure tenant-wide defaults** for new memberships.
 
 Requires the `members.manage_auth` permission for GET/PUT operations on the dedicated endpoints. Auth methods can also be updated via the general `PUT /members/{id}` endpoint with the `members.update` permission.
 

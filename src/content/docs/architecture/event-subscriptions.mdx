@@ -3,7 +3,7 @@ title: Event Subscriptions
 description: How modules declare, resolve, and scope event subscriptions — including multi-instance auto-scoping, wildcard patterns, and runtime wiring.
 ---
 
-Modules can subscribe to domain events in two ways: the legacy `EventSubscriber` Go interface, or the declarative `subscribes:` section in `module.yaml`. The declarative approach is preferred because it makes subscription wiring visible, validatable, and customizable per instance.
+Modules declare event subscriptions in the `subscribes:` section of `module.yaml`. The declarative approach keeps subscription wiring visible, validatable, and customizable per instance. A `EventSubscriber` Go interface is also available for cases that need programmatic control.
 
 ## Subscription patterns
 
@@ -211,9 +211,9 @@ Tenants can customize a module's default subscriptions via the instance config s
 - Overrides are applied at instance creation time. Changing the config after creation requires restarting the server (hot reload not yet supported).
 - The EventBus is append-only — disabled subscriptions are excluded during wiring, not removed at runtime.
 
-## Legacy: EventSubscriber interface
+## Programmatic Subscriptions
 
-Modules can still implement `EventSubscriber` directly for programmatic subscription control:
+Modules can implement the `EventSubscriber` interface for cases that need programmatic subscription control — for example, when handlers are determined at runtime rather than statically declared:
 
 ```go
 func (m *Module) Subscriptions() []core.Subscription {
@@ -223,4 +223,4 @@ func (m *Module) Subscriptions() []core.Subscription {
 }
 ```
 
-Both approaches can coexist — legacy subscriptions are registered first, then declarative ones. For new modules, prefer the declarative approach.
+Programmatic subscriptions are registered first, then declarative ones from `module.yaml` — both can coexist within the same module. Prefer the declarative form unless you specifically need runtime wiring.

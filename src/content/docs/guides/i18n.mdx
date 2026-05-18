@@ -1,0 +1,360 @@
+---
+title: Translating User-Facing Strings (i18n)
+description: How to declare translation keys in module.yaml, provide locale defaults, reference keys from code, and let the resolver pick the right value for every request — including tenant overrides and ICU MessageFormat.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Every user-facing string in Heyllave is a typed `core.I18nKey`. Modules declare their keys in `module.yaml`, ship Spanish and English defaults alongside the code, and reference the keys from Go (status labels, notification action buttons, error messages). At response time the i18n engine resolves each key through a four-level override hierarchy and applies ICU MessageFormat to any interpolation parameters.
+
+For the architectural rationale, see the engine's package doc at `internal/core/i18n/doc.go`. For the manifest field reference, see [module.yaml Reference](/guides/module-yaml-reference/).
+
+---
+
+## Where I18nKey Shows Up
+
+`I18nKey` is a typed string alias defined in `internal/core/types_errors.go`:
+
+```go
+type I18nKey string
+type I18nParams map[string]any
+```
+
+Modules use it in five places:
+
+- **Status engine transitions** — `Transition.Label` and `Transition.ConfirmMessage` carry the key as their string value. The frontend resolves them against the i18n endpoint when rendering action buttons.
+- **Notification actions** — `NotificationAction.LabelKey` and `NotificationAction.ConfirmMessageKey` are `I18nKey` fields. The dispatcher serializes them as-is; the client translates.
+- **Structured errors** — `core.Error.MessageKey` is set to the error code so a client can re-translate without trusting the server's rendered `Message`.
+- **Server-side rendering** — anywhere a handler calls `core.T(ctx, key, params)` or `core.TranslatedError(ctx, key, params)` to produce a localized string before sending it on the wire.
+- **Field labels in action input schemas** — `FieldDef.Label` is a string but is conventionally set to an `I18nKey` value so dynamic forms localize automatically.
+
+<Aside type="note">
+  The engine never throws on a missing key. If no translation is found at any scope level, it returns the key string itself and logs a warning under module `i18n`. That makes missing keys visible in logs without breaking the response.
+</Aside>
+
+---
+
+## Step 1 — Declare Keys in `module.yaml`
+
+Add an `i18n:` block to your module manifest with three subkeys: `keys` (every I18nKey constant the module uses), `required_locales` (the locales every key must be translated into), and `defaults` (the actual locale → key → value table).
+
+```yaml
+i18n:
+  keys:
+    - documents.statuses.draft
+    - documents.statuses.published
+    - documents.actions.publish
+    - DOCUMENTS.NOT_FOUND.INSTANCE
+    - DOCUMENTS.VALIDATION.INVALID_TRANSITION
+
+  required_locales: [es, en]
+
+  defaults:
+    es:
+      documents.statuses.draft: Borrador
+      documents.statuses.published: Publicado
+      documents.actions.publish: Publicar
+      DOCUMENTS.NOT_FOUND.INSTANCE: Documento no encontrado
+      DOCUMENTS.VALIDATION.INVALID_TRANSITION: Transición de estado inválida
+    en:
+      documents.statuses.draft: Draft
+      documents.statuses.published: Published
+      documents.actions.publish: Publish
+      DOCUMENTS.NOT_FOUND.INSTANCE: Document not found
+      DOCUMENTS.VALIDATION.INVALID_TRANSITION: Invalid state transition
+```
+
+### Naming Conventions
+
+Two patterns are in active use across foundation modules:
+
+| Convention | Used for | Example |
+|---|---|---|
+| `module.category.name` (lowercase, dotted) | UI labels — statuses, action labels, field names | `documents.statuses.draft` |
+| `MODULE.CATEGORY.NAME` (uppercase) | Error codes that double as i18n keys | `DOCUMENTS.NOT_FOUND.INSTANCE` |
+
+The uppercase form mirrors the value of `core.ErrorCode`, so `core.NewError` and `core.TranslatedError` populate both `Code` and `MessageKey` from the same constant.
+
+### Declaring Constants in Go
+
+Each module keeps its key constants in `model/i18n_keys.go` so call sites stay type-safe:
+
+```go
+package model
+
+import "platform/internal/core"
+
+const (
+    I18nStatusDraft     core.I18nKey = "documents.statuses.draft"
+    I18nStatusPublished core.I18nKey = "documents.statuses.published"
+    I18nActionPublish   core.I18nKey = "documents.actions.publish"
+)
+```
+
+The string literal must match an entry in `module.yaml` exactly. Anything else resolves to the key string at runtime and warns in logs.
+
+---
+
+## Step 2 — Provide Defaults Per Locale
+
+Defaults are seeded into `public.translations` with `scope = 'module'` and `module_name = <module>`. That table is the source of truth for what every tenant sees until a tenant chooses to override.
+
+```yaml
+i18n:
+  defaults:
+    es:
+      billing.invoices.created: "Factura {invoice_id} creada"
+      billing.warnings.unpaid:  "Tienes {count, plural, one {# factura vencida} other {# facturas vencidas}}"
+    en:
+      billing.invoices.created: "Invoice {invoice_id} created"
+      billing.warnings.unpaid:  "You have {count, plural, one {# overdue invoice} other {# overdue invoices}}"
+```
+
+Values are ICU MessageFormat strings. The engine supports:
+
+- Simple interpolation — `{name}`
+- Plural rules — `{n, plural, =0 {none} one {# item} other {# items}}` (the `#` token expands to the matched number inside a sub-message)
+- Select — `{gender, select, male {he} female {she} other {they}}`
+- Nested expressions — sub-messages may contain further `{...}` blocks
+- Literal escape — `''` inside an ICU string produces a single quote, and `'text'` keeps `{` / `}` literal
+
+CLDR plural keyword matching is simplified to `one` versus `other`, which covers English and Spanish correctly.
+
+### `required_locales`
+
+`required_locales` lists every locale every key must have a default for. The platform default is `es` (see `i18n.DefaultLocale`). The convention across foundation modules is `[es, en]`.
+
+<Aside type="caution">
+  Add the new locale to every module's `required_locales` and every `defaults` block before flipping it on at the tenant level. The engine will return the key string for any locale that has no row, which surfaces as untranslated UI rather than as a hard error.
+</Aside>
+
+---
+
+## Step 3 — Reference a Key from Code
+
+Three idiomatic call sites:
+
+<Tabs>
+<TabItem label="Status transitions">
+
+The status engine carries the key in the `Label` string field. The frontend resolves it via `GET /api/v1/tenants/{tenant_id}/i18n`.
+
+```yaml
+state_machines:
+  - key: status
+    transitions:
+      - from: draft
+        to: published
+        action: publish
+        permission: documents.publish
+        label: documents.actions.publish
+        style: confirm
+        confirm: true
+        confirm_message: documents.confirm.publish
+```
+
+</TabItem>
+<TabItem label="Notification actions">
+
+`NotificationAction.LabelKey` is a typed `I18nKey`. The dispatcher serializes the key; the client translates.
+
+```go
+action := core.NotificationAction{
+    Key:       "approve",
+    Kind:      core.NotificationActionResource,
+    LabelKey:  "approvals.actions.approve",
+    Style:     core.ActionStyleConfirm,
+    Confirm:   true,
+    ConfirmMessageKey: "approvals.confirm.approve",
+    Resource: &core.NotificationResourceRef{
+        Module: "approvals",
+        Type:   "request",
+        ID:     req.ID,
+    },
+    ResourceAction: "approve",
+}
+```
+
+</TabItem>
+<TabItem label="Server-rendered errors">
+
+Use `core.TranslatedError` when the response carries a localized message at the moment of failure. The factory sets `Code`, `Message` (rendered), `MessageKey`, and `Params` in one shot.
+
+```go
+if state != "draft" {
+    return core.TranslatedError(ctx,
+        "DOCUMENTS.VALIDATION.INVALID_TRANSITION",
+        core.I18nParams{"from": state, "to": "published"},
+    )
+}
+```
+
+</TabItem>
+<TabItem label="Inline translation">
+
+`core.T(ctx, key, params)` resolves the key directly. If no translator is on the context (e.g., a unit test that doesn't run the HTTP middleware) it returns the key string.
+
+```go
+msg := core.T(ctx, "billing.invoices.created", core.I18nParams{
+    "invoice_id": invoice.PublicID,
+})
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+## Step 4 — How the Resolver Picks a Locale
+
+`i18n.Middleware` wraps every HTTP request, stores the resolved locale on the context, and attaches the `DefaultTranslator`. `DefaultTranslator.ResolveLocale` walks four sources in order:
+
+<Steps>
+
+1. **User preference** — `core.UserFrom(ctx).Locale` (`user_settings.locale` in the DB).
+2. **Accept-Language header** — primary tag only. `es-MX,es;q=0.9,en;q=0.8` resolves to `es`; everything after the first comma or semicolon is dropped, and the region suffix (`-MX`) is stripped.
+3. **Tenant default** — `tenant.Config["default_locale"]`.
+4. **Platform default** — `i18n.DefaultLocale`, currently `"es"`.
+
+</Steps>
+
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={420}
+  nodes={[
+    { id: 'req', label: 'HTTP request', sub: 'i18n.Middleware', variant: 'accent' },
+    { id: 'user', label: '1. User.Locale', sub: 'user_settings.locale' },
+    { id: 'header', label: '2. Accept-Language', sub: 'primary tag, region stripped' },
+    { id: 'tenant', label: '3. tenant.Config', sub: 'default_locale' },
+    { id: 'platform', label: '4. Platform default', sub: 'i18n.DefaultLocale = "es"' },
+    { id: 'validate', label: 'Validate vs. tenant', sub: 'supported_locales', variant: 'muted' },
+    { id: 'ctx', label: 'core.WithLocale(ctx)', sub: 'attached to request context', variant: 'coral' },
+  ]}
+  edges={[
+    { source: 'req', target: 'user' },
+    { source: 'user', target: 'header', label: 'empty' },
+    { source: 'header', target: 'tenant', label: 'empty' },
+    { source: 'tenant', target: 'platform', label: 'empty' },
+    { source: 'user', target: 'validate' },
+    { source: 'header', target: 'validate' },
+    { source: 'tenant', target: 'validate' },
+    { source: 'platform', target: 'validate' },
+    { source: 'validate', target: 'ctx' },
+  ]}
+/>
+
+Downstream handlers read the locale with `core.LocaleFrom(ctx)` and the translator with `core.TranslatorFrom(ctx)`.
+
+---
+
+## Step 5 — Tenant Overrides
+
+Translations live in two tables. The split is the heart of the resolver:
+
+| Table | Scopes stored | Owner |
+|---|---|---|
+| `public.translations` | `platform`, `module` | Seeded from `module.yaml` defaults at deploy time. |
+| `tenant_<slug>.tenant_translations` | `tenant`, `instance` | Written by tenants through `PUT /api/v1/tenants/{tenant_id}/i18n/translations`. |
+
+`Resolver.Resolve` queries both, merges results, sorts by scope specificity, and returns the first match. The override order, most specific first, is:
+
+```
+instance → tenant → module → platform → (key string)
+```
+
+That mirrors the four-level hierarchy described in `internal/core/i18n/doc.go`.
+
+### Writing an Override
+
+The upsert endpoint takes the scope, the key, the locale, the value, and (for module / instance scope) the routing fields. Permission `i18n.translations.manage` is required.
+
+```bash
+curl -X PUT http://localhost:8080/api/v1/tenants/$TENANT_ID/i18n/translations \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key":     "documents.statuses.draft",
+    "locale":  "es",
+    "value":   "Borrador interno",
+    "scope":   "tenant"
+  }'
+```
+
+The handler routes by scope: `platform` and `module` rows write `public.translations`; `tenant` and `instance` rows write `tenant_translations` inside the tenant's schema. After the upsert the handler audits the change and invalidates the in-memory cache.
+
+### Instance-Scoped Overrides
+
+When `scope = instance`, the row also carries the `instance_id` of the module instance the override applies to. The resolver only returns instance rows that match the instance currently on the request context (`core.ModuleInstanceFrom(ctx)`).
+
+<Aside type="tip">
+  Use `GET /api/v1/tenants/{tenant_id}/i18n/missing?locales=es,en` to surface keys that have no translation in a given locale. The handler returns per-locale coverage percentages so you can track localization completeness over time.
+</Aside>
+
+---
+
+## Locale Validation and Tenant-Scoped Cache
+
+Two refinements protect the resolver from cross-tenant leakage and unsupported locales:
+
+### `supported_locales` Validation
+
+`ResolveLocale` consults `tenant.Config["supported_locales"]` (a JSON array of locale codes). If the tenant configures it and the chosen locale is not in the list, the resolver falls back to the tenant's `default_locale` instead. If `supported_locales` is unset, every locale is accepted — useful while a tenant is still bootstrapping translations.
+
+```yaml
+# tenant.config example
+default_locale: es
+supported_locales: [es, en]
+```
+
+A request from a user with `Locale = "pt"` against a tenant configured as above resolves to `es`, not `pt`.
+
+### Tenant-Scoped Cache Keys
+
+The translation cache (`internal/core/i18n/cache.go`) keys every entry by tenant ID:
+
+```
+<tenant_id>:<locale>:<key>:<module>:<instance>
+```
+
+The first segment is the tenant's `InternalID`, pulled from the request context. Two tenants overriding the same key for the same locale never collide in the cache. `InvalidateCache` clears every entry across all tenants — it runs after any upsert or delete on a translation row.
+
+Cache defaults: 5 minute TTL, 50,000 entries max. When the cache hits its size limit it flushes entirely rather than running LRU — translation churn is low and the cache rebuilds within a request or two.
+
+---
+
+## Inspecting Resolved Translations
+
+The HTTP handler exposes four endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/v1/tenants/{tenant_id}/i18n` | All resolved translations for the current locale, hierarchy applied. The frontend calls this once at session start and caches the result. |
+| `GET` | `/api/v1/tenants/{tenant_id}/i18n/missing?locales=es,en` | Keys missing per locale + coverage stats. |
+| `GET` | `/api/v1/tenants/{tenant_id}/i18n/translations` | Raw translation rows (paginated, filterable by scope / locale / module). |
+| `PUT` | `/api/v1/tenants/{tenant_id}/i18n/translations` | Upsert one translation. |
+| `DELETE` | `/api/v1/tenants/{tenant_id}/i18n/translations/{id}` | Remove one row by public ID. Trying `public.translations` first, then `tenant_translations`. |
+
+The first endpoint is what the frontend should depend on; the rest are admin/inspection tooling.
+
+---
+
+## Common Mistakes
+
+- **Adding a Go constant without updating `module.yaml`.** The constant compiles, the call site runs, the translation comes back as the literal key string, and a warning lands in logs. Always edit both files in the same change.
+- **Forgetting a locale in `defaults`.** If `required_locales: [es, en]` but only `es` is provided, English clients see the key string. The yaml lints flag this when the module is loaded by tooling.
+- **Mixing dotted and uppercase styles for the same key.** Pick one form per use-case (lowercase for UI labels, uppercase for error codes that double as keys). The resolver is case-sensitive, so `documents.actions.publish` and `Documents.Actions.Publish` are two different keys with two different rows.
+- **Hardcoding strings in `Label` / `ConfirmMessage` instead of using a key.** Status engine action labels are i18n keys by convention; a raw English string ships untranslated to every locale.
+- **Calling `core.T` without the translator on the context.** Unit tests that bypass the HTTP middleware must build a context with `core.WithTranslator` if they assert on translated output — otherwise `T` returns the key string.
+- **Storing tenant-scoped overrides in `public.translations`.** The upsert handler enforces scope routing, but if you write the rows by hand, queue the row to the tenant schema's `tenant_translations`, not the public table.
+- **Assuming the cache invalidates on `module.yaml` edits.** The cache picks up new rows when the module-load step seeds them into `public.translations`, but a running process holds the old values for up to the cache TTL. Restart or call `InvalidateCache` after a manual seed.
+
+---
+
+## Related
+
+- [Architecture: Notifications](/architecture/notifications/) — how `LabelKey` and `ConfirmMessageKey` flow into the dispatcher.
+- [Sending Notifications](/guides/notifications/) — end-to-end recipe that uses `label_key` on every action button.
+- [Building a Status Machine](/guides/status-machines/) — uses i18n keys for transition labels and confirmation prompts.
+- [module.yaml Reference](/guides/module-yaml-reference/) — every section of the manifest, including the `i18n` block.

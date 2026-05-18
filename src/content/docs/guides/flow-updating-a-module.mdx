@@ -1,0 +1,69 @@
+---
+title: Updating a Module Flow
+description: End-to-end flow for safely evolving an existing Heyllave module — schema changes, new endpoints, permission updates, and event subscriptions.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+Updating a module is mostly a series of localized edits, but several changes are coupled: a new permission needs a code-gen pass, a schema change needs a migration plus a model update, and a new subscription needs to be declared in `module.yaml` before it can fire.
+
+This flow shows the canonical order so nothing drifts out of sync.
+
+---
+
+## Decide What's Changing
+
+| Change | Needs migration? | Needs code-gen? | Needs `module.yaml` edit? |
+|---|---|---|---|
+| New column / index | Yes | No | No |
+| New permission | No | Yes | Yes |
+| New scope | No | Yes | Yes |
+| New endpoint | No | No | No |
+| New status / transition | Maybe (if persisted) | Yes | Yes |
+| New event subscription | No | Yes | Yes |
+| New module dependency | No | No | Yes |
+
+Anything in the "Yes" columns means you must touch the declarative side first — then implement.
+
+---
+
+## The Flow
+
+<Steps>
+
+1. **Update `module.yaml` first.** If you're adding a permission, scope, status, dependency, or event subscription, this is the source of truth. Edit `module.yaml` before any Go code.
+
+2. **Re-run code generation.** `heyllave module generate` updates the permission/scope constants and refreshes the `module.go` skeleton. Existing custom code in `module.go` is preserved — only the generated regions are rewritten.
+
+3. **Write the migration (if schema-changing).** Add a new statement to the module's SQL file under `heyllave-cli`'s `migrations/modules/<name>.sql`. Heyllave uses additive, versioned migrations — never edit a migration after it has run against any database. See [Migrations](/guides/migrations/).
+
+4. **Update the model & repository.** Reflect new columns on the model struct and adjust SQL in the repository layer. Keep query builders narrow — one method per use case.
+
+5. **Update the service.** New business rules go here. If the change affects permission checks, audit recording, or event emission, those all sit inside the service transaction. See [Service Patterns](/guides/service-patterns/).
+
+6. **Update the handler.** Add/modify the Huma operation definition, input/output structs, and error mapping. Huma will auto-regenerate the OpenAPI spec on the next server restart. See [Handler Patterns](/guides/handler-patterns/).
+
+7. **Update tests.** Adjust unit and repository tests for the new behavior. Add an E2E case in `heyllave-e2e` for any externally visible change.
+
+8. **Apply & verify.** `heyllave migrate apply`, restart the server, and run the relevant E2E suite. Refresh the admin app and any client SDKs that consume the OpenAPI spec.
+
+</Steps>
+
+<Aside type="caution">
+  Renaming fields, removing endpoints, or narrowing permissions breaks consumers — the admin app and external clients won't redeploy at the same instant as the API. Prefer additive changes; if you must remove something, ship the additive version first and clean up in a follow-up release once every consumer has cut over.
+</Aside>
+
+---
+
+## Common Pitfalls
+
+- **Skipping the `module.yaml` edit and writing Go directly.** Permission constants won't exist, scope filters won't apply, and the runtime will refuse to register the module.
+- **Editing a migration in place after anyone has applied it.** Once a migration has run against any database — even a dev one — editing the file breaks the next environment that picks it up. Always add a new migration.
+- **Forgetting to bump the `version:` in `module.yaml`** when introducing breaking changes. The CLI uses this for upgrade gating.
+
+---
+
+## Related Flows
+
+- [Creating a Module](/guides/flow-creating-a-module/) — the first-time path.
+- [Event Propagation](/guides/flow-event-propagation/) — when adding a new subscription or emitting a new event.

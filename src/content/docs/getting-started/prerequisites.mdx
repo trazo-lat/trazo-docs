@@ -1,17 +1,17 @@
 ---
 title: Prerequisites
-description: Software and tools you need to install before setting up Trazo locally.
+description: Software and tools you need to install before setting up Heyllave locally.
 ---
 
 import { Aside, Badge, Tabs, TabItem } from '@astrojs/starlight/components';
 
-Before cloning and running Trazo, make sure the following tools are available on your machine.
+Before cloning and running Heyllave, make sure the following tools are available on your machine.
 
 ## Required
 
 ### Go 1.24+
 
-Both `trazo-core-service` and `trazo-cli` are written in Go 1.24. Earlier versions are not supported.
+Both `heyllave-core-service` and `heyllave-cli` are written in Go 1.24. Earlier versions are not supported.
 
 <Tabs>
   <TabItem label="Linux / macOS">
@@ -49,10 +49,10 @@ Both `trazo-core-service` and `trazo-cli` are written in Go 1.24. Earlier versio
 
 ### PostgreSQL 15+
 
-Trazo uses PostgreSQL-specific features for schema-per-tenant isolation (e.g., `CREATE SCHEMA`, `search_path` switching). PostgreSQL 15 or newer is required.
+Heyllave uses PostgreSQL-specific features for schema-per-tenant isolation (e.g., `CREATE SCHEMA`, `search_path` switching). PostgreSQL 15 or newer is required.
 
 <Aside type="tip">
-  For local development you do **not** need to install PostgreSQL manually. The `trazo db local` command starts a pre-configured PostgreSQL 15 container for you via Docker. Install PostgreSQL directly only if you prefer a native setup or are configuring a staging/production environment.
+  For local development you do **not** need to install PostgreSQL manually. The `heyllave db local` command starts a pre-configured PostgreSQL 15 container for you via Docker. Install PostgreSQL directly only if you prefer a native setup or are configuring a staging/production environment.
 </Aside>
 
 <Tabs>
@@ -78,7 +78,7 @@ Trazo uses PostgreSQL-specific features for schema-per-tenant isolation (e.g., `
 
 ### Docker
 
-The `trazo db local` CLI command uses Docker to start and manage a PostgreSQL container named `trazo-local-db`. Docker Engine 24+ or Docker Desktop is sufficient.
+The `heyllave db local` CLI command uses Docker to start and manage a PostgreSQL container named `heyllave-local-db`. Docker Engine 24+ or Docker Desktop is sufficient.
 
 <Tabs>
   <TabItem label="Linux">
@@ -115,7 +115,7 @@ Most systems ship with Git pre-installed. If not, install it via your package ma
 
 ### Node.js 20+ <Badge text="Docs site only" variant="note" />
 
-Only required if you want to run or contribute to this documentation site (`trazo-docs`). The API server and CLI have no Node.js dependency.
+Only required if you want to run or contribute to this documentation site (`heyllave-docs`). The API server and CLI have no Node.js dependency.
 
 ```bash
 node --version   # v20.x.x or higher
@@ -128,7 +128,7 @@ Recommended: use [nvm](https://github.com/nvm-sh/nvm) or [mise](https://mise.jdx
 
 ### Atlas <Badge text="Optional" variant="note" />
 
-[Atlas](https://atlasgo.io/) is the migration engine Trazo uses under the hood. The `trazo migrate` CLI subcommands wrap Atlas automatically, so you rarely need to invoke Atlas directly. Install it if you want to inspect or author migrations manually outside of the CLI.
+[Atlas](https://atlasgo.io/) is the migration engine Heyllave uses under the hood. The `heyllave migrate` CLI subcommands wrap Atlas automatically, so you rarely need to invoke Atlas directly. Install it if you want to inspect or author migrations manually outside of the CLI.
 
 ```bash
 # Linux / macOS
@@ -144,7 +144,7 @@ atlas version
 |---|---|---|
 | Go | 1.24+ | Yes |
 | PostgreSQL | 15+ | Yes (or via Docker) |
-| Docker | 24+ | Yes (for `trazo db local`) |
+| Docker | 24+ | Yes (for `heyllave db local`) |
 | Git | any | Yes |
 | Node.js | 20+ | No (docs site only) |
 | Atlas | latest | No (CLI handles it) |

@@ -1,11 +1,11 @@
 ---
 title: Events
-description: Query domain events, inspect event statistics, and retrieve failed dead-letter events from the Trazo event store.
+description: Query domain events, inspect event statistics, and retrieve failed dead-letter events from the Heyllave event store.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Trazo uses an event-sourced architecture. Every meaningful state change in the system — a repair being created, a user being updated, an invoice being issued — is recorded as an immutable domain event. These events flow through the event bus to power side effects such as notifications, projections, and integrations.
+Heyllave uses an event-sourced architecture. Every meaningful state change in the system — a repair being created, a user being updated, an invoice being issued — is recorded as an immutable domain event. These events flow through the event bus to power side effects such as notifications, projections, and integrations.
 
 The Events API lets you query the event store directly. This is useful for debugging, replaying events, building custom projections, and monitoring pipeline health.
 

@@ -1,11 +1,11 @@
 ---
 title: Service Patterns
-description: The canonical 5-step service pattern used across all Trazo modules, with full examples for Create, Update, and Delete operations.
+description: The canonical 5-step service pattern used across all Heyllave modules, with full examples for Create, Update, and Delete operations.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The service layer is where all business logic lives in Trazo. Every service method follows a strict 5-step pattern that guarantees consistency across the platform: validation, authorization, hooks, transactional persistence, and post-transaction side effects.
+The service layer is where all business logic lives in Heyllave. Every service method follows a strict 5-step pattern that guarantees consistency across the platform: validation, authorization, hooks, transactional persistence, and post-transaction side effects.
 
 This structure is not a suggestion — it is the contract the platform relies on for audit trails, event delivery guarantees, and extensibility. Deviating from it leads to missing audit records, events that fire without a committed transaction, or permission checks that never run.
 
@@ -288,7 +288,7 @@ func (s *RepairsService) Update(ctx context.Context, id string, input UpdateRepa
 
 ## Delete Variant
 
-Trazo uses soft deletes. The Delete method sets `deleted_at` rather than removing the row, and records a tombstone audit entry.
+Heyllave uses soft deletes. The Delete method sets `deleted_at` rather than removing the row, and records a tombstone audit entry.
 
 ```go
 func (s *RepairsService) Delete(ctx context.Context, id string) error {

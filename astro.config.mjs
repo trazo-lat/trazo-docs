@@ -2,39 +2,45 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightOpenAPI, { openAPISidebarGroups } from 'starlight-openapi';
 import mermaid from 'astro-mermaid';
+import react from '@astrojs/react';
 
 export default defineConfig({
   integrations: [
+    react(),
     mermaid({
       autoTheme: true,
       mermaidConfig: {
         theme: 'base',
         themeVariables: {
-          primaryColor: '#3b82f6',
-          primaryTextColor: '#ffffff',
-          primaryBorderColor: '#2563eb',
-          secondaryColor: '#1e3a5f',
-          secondaryTextColor: '#ffffff',
-          secondaryBorderColor: '#1a2b4a',
-          tertiaryColor: '#dbeafe',
-          tertiaryTextColor: '#1e3a5f',
-          tertiaryBorderColor: '#93c5fd',
-          lineColor: '#888b96',
-          textColor: '#c0c2c7',
-          mainBkg: '#3b82f6',
-          nodeBorder: '#2563eb',
-          clusterBkg: '#24272f',
-          clusterBorder: '#545861',
-          edgeLabelBackground: '#24272f',
-          nodeTextColor: '#ffffff',
+          primaryColor: '#5853CF',
+          primaryTextColor: '#F5F2EC',
+          primaryBorderColor: '#8884E5',
+          secondaryColor: '#FF6B5B',
+          secondaryTextColor: '#F5F2EC',
+          secondaryBorderColor: '#E84D3C',
+          tertiaryColor: '#2B2A28',
+          tertiaryTextColor: '#F5F2EC',
+          tertiaryBorderColor: '#4F4D48',
+          lineColor: '#B7B4AD',
+          textColor: '#F5F2EC',
+          mainBkg: '#5853CF',
+          nodeBorder: '#8884E5',
+          clusterBkg: 'transparent',
+          clusterBorder: '#4F4D48',
+          edgeLabelBackground: '#1B1A19',
+          nodeTextColor: '#F5F2EC',
         },
       },
     }),
     starlight({
-      title: 'Trazo Docs',
-      description: 'Documentation for the Trazo multi-tenant SaaS platform',
+      title: 'Heyllave Docs',
+      description: 'Documentation for the Heyllave multi-tenant SaaS platform',
+      logo: {
+        src: './src/assets/heyllave-logo.svg',
+        replacesTitle: true,
+      },
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/trazo-dev' },
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/heyllave/docs' },
       ],
       customCss: ['./src/styles/custom.css'],
       sidebar: [
@@ -112,6 +118,16 @@ export default defineConfig({
             { label: 'Testing Guide', slug: 'guides/testing-guide' },
             { label: 'Migrations', slug: 'guides/migrations' },
             { label: 'Cross-Module Calls', slug: 'guides/cross-module-calls' },
+          ],
+        },
+        {
+          label: 'Subsystem Guides',
+          items: [
+            { label: 'Sending Notifications', slug: 'guides/notifications' },
+            { label: 'Status Machines', slug: 'guides/status-machines' },
+            { label: 'Hooks', slug: 'guides/hooks' },
+            { label: 'Approval Workflows', slug: 'guides/approvals' },
+            { label: 'Translations (i18n)', slug: 'guides/i18n' },
           ],
         },
         {

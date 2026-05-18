@@ -1,5 +1,5 @@
 ---
-title: Trazo Documentation
+title: Heyllave Documentation
 description: Build multi-tenant SaaS applications with schema-per-tenant isolation, pluggable modules, and a full audit trail.
 template: splash
 hero:
@@ -21,7 +21,7 @@ hero:
 
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
-## Why Trazo?
+## Why Heyllave?
 
 <CardGrid>
   <Card title="Schema-per-Tenant" icon="seti:db">
@@ -40,7 +40,7 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
     Fine-grained permissions with SQL-level scope enforcement. Built-in scopes: all, own, assigned, team, created. Scopes translate directly to WHERE clauses.
   </Card>
   <Card title="CLI Tooling" icon="terminal">
-    `trazo` CLI handles local development, database management, migrations, and module validation. One command to spin up a local PostgreSQL instance.
+    `heyllave` CLI handles local development, database management, migrations, and module validation. One command to spin up a local PostgreSQL instance.
   </Card>
 </CardGrid>
 
@@ -71,14 +71,14 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 ## Two-Repo Architecture
 
-Trazo is split into two Go repositories:
+Heyllave is split into two Go repositories:
 
 | Repository | Purpose | Key Tech |
 |------------|---------|----------|
-| `trazo-core-service` | API server, Core struct, domain modules | Go 1.24, Huma v2, chi, sqlx, squirrel |
-| `trazo-cli` | Database management, migrations, module tooling | Go 1.24, Cobra, Docker SDK |
+| `heyllave-core-service` | API server, Core struct, domain modules | Go 1.24, Huma v2, chi, sqlx, squirrel |
+| `heyllave-cli` | Database management, migrations, module tooling | Go 1.24, Cobra, Docker SDK |
 
-Both share the same `trazo.yaml` configuration format and connect to the same PostgreSQL instance.
+Both share the same `heyllave.yaml` configuration format and connect to the same PostgreSQL instance.
 
 ## What's Inside
 
@@ -87,5 +87,5 @@ Both share the same `trazo.yaml` configuration format and connect to the same Po
 - **Module Development** — Patterns for services, handlers, repositories, testing, and migrations
 - **API Reference** — Auto-generated from the OpenAPI spec with every endpoint, request/response schema, and status code
 - **API Guides** — Hand-written tutorials with multi-language examples for each API area
-- **CLI Reference** — Every `trazo` command with flags and examples
+- **CLI Reference** — Every `heyllave` command with flags and examples
 - **Reference** — Lookup tables for types, interfaces, error codes, database schema, and configuration

@@ -1,9 +1,9 @@
 ---
 title: Module System
-description: How Trazo modules are structured, the required and optional interfaces they must implement, and the role of module.yaml in code generation and runtime behavior.
+description: How Heyllave modules are structured, the required and optional interfaces they must implement, and the role of module.yaml in code generation and runtime behavior.
 ---
 
-Every piece of functionality in Trazo — whether it is a core platform capability or a domain-specific feature — is packaged as a module. All modules implement the same interface, follow the same file layout, and are registered in the same module registry. This uniformity means that adding a new domain area to the platform does not require modifying any framework code.
+Every piece of functionality in Heyllave — whether it is a core platform capability or a domain-specific feature — is packaged as a module. All modules implement the same interface, follow the same file layout, and are registered in the same module registry. This uniformity means that adding a new domain area to the platform does not require modifying any framework code.
 
 Module migrations live in `migrations/modules/<name>.sql`, one file per module. They are applied to a tenant's schema when the module is provisioned for that tenant (either at tenant creation if listed in `tenant.default_modules`, or later via the `SchemaProvisioner` when the module is enabled).
 
@@ -12,14 +12,14 @@ Module migrations live in `migrations/modules/<name>.sql`, one file per module. 
 | Type | Description | Lifecycle |
 |---|---|---|
 | `foundation` | Core platform capabilities that every tenant requires | Always enabled; cannot be disabled |
-| `domain` | Business-specific features shipped with the platform | Enabled or disabled per tenant |
+| `domain` | Business-specific features bundled with the platform | Enabled or disabled per tenant |
 | `custom` | Tenant-specific extensions developed for a single customer | Enabled only for the owning tenant |
 
 Foundation modules cover users, tenants, auth, audit, events, and notifications. They are backed by `migrations/core/public/` (cross-tenant tables) and `migrations/core/tenant/` (per-tenant subsystem tables), not by `migrations/modules/`.
 
 Domain modules bundled with the platform include `agents`, `billing`, `conversations`, `documents`, and `entities`. Each has its own SQL file at `migrations/modules/<name>.sql`.
 
-Which domain modules are provisioned automatically for new tenants is controlled by the `tenant.default_modules` list in `trazo.yaml`:
+Which domain modules are provisioned automatically for new tenants is controlled by the `tenant.default_modules` list in `heyllave.yaml`:
 
 ```yaml
 tenant:
@@ -51,7 +51,7 @@ type Module interface {
 }
 ```
 
-Modules no longer embed their own migration `embed.FS`. SQL files live at `migrations/modules/<name>.sql` and are embedded once at the binary level. The platform's `SchemaProvisioner` reads the appropriate file when it needs to apply a module to a tenant schema.
+Modules do not embed their own migration `embed.FS`. SQL files live at `migrations/modules/<name>.sql` and are embedded once at the binary level. The platform's `SchemaProvisioner` reads the appropriate file when it needs to apply a module to a tenant schema.
 
 | Method | Called when | Purpose |
 |---|---|---|
@@ -98,7 +98,7 @@ type MetricsProvider interface {
 
 ## File Structure Convention
 
-All modules follow the same directory layout. This is enforced by the code generator in `trazo-cli`.
+All modules follow the same directory layout. This is enforced by the code generator in `heyllave-cli`.
 
 ```
 internal/modules/<type>/<name>/
@@ -117,7 +117,7 @@ The module's SQL lives at the **repo level**, not inside the module package:
 migrations/modules/<name>.sql
 ```
 
-One file per module. There are no numbered prefixes and no `-- +down` markers — Trazo uses declarative, desired-state migrations powered by `pg-schema-diff`. See [Migrations](/guides/migrations/) for the full layout and lifecycle.
+One file per module. There are no numbered prefixes and no `-- +down` markers — Heyllave uses declarative, desired-state migrations powered by `pg-schema-diff`. See [Migrations](/guides/migrations/) for the full layout and lifecycle.
 
 | File | Responsibility |
 |---|---|
@@ -169,12 +169,12 @@ notifications:
 
 ### What module.yaml drives
 
-**Code generation (`trazo generate`):**
+**Code generation (`heyllave generate`):**
 - Generates permission constants in Go (e.g., `repairs.PermissionRead`, `repairs.PermissionCreate`).
 - Generates the `ModuleService` interface stub for the module.
 - Scaffolds handler and repository boilerplate.
 
-**Permission and scope sync (`trazo sync permissions`):**
+**Permission and scope sync (`heyllave sync permissions`):**
 - Reads all `module.yaml` files and upserts the permission definitions into the database.
 - Ensures the permission registry is always in sync with the declared module permissions.
 
@@ -193,7 +193,7 @@ Modules are registered in the application's main entry point:
 
 ```go
 func main() {
-    app := trazo.New()
+    app := heyllave.New()
 
     app.RegisterModules(
         // Foundation modules (always enabled)

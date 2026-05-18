@@ -1,0 +1,384 @@
+---
+title: Building a Status Machine
+description: End-to-end guide for defining a module-level state machine in YAML — statuses, transitions, preconditions, input schemas, and the generic actions API the frontend renders against.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+This guide walks through declaring a state machine for a module from scratch — statuses, transitions, preconditions, input forms — and shows how to invoke actions through the generic `GET /actions` and `POST /actions/{key}` endpoints the engine wires up for you.
+
+For the conceptual model — trigger types, validation order, instance overrides — see [Architecture: Status Engine](/architecture/status-engine/). For the YAML shape itself, see [module.yaml reference](/guides/module-yaml-reference/). Actions reuse the same `style`, `confirm`, and `input` vocabulary as [notification action buttons](/guides/notifications/#step-5-action-buttons), so what you learn here applies there too.
+
+## The Worked Example: Repairs
+
+We will build a `repairs` module with a single state machine called `status`. A repair flows through four states and exposes three actions to the user. The engine generates the API surface and validates every transition.
+
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={320}
+  nodes={[
+    { id: 'received', label: 'received', sub: 'initial', variant: 'muted' },
+    { id: 'in_progress', label: 'in_progress', sub: 'active', variant: 'accent' },
+    { id: 'completed', label: 'completed', sub: 'terminal', variant: 'coral' },
+    { id: 'cancelled', label: 'cancelled', sub: 'terminal', variant: 'muted' },
+  ]}
+  edges={[
+    { source: 'received', target: 'in_progress', label: 'start' },
+    { source: 'in_progress', target: 'completed', label: 'complete' },
+    { source: 'received', target: 'cancelled', label: 'cancel' },
+    { source: 'in_progress', target: 'cancelled', label: 'cancel' },
+  ]}
+/>
+
+The arrows are not direct DB updates — they are **actions** with permissions, preconditions, and input validation. Each one becomes a `POST .../actions/{key}` endpoint automatically.
+
+---
+
+## Step 1 — Declare Statuses
+
+Add a `state_machines` block to your module's `module.yaml`. Start by listing the statuses, each with a `key` and a `type`.
+
+```yaml
+state_machines:
+  - key: status
+    statuses:
+      base:
+        - { key: received,    type: initial }
+        - { key: in_progress, type: active }
+        - { key: completed,   type: terminal }
+        - { key: cancelled,   type: terminal }
+      extensible: true
+```
+
+| Type | Semantics |
+|---|---|
+| `initial` | Auto-assigned on create. Exactly one per machine. Cannot be a transition target. |
+| `active` | A working state — has both incoming and outgoing transitions. |
+| `terminal` | A final state. Reachable, but no outgoing transitions allowed. |
+
+<Aside type="tip">
+  Status values are stored as plain `VARCHAR` columns on your resource table. Adding a new status is a YAML edit — no migration, no `ALTER TYPE`, no enum DDL. Set `extensible: true` if tenants should be able to insert their own custom statuses into the flow.
+</Aside>
+
+The engine validates the full status set at module init (`ParseConfig`): exactly one initial, at least one terminal, no duplicate keys, every transition's `from`/`to` resolves to a real status.
+
+---
+
+## Step 2 — Declare Transitions
+
+Each transition is an action driven by a permission, anchored to a source state, with a target state. Add them under the same machine:
+
+```yaml
+    transitions:
+      # Simple transition: any user with the permission can start a repair.
+      - from: received
+        to: in_progress
+        action: start
+        permission: repairs.update
+        label: Start work
+
+      # Same action name from two states — used for "cancel from anywhere".
+      - from: "*"
+        to: cancelled
+        action: cancel
+        permission: repairs.cancel
+        style: destructive
+        exclude_from: [completed, cancelled]
+        confirm: true
+        confirm_message: This will cancel the repair. Continue?
+```
+
+A few moving parts worth pointing out:
+
+| Field | Notes |
+|---|---|
+| `from` | Source status key, or `"*"` for any non-terminal state. Pair `"*"` with `exclude_from: [...]` to carve out exceptions. |
+| `to` | Target status key. Must not be the initial state. |
+| `action` | Action name — becomes the `{action}` segment of the URL and is unique per `from` state inside a machine. |
+| `permission` | Permission required to invoke. Must match a key declared in the module's `permissions:` block. |
+| `style` | UI hint: `default`, `confirm`, `destructive`, or `warning`. Tells the frontend how to render the button. |
+| `confirm` / `confirm_message` | Whether the client should prompt before invoking, and the prompt body. |
+| `trigger` | Defaults to `permission`. Set to `system` or `event` to hide the action from `GET /actions` — those are reserved for background workers or event handlers. |
+
+The `validateConfigs` pass catches ambiguous transitions (same `action` + same `from`), dangling references, terminal-state outgoing edges, and machines with no terminal state — at startup, not at runtime.
+
+---
+
+## Step 3 — Add Preconditions
+
+A transition can declare runtime conditions that must hold against the resource's current data. If a precondition fails, the action still appears in `GET /actions` — but with `blocked: true` and a `blocked_reasons` array, so the UI can show the disabled button alongside the explanation of why it is disabled.
+
+Three precondition types are supported:
+
+| Type | Required keys | Engine checks |
+|---|---|---|
+| `field_required` | `field` | Resource data has a non-nil value at the given key. |
+| `field_not_empty` | `field` | Resource data has a non-empty string at the given key. |
+| `attachment_required` | `category` | Resource data's `attachments` array contains at least one entry whose `category` matches. |
+| `event_received` | `event` (+ optional `aggregate_field`) | The core event bus reports the named event was emitted for the resource (or for the aggregate ID in `aggregate_field`). Used to gate cross-module flows. |
+
+Add a precondition list to the transition. The engine evaluates preconditions against the `ResourceData` map returned by your module's resolver (see Step 5).
+
+```yaml
+      - from: in_progress
+        to: completed
+        action: complete
+        permission: repairs.complete
+        style: confirm
+        confirm: true
+        confirm_message: Mark this repair as completed?
+        preconditions:
+          - type: attachment_required
+            category: after_photo
+            message: An "after" photo is required to complete a repair.
+          - type: field_required
+            field: technician_id
+            message: Assign a technician before completing.
+```
+
+<Aside>
+  Preconditions are checked in two places: when listing actions (to set `blocked` + `blocked_reasons`) and when executing one (to reject the call with `422 CORE.STATUS.PRECONDITION_FAILED`). Both code paths share the exact same checker, so the UI and the server agree on what is allowed.
+</Aside>
+
+---
+
+## Step 4 — Add an Input Schema
+
+Most non-trivial actions need user input — completion notes, a cancel reason, a cost. Declare those as a list of fields under `input.fields`. The engine validates the body of `POST .../actions/{key}` against this schema before calling your applier.
+
+```yaml
+      - from: in_progress
+        to: completed
+        action: complete
+        permission: repairs.complete
+        style: confirm
+        preconditions:
+          - type: attachment_required
+            category: after_photo
+        input:
+          fields:
+            - key: completion_notes
+              type: text
+              label: Completion notes
+              required: true
+              min_length: 10
+              max_length: 500
+              multiline: true
+            - key: actual_cost
+              type: currency
+              label: Actual cost
+              required: false
+              min: 0
+            - key: warranty_months
+              type: select
+              label: Warranty
+              required: true
+              options:
+                - { value: "0",  label: No warranty }
+                - { value: "3",  label: 3 months }
+                - { value: "12", label: 12 months }
+```
+
+Each field is a `FieldDef`. The most common knobs:
+
+| Field property | Applies to | Notes |
+|---|---|---|
+| `key` | all | The form key — also the JSON key the client sends. |
+| `type` | all | `text`, `number`, `currency`, `date`, `datetime`, `boolean`, `select`, `multi_select`, `reference`, `attachment`, `line_items`. |
+| `required` | all | Static required flag. For conditional required, use `required_when`. |
+| `label` / `placeholder` | all | Free-form display strings. Localize these via your i18n keys block if needed. |
+| `min_length` / `max_length` / `multiline` | text | String constraints; `multiline` switches the rendered component to a textarea. |
+| `min` / `max` / `step` | number, currency | Numeric bounds. `currency` formats according to the tenant's locale. |
+| `options` | select, multi_select | List of `{ value, label }`. Submitted value must match one. |
+| `reference` | reference | `{ module, filter?, display?, search_endpoint? }` — used to render a typeahead picker against another module. |
+| `visible_when` / `required_when` | all | Tiny expression language: `field == value`, `field != value`, or bare `field` for truthiness. |
+
+Validation runs **after** permission + precondition checks. On any failure, the engine returns `422 CORE.STATUS.INVALID_INPUT` with a human-readable message and does not call your applier.
+
+---
+
+## Step 5 — Wire the Resolver and Applier
+
+The engine is intentionally schema-only — it never touches your DB. Two callbacks bridge between the engine and your domain. You provide them when registering the action routes in your handler:
+
+```go
+statemachine.RegisterActionRoutes(api, statemachine.ActionRouteConfig{
+    ModuleName: "repairs",
+    PathPrefix: "/repairs/work-orders",
+    Tags:       []string{"repairs"},
+
+    // Resolver loads current state + data for precondition checks.
+    Resolver: func(ctx context.Context, id string) (
+        map[string]string, map[string]any, error,
+    ) {
+        wo, err := svc.Get(ctx, id)
+        if err != nil {
+            return nil, nil, err
+        }
+        states := map[string]string{"status": wo.Status}
+        data := map[string]any{
+            "attachments":   wo.Attachments,   // [{category, url}, ...]
+            "technician_id": wo.TechnicianID,
+        }
+        return states, data, nil
+    },
+
+    // Applier persists the validated transition.
+    Applier: func(ctx context.Context, id string, r *core.TransitionResult) (any, error) {
+        switch r.Action {
+        case "start":
+            return svc.Start(ctx, id)
+        case "complete":
+            return svc.Complete(ctx, id, r.Input)
+        case "cancel":
+            return svc.Cancel(ctx, id, r.Input)
+        default:
+            return nil, fmt.Errorf("action %q not implemented", r.Action)
+        }
+    },
+
+    Engine: c.Status,
+})
+```
+
+The handler wires three endpoints under your `PathPrefix`. When registered from `RegisterInstanceRoutes`, the router is already scoped to `/api/v1/tenants/{tenant_id}/i/{instance}`, so the final paths are:
+
+```
+GET  /api/v1/tenants/{tenant_id}/i/{instance}/repairs/work-orders/{id}/actions
+POST /api/v1/tenants/{tenant_id}/i/{instance}/repairs/work-orders/{id}/actions/{action}
+GET  /api/v1/tenants/{tenant_id}/i/{instance}/repairs/work-orders/config
+```
+
+Invoking `complete` looks like:
+
+```bash
+curl -X POST \
+  "https://api.heyllave.co/api/v1/tenants/$TENANT_ID/i/main/repairs/work-orders/wo_01HQ.../actions/complete" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "completion_notes": "Replaced front brake pads and rotors. Test driven.",
+    "actual_cost": 245.00,
+    "warranty_months": "3"
+  }'
+```
+
+The engine validates permission, runs preconditions against the resolver's `ResourceData`, checks the input body against the schema, and only then invokes your applier with a `TransitionResult`. The applier writes the new status and returns the updated resource as the response body.
+
+---
+
+## Step 6 — Drive the UI from `GET /actions`
+
+The frontend never hard-codes which actions exist. Instead it lists them per resource by calling `GET .../actions` and rendering each entry as a button. Blocked actions render as disabled buttons with their reasons surfaced as tooltips.
+
+```bash
+curl "https://api.heyllave.co/api/v1/tenants/$TENANT_ID/i/main/repairs/work-orders/wo_01HQ.../actions" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{
+  "actions": [
+    {
+      "action": "complete",
+      "machine_key": "status",
+      "from": "in_progress",
+      "to": "completed",
+      "label": "Complete repair",
+      "style": "confirm",
+      "confirm": true,
+      "confirm_message": "Mark this repair as completed?",
+      "blocked": true,
+      "blocked_reasons": [
+        { "type": "attachment_required", "message": "An \"after\" photo is required to complete a repair." }
+      ],
+      "input": {
+        "fields": [
+          { "key": "completion_notes", "type": "text", "label": "Completion notes", "required": true, "min_length": 10, "multiline": true },
+          { "key": "actual_cost",      "type": "currency", "label": "Actual cost", "min": 0 },
+          { "key": "warranty_months",  "type": "select",   "label": "Warranty",    "required": true, "options": [/* ... */] }
+        ]
+      }
+    },
+    {
+      "action": "cancel",
+      "machine_key": "status",
+      "from": "in_progress",
+      "to": "cancelled",
+      "label": "Cancel",
+      "style": "destructive",
+      "confirm": true,
+      "confirm_message": "This will cancel the repair. Continue?",
+      "blocked": false
+    }
+  ]
+}
+```
+
+The shape is the same `AvailableAction` Go type — `action`, `from`, `to`, `label`, `style`, `confirm`, `blocked`, `blocked_reasons`, and the optional `input` schema. The frontend has everything it needs to render the button, the confirm dialog, the input form, and the disabled-state tooltip without knowing anything domain-specific.
+
+<Aside type="tip">
+  `GET .../config` returns the full state machine definition (every status, every transition, every input schema). The admin UI uses it to render the entire lifecycle visualization for a module — also without hard-coding anything.
+</Aside>
+
+---
+
+## Multiple Machines on One Resource
+
+A single resource can carry more than one independent state field. List them as additional entries under `state_machines:`. Each machine has its own `key`, its own statuses, and its own transitions. The engine merges available actions across all of them.
+
+```yaml
+state_machines:
+  - key: status     # the work-order lifecycle
+    statuses: { base: [ /* ... */ ] }
+    transitions:   [ /* ... */ ]
+
+  - key: payment    # an independent billing lifecycle
+    statuses:
+      base:
+        - { key: unpaid,         type: initial }
+        - { key: partial,        type: active }
+        - { key: paid,           type: terminal }
+    transitions:
+      - from: unpaid
+        to: partial
+        action: record_partial_payment
+        permission: repairs.collect_payment
+      - from: partial
+        to: paid
+        action: record_full_payment
+        permission: repairs.collect_payment
+```
+
+Your resolver returns one entry per machine key:
+
+```go
+states := map[string]string{
+    "status":  wo.Status,
+    "payment": wo.PaymentStatus,
+}
+```
+
+`GET .../actions` returns the union — payment actions appear alongside status actions, each tagged with its `machine_key`. Completing a repair has no effect on payment state, and vice versa. Use this when a resource has truly orthogonal lifecycles that you do not want to model as a Cartesian explosion of statuses.
+
+---
+
+## Common Mistakes
+
+- **Adding a transition `to: <initial-state>`.** The validator rejects it — initial states are entry-only. Use a separate "reopen" status if you need to revive completed work.
+- **Two transitions with the same `action` and overlapping `from`.** The engine cannot pick one deterministically and refuses to start. Use distinct action names or tighten the `from` sets.
+- **Forgetting `exclude_from` on a wildcard `from: "*"` transition.** Without it, your `cancel` action will offer to cancel a `completed` order. The validator does not catch this — your tests should.
+- **Putting business logic in the applier that the engine could enforce.** If "must have a technician assigned" is a hard rule, declare it as a `field_required` precondition rather than checking it inside `Complete()`. That way `GET /actions` shows the button as blocked with the right reason, instead of letting the user click and seeing a generic 500.
+- **Returning the wrong shape from the resolver.** `ResourceData` must use plain `map[string]any`. For attachments, that means `[]any` of `map[string]any` — not a typed slice — because the precondition checker walks it generically.
+- **Skipping `extensible: true` and then needing tenant-specific statuses.** Once a machine is non-extensible, the only way to add a tenant status is per-instance config overrides, which is a heavier path than flipping the flag up front.
+
+---
+
+## Related
+
+- [Architecture: Status Engine](/architecture/status-engine/) — trigger types, validation order, instance overrides, custom tenant statuses.
+- [module.yaml reference](/guides/module-yaml-reference/) — every field on every block of `module.yaml`, including the full `state_machines` schema.
+- [Sending Notifications](/guides/notifications/) — notification action buttons reuse the same `style` and `ActionInput` vocabulary; what you write here for state-machine actions transfers directly to notification actions.
+- [Creating a Module](/guides/creating-a-module/) — where `state_machines` fits into the broader module skeleton.

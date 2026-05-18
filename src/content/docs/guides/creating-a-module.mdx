@@ -1,15 +1,15 @@
 ---
 title: Creating a Module
-description: Step-by-step walkthrough for building a new domain module in Trazo, using a "repairs" module as a concrete example.
+description: Step-by-step walkthrough for building a new domain module in Heyllave, using a "repairs" module as a concrete example.
 ---
 
 import { Aside, Steps, FileTree } from '@astrojs/starlight/components';
 
-This guide walks through creating a fully functional domain module from scratch. By the end you will have a `repairs` module with its own migrations, models, repository, service, and HTTP handlers, all wired into the Trazo platform.
+This guide walks through creating a fully functional domain module from scratch. By the end you will have a `repairs` module with its own migrations, models, repository, service, and HTTP handlers, all wired into the Heyllave platform.
 
 ## What You Will Build
 
-The `repairs` module tracks vehicle repair jobs for a tenant. It will expose CRUD endpoints, enforce permission scopes, emit domain events, and record audit entries — all following Trazo conventions.
+The `repairs` module tracks vehicle repair jobs for a tenant. It will expose CRUD endpoints, enforce permission scopes, emit domain events, and record audit entries — all following Heyllave conventions.
 
 ---
 
@@ -39,7 +39,7 @@ The full module will have this layout when complete:
     - repairs.sql
 </FileTree>
 
-Notice that the SQL file lives at the **repo level** under `migrations/modules/`, not inside the module package. Trazo uses a declarative, three-tier migration layout — see [Migrations](/guides/migrations/) for the full picture.
+Notice that the SQL file lives at the **repo level** under `migrations/modules/`, not inside the module package. Heyllave uses a declarative, three-tier migration layout — see [Migrations](/guides/migrations/) for the full picture.
 
 ---
 
@@ -131,7 +131,7 @@ audit:
 ```
 
 <Aside type="note">
-  The `trazo` CLI reads `module.yaml` to generate permission sync SQL, validate dependency graphs, and scaffold missing files. You do not need to write all fields immediately — start minimal and expand as your module grows.
+  The `heyllave` CLI reads `module.yaml` to generate permission sync SQL, validate dependency graphs, and scaffold missing files. You do not need to write all fields immediately — start minimal and expand as your module grows.
 </Aside>
 
 ---
@@ -147,7 +147,7 @@ package repairs
 import (
 	"context"
 
-	"github.com/trazo-dev/trazo-core-service/internal/core"
+	"github.com/heyllave/core-service/internal/core"
 	"github.com/danielgtaylor/huma/v2"
 )
 
@@ -313,7 +313,7 @@ import (
 
 	sq "github.com/Masterminds/squirrel"
 	"github.com/jmoiron/sqlx"
-	"github.com/trazo-dev/trazo-core-service/internal/core"
+	"github.com/heyllave/core-service/internal/core"
 )
 
 type Repository struct {
@@ -418,7 +418,7 @@ package repairs
 import (
 	"context"
 
-	"github.com/trazo-dev/trazo-core-service/internal/core"
+	"github.com/heyllave/core-service/internal/core"
 )
 
 type RepairsService struct {
@@ -505,7 +505,7 @@ import (
 	"net/http"
 
 	"github.com/danielgtaylor/huma/v2"
-	"github.com/trazo-dev/trazo-core-service/internal/core"
+	"github.com/heyllave/core-service/internal/core"
 )
 
 type Handler struct {
@@ -574,7 +574,7 @@ See [Handler Patterns](/guides/handler-patterns/) for a complete treatment inclu
 The CLI's `module validate` command parses `module.yaml`, checks for unknown fields, validates dependency references, and verifies that all declared permissions follow the naming convention:
 
 ```bash
-trazo module validate internal/modules/domain/repairs
+heyllave module validate internal/modules/domain/repairs
 ```
 
 Expected output for a valid module:
@@ -601,7 +601,7 @@ Open `cmd/server/main.go` (or wherever modules are wired up in your application)
 
 ```go
 import (
-    "github.com/trazo-dev/trazo-core-service/internal/modules/domain/repairs"
+    "github.com/heyllave/core-service/internal/modules/domain/repairs"
 )
 
 func main() {
@@ -638,7 +638,7 @@ When the server starts with your new module registered:
 
 The module's SQL (`migrations/modules/<name>.sql`) is **not** applied at server startup. It is applied to a tenant's schema by the `SchemaProvisioner` either:
 
-- at tenant creation, if the module is listed in `tenant.default_modules` in `trazo.yaml`, or
+- at tenant creation, if the module is listed in `tenant.default_modules` in `heyllave.yaml`, or
 - later, when the module is enabled for an existing tenant.
 
 Your module is now live and ready for tenant activation.

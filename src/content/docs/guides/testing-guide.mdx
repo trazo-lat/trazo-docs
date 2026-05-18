@@ -1,11 +1,11 @@
 ---
 title: Testing Guide
-description: Testing strategy and patterns for Trazo modules, covering unit tests with mocked Core interfaces, integration tests with a real database, and end-to-end HTTP tests.
+description: Testing strategy and patterns for Heyllave modules, covering unit tests with mocked Core interfaces, integration tests with a real database, and end-to-end HTTP tests.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Trazo modules have three levels of test coverage, each with a distinct purpose and isolation boundary:
+Heyllave modules have three levels of test coverage, each with a distinct purpose and isolation boundary:
 
 | Level | Scope | Database | File Naming |
 |---|---|---|---|
@@ -28,8 +28,8 @@ Unit tests cover service logic in isolation. The `*core.Core` is replaced with a
 package testutil
 
 import (
-    "github.com/trazo-dev/trazo-core-service/internal/core"
-    "github.com/trazo-dev/trazo-core-service/internal/core/testutil/mocks"
+    "github.com/heyllave/core-service/internal/core"
+    "github.com/heyllave/core-service/internal/core/testutil/mocks"
 )
 
 // MockCoreBundle holds mock implementations for every Core interface.
@@ -91,8 +91,8 @@ import (
     "github.com/google/uuid"
     "github.com/stretchr/testify/assert"
     "github.com/stretchr/testify/mock"
-    "github.com/trazo-dev/trazo-core-service/internal/core/testutil"
-    "github.com/trazo-dev/trazo-core-service/internal/modules/domain/repairs"
+    "github.com/heyllave/core-service/internal/core/testutil"
+    "github.com/heyllave/core-service/internal/modules/domain/repairs"
 )
 
 func TestRepairsService_Create_Success(t *testing.T) {
@@ -230,8 +230,8 @@ import (
     "testing"
 
     "github.com/stretchr/testify/suite"
-    "github.com/trazo-dev/trazo-core-service/internal/core/testutil"
-    "github.com/trazo-dev/trazo-core-service/internal/modules/domain/repairs"
+    "github.com/heyllave/core-service/internal/core/testutil"
+    "github.com/heyllave/core-service/internal/modules/domain/repairs"
 )
 
 type RepositoryIntegrationSuite struct {
@@ -328,8 +328,8 @@ import (
     "testing"
 
     "github.com/stretchr/testify/assert"
-    "github.com/trazo-dev/trazo-core-service/internal/core/testutil"
-    "github.com/trazo-dev/trazo-core-service/internal/modules/domain/repairs"
+    "github.com/heyllave/core-service/internal/core/testutil"
+    "github.com/heyllave/core-service/internal/modules/domain/repairs"
 )
 
 func TestHandler_CreateRepair_E2E(t *testing.T) {

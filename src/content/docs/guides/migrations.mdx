@@ -1,11 +1,11 @@
 ---
 title: Migrations
-description: How Trazo's three-tier declarative migration system works, where each kind of table lives, and how new tenants get provisioned.
+description: How Heyllave's three-tier declarative migration system works, where each kind of table lives, and how new tenants get provisioned.
 ---
 
 import { Aside, Steps } from '@astrojs/starlight/components';
 
-Trazo uses a **declarative, desired-state** migration model powered by `pg-schema-diff`. Each `.sql` file describes what the schema should look like, not the steps to get there. There are no numbered prefixes and no `-- +down` markers — the diff engine computes the actual DDL needed to bring the live database in line with the files at run time.
+Heyllave uses a **declarative, desired-state** migration model powered by `pg-schema-diff`. Each `.sql` file describes what the schema should look like, not the steps to get there. There are no numbered prefixes and no `-- +down` markers — the diff engine computes the actual DDL needed to bring the live database in line with the files at run time.
 
 Migrations are split into three buckets based on **tenant portability**: anything that needs to travel with a tenant lives in the per-tenant tier; cross-tenant data lives in `public`.
 
@@ -98,7 +98,7 @@ There is exactly **one** file per module. A single module file may declare sever
 2. `CREATE SCHEMA tenant_<slug>`.
 3. Set `search_path` on the transaction to `tenant_<slug>, public`.
 4. Apply every file in `migrations/core/tenant/` to the new schema.
-5. For each module listed in `tenant.default_modules` (from `trazo.yaml`), apply `migrations/modules/<name>.sql` to the new schema.
+5. For each module listed in `tenant.default_modules` (from `heyllave.yaml`), apply `migrations/modules/<name>.sql` to the new schema.
 6. Seed the default roles (admin, member, etc.) for the tenant.
 7. Insert one row per provisioned module into `public.tenant_modules`.
 </Steps>
@@ -141,7 +141,7 @@ The same diff engine ensures the module's tables only land in that one schema.
 ## Where Migration Files Live in the Repo
 
 ```
-trazo-core-service/
+heyllave-core-service/
 └── migrations/
     ├── core/
     │   ├── public/
@@ -179,10 +179,10 @@ The whole tree is embedded into the server binary via `//go:embed`. No external 
 
 ## CLI Commands
 
-The `trazo migrate` command surface manages the diff/apply loop and inspects state. The exact command flags are documented under [Migrate Commands](/cli/migrate-commands/); the important conceptual points are:
+The `heyllave migrate` command surface manages the diff/apply loop and inspects state. The exact command flags are documented under [Migrate Commands](/cli/migrate-commands/); the important conceptual points are:
 
-- `trazo migrate status` reports which tables are present, missing, or drifted in `public` and in each tenant schema relative to the embedded SQL files.
-- `trazo migrate diff` is read-only: it prints the DDL the engine would run if asked.
+- `heyllave migrate status` reports which tables are present, missing, or drifted in `public` and in each tenant schema relative to the embedded SQL files.
+- `heyllave migrate diff` is read-only: it prints the DDL the engine would run if asked.
 - The platform records every applied migration in `public.migration_history` keyed by tier, schema, and file hash.
 
 <Aside type="caution">
@@ -246,7 +246,7 @@ Pure renames cannot be inferred from a desired-state diff (the engine cannot tel
 
 ### Adding a Status Value
 
-Trazo stores status values as `VARCHAR(50)` precisely so they can be added without DDL. The validation lives in the application layer and in `module.yaml`'s `statuses` section. No migration is required.
+Heyllave stores status values as `VARCHAR(50)` precisely so they can be added without DDL. The validation lives in the application layer and in `module.yaml`'s `statuses` section. No migration is required.
 
 ---
 

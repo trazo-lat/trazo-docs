@@ -3,24 +3,36 @@ title: Rate Limiting
 description: Token bucket rate limiting with per-IP, per-tenant, and per-path tiers to protect the API from abuse.
 ---
 
-Trazo uses a **token bucket** algorithm for rate limiting at three levels: per-IP (global), per-tenant, and per-path overrides. Rate limiting is applied after authentication in the middleware chain.
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Heyllave uses a **token bucket** algorithm for rate limiting at three levels: per-IP (global), per-tenant, and per-path overrides. Rate limiting is applied after authentication in the middleware chain.
 
 ## How It Works
 
 Each rate limit tier maintains independent token buckets. A request must pass all applicable tiers to proceed.
 
-```
-Request
-  │
-  ├── Path override? (e.g., /auth/login: 3/sec, burst 5)
-  │     └── Denied? → 429
-  │
-  ├── IP global limit (10/sec, burst 20)
-  │     └── Denied? → 429
-  │
-  └── Tenant limit (100/sec, burst 200) — only if authenticated
-        └── Denied? → 429
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={520}
+  nodes={[
+    { id: 'req', label: 'Request', variant: 'accent' },
+    { id: 'path', label: 'Path override?', sub: 'e.g. /auth/login: 3/sec, burst 5', variant: 'coral', width: 260 },
+    { id: 'ip', label: 'IP global limit', sub: '10/sec, burst 20', variant: 'accent', width: 220 },
+    { id: 'tenant', label: 'Tenant limit', sub: '100/sec, burst 200 (if auth)', variant: 'accent', width: 240 },
+    { id: 'ok', label: 'Handler', sub: 'request passes', variant: 'accent' },
+    { id: 'deny', label: '429 Too Many Requests', variant: 'muted', width: 220 },
+  ]}
+  edges={[
+    { source: 'req', target: 'path' },
+    { source: 'path', target: 'ip', label: 'allow' },
+    { source: 'path', target: 'deny', label: 'denied', dashed: true },
+    { source: 'ip', target: 'tenant', label: 'allow' },
+    { source: 'ip', target: 'deny', label: 'denied', dashed: true },
+    { source: 'tenant', target: 'ok', label: 'allow' },
+    { source: 'tenant', target: 'deny', label: 'denied', dashed: true },
+  ]}
+/>
 
 ## Default Configuration
 
@@ -60,7 +72,7 @@ rate_limit:
 ## Configuration
 
 ```yaml
-# trazo.yaml
+# heyllave.yaml
 rate_limit:
   enabled: true
   cleanup_period: 60s       # Remove idle buckets

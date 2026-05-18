@@ -1,11 +1,11 @@
 ---
 title: Database Schema
-description: Complete reference for the Trazo PostgreSQL tables — public-schema cross-tenant tables, per-tenant core subsystem tables, and per-tenant module tables.
+description: Complete reference for the Heyllave PostgreSQL tables — public-schema cross-tenant tables, per-tenant core subsystem tables, and per-tenant module tables.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Trazo uses a **schema-per-tenant** PostgreSQL isolation model with a **three-tier** table layout:
+Heyllave uses a **schema-per-tenant** PostgreSQL isolation model with a **three-tier** table layout:
 
 - The **`public` schema** holds cross-tenant tables: the tenant registry, users, memberships, roles, permission definitions, module enablement, and platform defaults for notifications and translations. These are managed by `migrations/core/public/`.
 - Each **tenant schema** (`tenant_<slug>`) holds two kinds of tables:
@@ -243,7 +243,7 @@ Stores domain events waiting to be delivered to subscribers. The worker pool pol
 
 ### `event_subscriptions`
 
-Per-tenant subscriber registrations. Replaces in-memory subscription lists so delivery is an indexed DB lookup. Indexed by `(event_pattern)` with `enabled = TRUE`.
+Per-tenant subscriber registrations. Delivery is an indexed DB lookup keyed by `(event_pattern)` with `enabled = TRUE`, so subscriptions survive restarts and can be inspected with normal SQL.
 
 ### `event_deliveries`
 
@@ -281,12 +281,31 @@ In-app notifications delivered to individual users within a tenant.
 | `title` | `TEXT` | NOT NULL | Short notification title |
 | `body` | `TEXT` | NOT NULL DEFAULT `''` | Full notification body |
 | `link` | `TEXT` | NOT NULL DEFAULT `''` | Optional deep-link URL |
+| `actions` | `JSONB` | NOT NULL DEFAULT `'[]'` | Action buttons surfaced under the body (`NotificationAction[]`) |
 | `read` | `BOOLEAN` | NOT NULL, DEFAULT `false` | Whether the user has read it |
 | `read_at` | `TIMESTAMPTZ` | nullable | Timestamp the notification was read |
 | `metadata` | `JSONB` | NOT NULL DEFAULT `'{}'` | Additional data for rendering or routing |
 | `created_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT `NOW()` | Delivery timestamp |
 
 **Index:** `(user_id, read)` for efficient unread counts.
+
+---
+
+### `notification_action_invocations`
+
+One row per click on a notification action button. Powers audit, idempotency, and click analytics. The dispatcher inserts a row whether the action succeeded (`result = 'ok'`) or failed (`result = 'error'` with an `error` message).
+
+| Column | Type | Constraints | Description |
+|--------|------|-------------|-------------|
+| `id` | `UUID` | PK | Unique invocation identifier |
+| `public_id` | `TEXT` | | Public-facing identifier (`ninv_…`) |
+| `notification_id` | `UUID` | FK → `in_app_notifications.id` | Notification the click happened on |
+| `action_key` | `TEXT` | NOT NULL | Matches the `key` field of an entry in `in_app_notifications.actions` |
+| `user_id` | `UUID` | FK → `public.users.id` | User who clicked |
+| `input` | `JSONB` | NOT NULL DEFAULT `'{}'` | Form values submitted with the action |
+| `result` | `TEXT` | NOT NULL | `ok` or `error` |
+| `error` | `TEXT` | NOT NULL DEFAULT `''` | Human-readable failure reason when `result = 'error'` |
+| `invoked_at` | `TIMESTAMPTZ` | NOT NULL, DEFAULT `NOW()` | Click timestamp |
 
 ---
 

@@ -1,0 +1,69 @@
+---
+title: Creating a Module Flow
+description: End-to-end flow showing every step a developer takes when adding a new domain module to Heyllave.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+This flow is the high-level path a developer walks when introducing a new domain module. Use it as a checklist; each step links to the reference doc that covers the mechanics in depth.
+
+<Aside type="tip">
+  For a worked example with full code, follow the [Creating a Module](/guides/creating-a-module/) guide. This page is the bird's-eye view of the same process.
+</Aside>
+
+## Phases at a Glance
+
+```
+1. Scaffold      →  2. Declare       →  3. Generate
+   directory          module.yaml         code from yaml
+                                          ↓
+6. Wire & test   ←  5. Implement     ←  4. Migrate
+   into server       service + handler    schema
+```
+
+Steps 1–3 are declarative. Steps 4–6 are where you write business logic.
+
+---
+
+## The Flow
+
+<Steps>
+
+1. **Scaffold the package directory.** Domain modules live under `internal/modules/domain/<name>/` in `heyllave-core-service`. Each module package owns its own `module.yaml`, `module.go`, models, repository, service, and handler files.
+
+2. **Write `module.yaml`.** This is the declarative manifest that drives everything else: permission registration, scope definitions, status transitions, event subscriptions, and the dependency graph the runtime uses at boot. See the [module.yaml Reference](/guides/module-yaml-reference/) for every field.
+
+3. **Run code generation.** `heyllave module generate` reads `module.yaml` and emits permission constants, scope helpers, and the skeleton of `module.go`. Re-running is idempotent — generated files are clearly marked and safe to overwrite.
+
+4. **Author the migration.** Migrations live in `heyllave-cli` under `migrations/modules/<name>.sql` (tenant-scoped) or `migrations/public/` (shared). The CLI compiles the three tiers into a single ordered set at apply time. See [Migrations](/guides/migrations/) for the three-tier layout.
+
+5. **Implement the layers.** Write `repository.go` (SQL via sqlx + squirrel), then `service.go` (business logic, permission checks, event emission inside the transaction), then `handler.go` (Huma binding, input validation). The patterns are spelled out in [Repository Patterns](/guides/repository-patterns/), [Service Patterns](/guides/service-patterns/), and [Handler Patterns](/guides/handler-patterns/).
+
+6. **Wire into the server.** `module.go` exports an `Init(core *core.Core)` function that registers HTTP routes, event subscriptions, and hooks. The main server bootstraps every enabled module by calling its `Init`. See [Module System](/architecture/module-system/) for how registration is dispatched.
+
+7. **Add tests.** Unit tests for service logic, repository tests against a real Postgres via testcontainers, and at least one black-box E2E test in `heyllave-e2e`. See the [Testing Guide](/guides/testing-guide/).
+
+8. **Apply migrations & smoke-test.** Run `heyllave migrate apply` against a local DB, restart the server, and exercise the new endpoints with curl or the admin app.
+
+</Steps>
+
+---
+
+## What Each Phase Produces
+
+| Phase | Artifact | Owner |
+|---|---|---|
+| Scaffold | Package directory + empty files | Developer |
+| Declare | `module.yaml` | Developer |
+| Generate | Permission constants, scope helpers, `module.go` skeleton | `heyllave` CLI |
+| Migrate | SQL migration file in `heyllave-cli` | Developer |
+| Implement | `repository.go`, `service.go`, `handler.go` | Developer |
+| Wire | Registered routes, subscriptions, hooks | `Init` in `module.go` |
+
+---
+
+## Related Flows
+
+- [Updating a Module](/guides/flow-updating-a-module/) — when you change an existing module.
+- [Startup Lifecycle](/guides/flow-startup-lifecycle/) — how your module is loaded at boot.
+- [Request Lifecycle](/guides/flow-request-lifecycle/) — how your handler is reached.

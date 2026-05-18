@@ -1,9 +1,11 @@
 ---
 title: Permission and Scope System
-description: How Trazo models authorization using structured permission strings, built-in scopes, and SQL filter injection via ApplyScope.
+description: How Heyllave models authorization using structured permission strings, built-in scopes, and SQL filter injection via ApplyScope.
 ---
 
-Trazo uses a structured permission system built around human-readable permission strings and a scope model that translates access levels directly into SQL WHERE clauses. Permissions are declared in `module.yaml`, synced to the database, and checked at runtime through `Core.Permission`.
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Heyllave uses a structured permission system built around human-readable permission strings and a scope model that translates access levels directly into SQL WHERE clauses. Permissions are declared in `module.yaml`, synced to the database, and checked at runtime through `Core.Permission`.
 
 ## Permission String Format
 
@@ -55,14 +57,26 @@ Scopes are ordered by permissiveness. If a user's role grants `repairs.read.team
 
 When `Core.Permission.ResolveScope` is called, the platform evaluates the user's effective permissions in this order:
 
-```
-User
-  └── Membership (in current tenant)
-        └── Role
-              └── Permissions (list of granted strings)
-                    └── Filter by: module.action.*
-                          └── Select highest-priority matching scope
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={520}
+  nodes={[
+    { id: 'user', label: 'User', variant: 'coral' },
+    { id: 'membership', label: 'Membership', sub: 'in current tenant', variant: 'accent' },
+    { id: 'role', label: 'Role' },
+    { id: 'perms', label: 'Permissions', sub: 'granted permission strings', variant: 'db' },
+    { id: 'filter', label: 'Filter', sub: 'match module.action.*' },
+    { id: 'scope', label: 'Resolved scope', sub: 'highest-priority match', variant: 'accent' },
+  ]}
+  edges={[
+    { source: 'user', target: 'membership' },
+    { source: 'membership', target: 'role' },
+    { source: 'role', target: 'perms' },
+    { source: 'perms', target: 'filter' },
+    { source: 'filter', target: 'scope' },
+  ]}
+/>
 
 Scope priority (highest to lowest): `all` > `team` > `assigned` > `own` > `created`.
 
@@ -154,5 +168,5 @@ Roles are created per-tenant and assigned a set of permission strings. The platf
 When a role is saved, the effective permission list is stored in the tenant schema's `permissions` table and loaded into the session on the next authentication.
 
 :::note
-Permission strings are synced from `module.yaml` to the database using `trazo sync permissions`. After adding or removing a permission declaration, always run the sync command before deploying. Roles referencing deleted permissions will have those entries stripped during the sync.
+Permission strings are synced from `module.yaml` to the database using `heyllave sync permissions`. After adding or removing a permission declaration, always run the sync command before deploying. Roles referencing deleted permissions will have those entries stripped during the sync.
 :::

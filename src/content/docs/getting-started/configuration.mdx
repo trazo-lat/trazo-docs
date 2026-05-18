@@ -1,26 +1,26 @@
 ---
 title: Configuration
-description: Complete reference for trazo.yaml, environment variable overrides, and Viper's configuration precedence rules.
+description: Complete reference for heyllave.yaml, environment variable overrides, and Viper's configuration precedence rules.
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-Trazo uses [Viper](https://github.com/spf13/viper) for configuration. Values are resolved in the following order of precedence (highest wins):
+Heyllave uses [Viper](https://github.com/spf13/viper) for configuration. Values are resolved in the following order of precedence (highest wins):
 
 ```
-CLI flags  >  Environment variables (TRAZO_ prefix)  >  trazo.yaml  >  Built-in defaults
+CLI flags  >  Environment variables (HEYLLAVE_ prefix)  >  heyllave.yaml  >  Built-in defaults
 ```
 
-This means you can keep a minimal `trazo.yaml` for base settings and inject secrets via environment variables in CI/CD pipelines or container environments — no file changes needed.
+This means you can keep a minimal `heyllave.yaml` for base settings and inject secrets via environment variables in CI/CD pipelines or container environments — no file changes needed.
 
 ---
 
-## Full `trazo.yaml` Reference
+## Full `heyllave.yaml` Reference
 
-Copy `trazo.example.yaml` from the `trazo-core-service` repo as your starting point:
+Copy `heyllave.example.yaml` from the `heyllave-core-service` repo as your starting point:
 
 ```bash
-cp trazo-core-service/trazo.example.yaml trazo.yaml
+cp heyllave-core-service/heyllave.example.yaml heyllave.yaml
 ```
 
 Below is the complete structure with all available fields and their defaults:
@@ -59,7 +59,7 @@ log:
 # ─── Authentication ─────────────────────────────────────────────────────────
 auth:
   # HMAC-SHA256 secret for signing JWTs.
-  # Override in production via TRAZO_AUTH_JWT_SECRET.
+  # Override in production via HEYLLAVE_AUTH_JWT_SECRET.
   jwt_secret: "change-me-in-production"
 
   # How long access tokens remain valid.
@@ -95,7 +95,7 @@ notifications:
     host: ""
     port: 587
     user: ""
-    # Override via TRAZO_NOTIFICATIONS_EMAIL_PASS
+    # Override via HEYLLAVE_NOTIFICATIONS_EMAIL_PASS
     pass: ""
     from: "noreply@example.com"
 
@@ -122,36 +122,36 @@ Any configuration key can be overridden with an environment variable by:
 
 1. Uppercasing the key path.
 2. Replacing `.` (dot) with `_` (underscore).
-3. Prepending `TRAZO_`.
+3. Prepending `HEYLLAVE_`.
 
 ### Common Examples
 
-| `trazo.yaml` key | Environment variable |
+| `heyllave.yaml` key | Environment variable |
 |---|---|
-| `database.url` | `TRAZO_DATABASE_URL` |
-| `server.port` | `TRAZO_SERVER_PORT` |
-| `server.host` | `TRAZO_SERVER_HOST` |
-| `log.level` | `TRAZO_LOG_LEVEL` |
-| `auth.jwt_secret` | `TRAZO_AUTH_JWT_SECRET` |
-| `auth.access_token_ttl` | `TRAZO_AUTH_ACCESS_TOKEN_TTL` |
-| `events.worker_pool_size` | `TRAZO_EVENTS_WORKER_POOL_SIZE` |
-| `notifications.email.pass` | `TRAZO_NOTIFICATIONS_EMAIL_PASS` |
+| `database.url` | `HEYLLAVE_DATABASE_URL` |
+| `server.port` | `HEYLLAVE_SERVER_PORT` |
+| `server.host` | `HEYLLAVE_SERVER_HOST` |
+| `log.level` | `HEYLLAVE_LOG_LEVEL` |
+| `auth.jwt_secret` | `HEYLLAVE_AUTH_JWT_SECRET` |
+| `auth.access_token_ttl` | `HEYLLAVE_AUTH_ACCESS_TOKEN_TTL` |
+| `events.worker_pool_size` | `HEYLLAVE_EVENTS_WORKER_POOL_SIZE` |
+| `notifications.email.pass` | `HEYLLAVE_NOTIFICATIONS_EMAIL_PASS` |
 
 ### Example: Production Docker Deployment
 
 ```bash
 docker run \
-  -e TRAZO_ENV=production \
-  -e TRAZO_DATABASE_URL="postgres://trazo:s3cr3t@db.internal:5432/trazo?sslmode=require" \
-  -e TRAZO_AUTH_JWT_SECRET="$(openssl rand -hex 32)" \
-  -e TRAZO_LOG_LEVEL=warn \
-  -e TRAZO_NOTIFICATIONS_EMAIL_PASS="smtp-password" \
+  -e HEYLLAVE_ENV=production \
+  -e HEYLLAVE_DATABASE_URL="postgres://heyllave:s3cr3t@db.internal:5432/heyllave?sslmode=require" \
+  -e HEYLLAVE_AUTH_JWT_SECRET="$(openssl rand -hex 32)" \
+  -e HEYLLAVE_LOG_LEVEL=warn \
+  -e HEYLLAVE_NOTIFICATIONS_EMAIL_PASS="smtp-password" \
   -p 8080:8080 \
-  trazo-server:latest
+  heyllave-server:latest
 ```
 
 <Aside type="caution">
-  Never set `auth.jwt_secret` to the placeholder `"change-me-in-production"` in staging or production environments. Generate a strong secret with `openssl rand -hex 32` and inject it via `TRAZO_AUTH_JWT_SECRET`.
+  Never set `auth.jwt_secret` to the placeholder `"change-me-in-production"` in staging or production environments. Generate a strong secret with `openssl rand -hex 32` and inject it via `HEYLLAVE_AUTH_JWT_SECRET`.
 </Aside>
 
 ---
@@ -161,40 +161,40 @@ docker run \
 Both binaries accept flags that override the corresponding config values. Flags take the highest precedence of all sources.
 
 <Tabs>
-  <TabItem label="trazo-server">
+  <TabItem label="heyllave-server">
     ```bash
-    trazo-server \
-      --config /etc/trazo/trazo.yaml \
+    heyllave-server \
+      --config /etc/heyllave/heyllave.yaml \
       --port 9090 \
       --log-level debug
     ```
   </TabItem>
-  <TabItem label="trazo (CLI)">
+  <TabItem label="heyllave (CLI)">
     ```bash
-    trazo --config /etc/trazo/trazo.yaml db status
-    trazo --config /etc/trazo/trazo.yaml migrate up
+    heyllave --config /etc/heyllave/heyllave.yaml db status
+    heyllave --config /etc/heyllave/heyllave.yaml migrate up
     ```
   </TabItem>
 </Tabs>
 
-Run `trazo-server --help` or `trazo --help` to see all available flags.
+Run `heyllave-server --help` or `heyllave --help` to see all available flags.
 
 ---
 
 ## Config File Location
 
-By default, both binaries search for `trazo.yaml` in the current working directory. You can specify an alternative path with:
+By default, both binaries search for `heyllave.yaml` in the current working directory. You can specify an alternative path with:
 
 <Tabs>
   <TabItem label="Flag">
     ```bash
-    trazo-server --config /path/to/trazo.yaml
+    heyllave-server --config /path/to/heyllave.yaml
     ```
   </TabItem>
   <TabItem label="Environment Variable">
     ```bash
-    export TRAZO_CONFIG=/path/to/trazo.yaml
-    trazo-server
+    export HEYLLAVE_CONFIG=/path/to/heyllave.yaml
+    heyllave-server
     ```
   </TabItem>
 </Tabs>
@@ -207,7 +207,7 @@ By default, both binaries search for `trazo.yaml` in the current working directo
 
 - Logs are output in human-readable format with colour.
 - Detailed error messages are included in API responses to aid debugging.
-- Use `trazo db local` to manage the local Docker container.
+- Use `heyllave db local` to manage the local Docker container.
 
 ### `env: "staging"` / `env: "production"`
 

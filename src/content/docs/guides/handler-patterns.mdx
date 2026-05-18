@@ -1,11 +1,11 @@
 ---
 title: Handler Patterns
-description: Conventions for writing Huma HTTP handlers in Trazo modules, covering route registration, request and response types, error mapping, and list endpoints.
+description: Conventions for writing Huma HTTP handlers in Heyllave modules, covering route registration, request and response types, error mapping, and list endpoints.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Handlers are the HTTP boundary between the outside world and the service layer. In Trazo, handlers are thin: they bind and validate HTTP input, delegate to the service, and map errors to HTTP responses. Business logic never lives in a handler.
+Handlers are the HTTP boundary between the outside world and the service layer. In Heyllave, handlers are thin: they bind and validate HTTP input, delegate to the service, and map errors to HTTP responses. Business logic never lives in a handler.
 
 All handlers use [Huma v2](https://huma.rocks/) for input binding and OpenAPI schema generation.
 
@@ -25,7 +25,7 @@ import (
     "net/http"
 
     "github.com/danielgtaylor/huma/v2"
-    "github.com/trazo-dev/trazo-core-service/internal/core"
+    "github.com/heyllave/core-service/internal/core"
 )
 
 type Handler struct {

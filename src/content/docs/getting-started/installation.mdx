@@ -1,6 +1,6 @@
 ---
 title: Installation
-description: Clone, build, and configure both Trazo repositories to get the server and CLI running locally.
+description: Clone, build, and configure both Heyllave repositories to get the server and CLI running locally.
 ---
 
 import { Aside, Steps, Tabs, TabItem } from '@astrojs/starlight/components';
@@ -9,45 +9,45 @@ This guide walks through cloning both repositories, compiling the binaries, and 
 
 ## Clone the Repositories
 
-Both repos should live side by side in the same parent directory. This makes it easier to use relative paths and keeps a single `trazo.yaml` config accessible from both.
+Both repos should live side by side in the same parent directory. This makes it easier to use relative paths and keeps a single `heyllave.yaml` config accessible from both.
 
 ```bash
-mkdir -p ~/trazo && cd ~/trazo
+mkdir -p ~/heyllave && cd ~/heyllave
 
-git clone https://github.com/trazo-dev/trazo-core-service.git
-git clone https://github.com/trazo-dev/trazo-cli.git
+git clone https://github.com/heyllave/core-service.git
+git clone https://github.com/heyllave/cli.git
 ```
 
 Your directory structure should look like:
 
 ```
-~/trazo/
-├── trazo-core-service/
-└── trazo-cli/
+~/heyllave/
+├── heyllave-core-service/
+└── heyllave-cli/
 ```
 
 ---
 
-## Build `trazo-core-service`
+## Build `heyllave-core-service`
 
 <Steps>
 1. Enter the repo and download dependencies:
 
    ```bash
-   cd ~/trazo/trazo-core-service
+   cd ~/heyllave/heyllave-core-service
    go mod download
    ```
 
 2. Build the server binary:
 
    ```bash
-   go build -o trazo-server ./cmd/server
+   go build -o heyllave-server ./cmd/server
    ```
 
 3. Verify the build:
 
    ```bash
-   ./trazo-server --help
+   ./heyllave-server --help
    ```
 
    You should see the server's help output listing available flags such as `--config`, `--port`, and `--log-level`.
@@ -55,32 +55,32 @@ Your directory structure should look like:
 
 ---
 
-## Build `trazo-cli`
+## Build `heyllave-cli`
 
 <Steps>
 1. Enter the repo and download dependencies:
 
    ```bash
-   cd ~/trazo/trazo-cli
+   cd ~/heyllave/heyllave-cli
    go mod download
    ```
 
 2. Build the CLI binary:
 
    ```bash
-   go build -o trazo ./cmd/trazo
+   go build -o heyllave ./cmd/heyllave
    ```
 
 3. Verify the build:
 
    ```bash
-   ./trazo --version
+   ./heyllave --version
    ```
 
    Expected output:
 
    ```
-   trazo version 0.x.x
+   heyllave version 0.x.x
    ```
 </Steps>
 
@@ -89,31 +89,31 @@ Your directory structure should look like:
 
   ```bash
   # Add to ~/.zshrc or ~/.bashrc
-  export PATH="$PATH:$HOME/trazo/trazo-core-service:$HOME/trazo/trazo-cli"
+  export PATH="$PATH:$HOME/heyllave/heyllave-core-service:$HOME/heyllave/heyllave-cli"
   ```
 
-  After reloading your shell, `trazo` and `trazo-server` will be available globally.
+  After reloading your shell, `heyllave` and `heyllave-server` will be available globally.
 </Aside>
 
 ---
 
-## Configure `trazo.yaml`
+## Configure `heyllave.yaml`
 
-Both binaries read configuration from `trazo.yaml`. A fully annotated example is provided in `trazo-core-service`.
+Both binaries read configuration from `heyllave.yaml`. A fully annotated example is provided in `heyllave-core-service`.
 
 ```bash
-cp ~/trazo/trazo-core-service/trazo.example.yaml ~/trazo/trazo.yaml
+cp ~/heyllave/heyllave-core-service/heyllave.example.yaml ~/heyllave/heyllave.yaml
 ```
 
 <Aside type="caution">
-  The `trazo.yaml` file contains secrets such as `auth.jwt_secret` and database credentials. Never commit it to version control. It is already listed in `.gitignore` in both repos.
+  The `heyllave.yaml` file contains secrets such as `auth.jwt_secret` and database credentials. Never commit it to version control. It is already listed in `.gitignore` in both repos.
 </Aside>
 
-By default both binaries look for `trazo.yaml` in the current working directory. You can point them at a different path using the `--config` flag or the `TRAZO_CONFIG` environment variable:
+By default both binaries look for `heyllave.yaml` in the current working directory. You can point them at a different path using the `--config` flag or the `HEYLLAVE_CONFIG` environment variable:
 
 ```bash
-./trazo-server --config /etc/trazo/trazo.yaml
-./trazo --config /etc/trazo/trazo.yaml
+./heyllave-server --config /etc/heyllave/heyllave.yaml
+./heyllave --config /etc/heyllave/heyllave.yaml
 ```
 
 See the [Configuration](/getting-started/configuration/) guide for a complete reference of every field.
@@ -127,22 +127,22 @@ Run both binaries to confirm they are working and can read your config:
 <Tabs>
   <TabItem label="CLI">
     ```bash
-    cd ~/trazo
-    ./trazo-cli/trazo --version
-    ./trazo-cli/trazo --help
+    cd ~/heyllave
+    ./heyllave-cli/heyllave --version
+    ./heyllave-cli/heyllave --help
     ```
   </TabItem>
   <TabItem label="Server">
     ```bash
-    cd ~/trazo
-    ./trazo-core-service/trazo-server --help
+    cd ~/heyllave
+    ./heyllave-core-service/heyllave-server --help
     ```
   </TabItem>
 </Tabs>
 
 If either binary exits with a non-zero code, check that:
 
-- Your `trazo.yaml` exists at the expected path.
+- Your `heyllave.yaml` exists at the expected path.
 - All required fields (`database.url`, `auth.jwt_secret`) are set.
 - The Go version is 1.24 or newer (`go version`).
 

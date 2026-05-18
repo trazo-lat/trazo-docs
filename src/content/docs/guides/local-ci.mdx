@@ -1,21 +1,21 @@
 ---
 title: "Local CI with Dagger"
-description: Run containerized CI pipelines locally via `trazo dev ci run` before pushing to GitHub.
+description: Run containerized CI pipelines locally via `heyllave dev ci run` before pushing to GitHub.
 ---
 
 import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The `trazo dev ci` command runs containerized CI checks locally using [Dagger](https://dagger.io). This replaces GitHub Actions for pre-push validation — run the same build, lint, and test steps in containers on your machine.
+The `heyllave dev ci` command runs the same containerized CI checks locally that GitHub Actions runs on push, using [Dagger](https://dagger.io). Validate your branch — build, lint, and test — in containers on your machine before pushing.
 
 ```
-write code → trazo dev ci run → passes → commit → push origin
+write code → heyllave dev ci run → passes → commit → push origin
 ```
 
 ## Prerequisites
 
 - Docker running on your machine
 - [Dagger Engine](https://docs.dagger.io/install) installed
-- `trazo-cli` built: `cd trazo-cli && go build -o bin/trazo-cli .`
+- `heyllave-cli` built: `cd heyllave-cli && go build -o bin/heyllave-cli .`
 
 ## Quick start
 
@@ -24,14 +24,14 @@ write code → trazo dev ci run → passes → commit → push origin
 1. **Run the full pipeline for a service**
 
    ```bash
-   trazo dev ci run trazo-core-service
+   heyllave dev ci run heyllave-core-service
    ```
 
    Or auto-detect from your current directory:
 
    ```bash
-   cd trazo-core-service
-   trazo dev ci run
+   cd heyllave-core-service
+   heyllave dev ci run
    ```
 
 2. **Read the JSON output**
@@ -40,7 +40,7 @@ write code → trazo dev ci run → passes → commit → push origin
 
    ```json
    {
-     "service": "trazo-core-service",
+     "service": "heyllave-core-service",
      "scope": "all",
      "overall": "pass",
      "steps": [
@@ -66,9 +66,9 @@ write code → trazo dev ci run → passes → commit → push origin
 Run a subset of steps with `--scope`:
 
 ```bash
-trazo dev ci run trazo-core-service --scope lint    # fmt + lint + vet only
-trazo dev ci run trazo-core-service --scope test    # tests only
-trazo dev ci run trazo-core-service --scope build   # build only
+heyllave dev ci run heyllave-core-service --scope lint    # fmt + lint + vet only
+heyllave dev ci run heyllave-core-service --scope test    # tests only
+heyllave dev ci run heyllave-core-service --scope build   # build only
 ```
 
 | Scope | Steps included |
@@ -86,7 +86,7 @@ trazo dev ci run trazo-core-service --scope build   # build only
 <Tabs>
 <TabItem label="Go services">
 
-**Applies to:** `trazo-core-service`, `trazo-cli`, `trazo-e2e`
+**Applies to:** `heyllave-core-service`, `heyllave-cli`, `heyllave-e2e`
 
 | Step | Container | Command |
 |------|-----------|---------|
@@ -103,7 +103,7 @@ Integration tests mount the Docker socket so testcontainers can create PostgreSQ
 </TabItem>
 <TabItem label="Flutter">
 
-**Applies to:** `trazo-admin-app`
+**Applies to:** `heyllave-admin-app`
 
 | Step | Container | Command |
 |------|-----------|---------|
@@ -115,7 +115,7 @@ Integration tests mount the Docker socket so testcontainers can create PostgreSQ
 </TabItem>
 <TabItem label="Node.js">
 
-**Applies to:** `trazo-docs`
+**Applies to:** `heyllave-docs`
 
 | Step | Container | Command |
 |------|-----------|---------|
@@ -127,7 +127,7 @@ Integration tests mount the Docker socket so testcontainers can create PostgreSQ
 
 ## How it works
 
-Under the hood, `trazo dev ci run` uses the [Dagger Go SDK](https://docs.dagger.io/sdk/go) to:
+Under the hood, `heyllave dev ci run` uses the [Dagger Go SDK](https://docs.dagger.io/sdk/go) to:
 
 1. Mount your local source directory into a container
 2. Run each step sequentially (stops on first failure)
@@ -138,6 +138,6 @@ No CI server, no git forge, no tokens — just Docker and Dagger.
 
 ## Claude Code integration
 
-Claude Code uses `trazo dev ci run` as part of the agentic loop. When Claude finishes writing code, it runs CI to validate, reads the JSON output, and fixes any failures before committing.
+Claude Code uses `heyllave dev ci run` as part of the agentic loop. When Claude finishes writing code, it runs CI to validate, reads the JSON output, and fixes any failures before committing.
 
 The `/ci` and `/validate` skills invoke this command automatically.

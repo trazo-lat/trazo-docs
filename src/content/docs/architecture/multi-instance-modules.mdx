@@ -122,7 +122,7 @@ The service registry supports instance-aware lookups:
 inSvc, _ := core.GetService[invoices.InvoicesService]("invoices-in")
 outSvc, _ := core.GetService[invoices.InvoicesService]("invoices-out")
 
-// Single-instance sugar (backwards compatible)
+// Single-instance modules use the no-arg form
 repairsSvc, _ := core.GetService[repairs.RepairsService]()
 ```
 
@@ -142,11 +142,11 @@ Since each instance has its own tables, global scopes (`all`, `assigned`, `own`)
 ## API Endpoints
 
 ```
-POST   /api/v1/tenants/{tid}/modules/{name}/instances    Create instance
-GET    /api/v1/tenants/{tid}/modules/{name}/instances    List instances
-GET    /api/v1/tenants/{tid}/instances/{instance}        Get instance
-PUT    /api/v1/tenants/{tid}/instances/{instance}/enable Enable
-PUT    /api/v1/tenants/{tid}/instances/{instance}/disable Disable
-PUT    /api/v1/tenants/{tid}/instances/{instance}/config  Update config
-DELETE /api/v1/tenants/{tid}/instances/{instance}         Delete
+POST   /api/v1/tenants/{tenant_id}/modules/{name}/instances     Create instance
+GET    /api/v1/tenants/{tenant_id}/modules/{name}/instances     List instances
+GET    /api/v1/tenants/{tenant_id}/instances/{instance}         Get instance
+PUT    /api/v1/tenants/{tenant_id}/instances/{instance}/enable  Enable
+PUT    /api/v1/tenants/{tenant_id}/instances/{instance}/disable Disable
+PUT    /api/v1/tenants/{tenant_id}/instances/{instance}/config  Update config
+DELETE /api/v1/tenants/{tenant_id}/instances/{instance}         Delete
 ```

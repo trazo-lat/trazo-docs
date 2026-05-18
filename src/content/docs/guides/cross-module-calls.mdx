@@ -1,11 +1,12 @@
 ---
 title: Cross-Module Calls
-description: Patterns for communication between Trazo modules, including direct service calls via the contracts system and event-based decoupling via the transactional outbox.
+description: Patterns for communication between Heyllave modules, including direct service calls via the contracts system and event-based decoupling via the transactional outbox.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
 
-Modules in Trazo are isolated units. They do not import each other's packages directly. Instead, two patterns are available for cross-module communication: direct service calls via the contracts system, and indirect communication via domain events.
+Modules in Heyllave are isolated units. They do not import each other's packages directly. Instead, two patterns are available for cross-module communication: direct service calls via the contracts system, and indirect communication via domain events.
 
 Choosing the right pattern is a key design decision:
 
@@ -94,7 +95,7 @@ The `vehicles` module ensures its service struct satisfies the interface (a comp
 // internal/modules/domain/vehicles/service.go
 package vehicles
 
-import "github.com/trazo-dev/trazo-core-service/internal/contracts"
+import "github.com/heyllave/core-service/internal/contracts"
 
 // Compile-time interface check
 var _ contracts.VehiclesService = (*VehiclesService)(nil)
@@ -147,8 +148,8 @@ package repairs
 import (
     "fmt"
 
-    "github.com/trazo-dev/trazo-core-service/internal/contracts"
-    "github.com/trazo-dev/trazo-core-service/internal/core"
+    "github.com/heyllave/core-service/internal/contracts"
+    "github.com/heyllave/core-service/internal/core"
 )
 
 type RepairsModule struct {
@@ -208,8 +209,8 @@ package repairs
 import (
     "context"
 
-    "github.com/trazo-dev/trazo-core-service/internal/contracts"
-    "github.com/trazo-dev/trazo-core-service/internal/core"
+    "github.com/heyllave/core-service/internal/contracts"
+    "github.com/heyllave/core-service/internal/core"
 )
 
 type RepairsService struct {
@@ -337,17 +338,30 @@ func (m *NotificationsModule) handleRepairCreated(ctx context.Context, event cor
 
 ## Direct Calls vs Events: Decision Guide
 
-```
-Does the caller need the result before returning?
-├── Yes → Direct service call via contracts
-└── No
-    ├── Can the action fail without failing the caller?
-    │   ├── Yes → Domain event
-    │   └── No  → Direct service call inside the same transaction
-    └── Does the action belong to a different bounded context?
-        ├── Yes → Domain event
-        └── No  → Consider whether it should be in the same module
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={560}
+  nodes={[
+    { id: 'root', label: 'Caller needs result before returning?', variant: 'coral', width: 280 },
+    { id: 'direct1', label: 'Direct service call', sub: 'via contracts', variant: 'accent' },
+    { id: 'q1', label: 'Can the action fail without failing the caller?', width: 280 },
+    { id: 'q2', label: 'Different bounded context?', width: 240 },
+    { id: 'event1', label: 'Domain event', variant: 'accent' },
+    { id: 'direct2', label: 'Direct service call', sub: 'inside same transaction', variant: 'accent' },
+    { id: 'event2', label: 'Domain event', variant: 'accent' },
+    { id: 'same', label: 'Same module?', sub: 'reconsider boundaries', variant: 'muted' },
+  ]}
+  edges={[
+    { source: 'root', target: 'direct1', label: 'Yes' },
+    { source: 'root', target: 'q1', label: 'No' },
+    { source: 'q1', target: 'event1', label: 'Yes' },
+    { source: 'q1', target: 'direct2', label: 'No' },
+    { source: 'q1', target: 'q2' },
+    { source: 'q2', target: 'event2', label: 'Yes' },
+    { source: 'q2', target: 'same', label: 'No' },
+  ]}
+/>
 
 ### Direct Call: When the Result Matters Synchronously
 

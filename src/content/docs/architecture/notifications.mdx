@@ -1,9 +1,12 @@
 ---
 title: Notification System
-description: How Trazo routes domain events to notification channels, configures per-tenant notification rules, and delivers messages asynchronously.
+description: How Heyllave routes domain events to notification channels, configures per-tenant notification rules, and delivers messages asynchronously.
 ---
 
-Trazo's notification system connects domain events to delivery channels through a rule-based routing layer. When a domain event is emitted, the notifications module matches it against the merged set of platform-default and tenant-override rules and delivers messages to the appropriate channels asynchronously.
+import { Aside } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Heyllave's notification system connects domain events to delivery channels through a rule-based routing layer. When a domain event is emitted, the notifications module matches it against the merged set of platform-default and tenant-override rules and delivers messages to the appropriate channels asynchronously.
 
 ## Rule Storage: Platform Defaults and Tenant Overrides
 
@@ -11,7 +14,7 @@ Notification rules live in two places:
 
 | Table | Schema | Purpose |
 |---|---|---|
-| `notification_rules` | `public` | Platform defaults shipped with the binary. Created/updated by `migrations/core/public/notification_rules.sql` and module-level rule seeding. |
+| `notification_rules` | `public` | Platform defaults bundled with the binary. Created/updated by `migrations/core/public/notification_rules.sql` and module-level rule seeding. |
 | `tenant_notification_rules` | `tenant_<slug>` | Per-tenant overrides. Managed via the API. |
 
 `Core.Notifications.MatchingRules(ctx, eventName)` returns the **union** of both tables. The tenant carried in `ctx` is authoritative — tenant overrides win on the most-specific scope (e.g., a tenant rule for `repairs.completed` shadows a platform rule for the same event). The tenant table has no `tenant_id` column; the tenancy is encoded in the schema.
@@ -69,6 +72,7 @@ In-app notifications are stored as rows in the `in_app_notifications` table with
 | `title` | string | Rendered from the template title |
 | `body` | string | Rendered from the template body |
 | `link` | string | Optional deep link to the related resource |
+| `actions` | JSONB | Action buttons surfaced under the body (see below) |
 | `read` | bool | Whether the user has read the notification |
 | `read_at` | timestamp | When the notification was marked read (null if unread) |
 | `metadata` | JSONB | Additional rendering or routing data (event_name, event_id, etc.) |
@@ -76,31 +80,93 @@ In-app notifications are stored as rows in the `in_app_notifications` table with
 
 Clients poll or subscribe (via WebSocket or SSE) to `/api/v1/notifications` to display unread counts and notification lists.
 
-## Delivery Flow
+### Action Buttons
+
+A notification can carry a list of action buttons rendered beneath the body. Actions reuse the state-machine engine's vocabulary (`ActionStyle`, `ActionInput`, `Confirm`) so the frontend can render notification buttons and resource-action buttons with one component. `label_key` and `confirm_message_key` route through the i18n engine, so a single rule template produces translated buttons in every locale.
+
+Each action is one object inside the `actions` JSONB array:
+
+| Field | Type | Notes |
+|---|---|---|
+| `key` | string | Stable identifier within the notification — used in the invocation URL and click analytics. Unique per notification. |
+| `kind` | enum | `link` · `rest` · `resource` · `dismiss` — see below |
+| `label_key` | i18n key | e.g. `approvals.actions.approve` |
+| `style` | enum | `default` · `confirm` · `destructive` · `warning` |
+| `confirm` | bool | Prompt the user before invocation |
+| `confirm_message_key` | i18n key | Optional confirmation prompt text |
+| `input` | `ActionInput` | Optional input form schema — reuses the state-machine form vocabulary |
+| `link` | string | (kind=link) Target URL or in-app route |
+| `method`, `url` | string | (kind=rest) HTTP method + URL the client invokes |
+| `resource`, `resource_action` | object + string | (kind=resource) `{module, instance_name?, type, id}` plus the named state-machine transition |
+
+#### Action kinds
+
+| Kind | What happens | Dispatcher |
+|---|---|---|
+| `link` | Client navigates to `link`. Server records the click and marks the notification read. | Client |
+| `rest` | Client issues an HTTP request to `url` with the rendered `input` as body. Server records the click and marks the notification read. | Client |
+| `resource` | Server delegates to the state-machine engine for `{module, instance_name?, type, id}`, invoking `resource_action` with the input as transition payload. Marks the notification read. | Server |
+| `dismiss` | Server marks the notification read. No other side effect — useful for "Not interested" or "Snooze". | Server |
+
+#### Invocation endpoint
 
 ```
-Domain event emitted via EmitTx
-    │
-    ▼
-Outbox processor delivers event to notification module subscriber
-    │
-    ▼
-NotificationService.Handle(ctx, event)
-    │
-    ├── MatchingRules(ctx, event_name) — union of:
-    │     ├── public.notification_rules           (platform defaults)
-    │     └── tenant_<slug>.tenant_notification_rules (tenant overrides)
-    │
-    ├── For each matching rule:
-    │     ├── Render template with event payload
-    │     └── Dispatch to channel handler (async)
-    │
-    └── Channel handlers:
-          ├── in_app   → INSERT into in_app_notifications
-          ├── email    → enqueue to mail provider
-          ├── slack    → POST to Slack API
-          └── webhook  → HTTP POST to configured URL
+POST /api/v1/notifications/{id}/actions/{key}
+Body: { "input": { ... } }
 ```
+
+Response:
+
+```json
+{
+  "invocation_id": "ninv_…",
+  "result": "ok",
+  "dispatched": true,
+  "error": ""
+}
+```
+
+- `dispatched` is `true` when the server actually performed the action (`dismiss`, `resource`). For `link` and `rest`, the client carries out the action itself with the returned target; the server only records the click.
+- `result` is `ok` or `error`; `error` carries a human-readable reason when the dispatch failed.
+
+Every invocation produces a row in `notification_action_invocations` keyed by `(notification_id, action_key, user_id, input, result, error, invoked_at)`, which serves audit, idempotency, and click-analytics needs.
+
+<Aside type="note">
+  Channels other than `in_app` ignore the `actions` field today. The email channel may eventually render them as deep links.
+</Aside>
+
+## Delivery Flow
+
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={640}
+  nodes={[
+    { id: 'emit', label: 'Domain event emitted', sub: 'via EmitTx', variant: 'accent', width: 240 },
+    { id: 'outbox', label: 'Outbox processor', sub: 'delivers to notification subscriber', width: 260 },
+    { id: 'handle', label: 'NotificationService.Handle', sub: '(ctx, event)', variant: 'coral', width: 260 },
+    { id: 'match', label: 'MatchingRules(ctx, event_name)', sub: 'union of platform + tenant', variant: 'accent', width: 280 },
+    { id: 'platform', label: 'public.notification_rules', sub: 'platform defaults', variant: 'db', width: 240 },
+    { id: 'tenant', label: 'tenant_<slug>.tenant_notification_rules', sub: 'tenant overrides', variant: 'db', width: 300 },
+    { id: 'render', label: 'Render + Dispatch', sub: 'per matching rule (async)', width: 240 },
+    { id: 'inapp', label: 'in_app', sub: 'INSERT in_app_notifications', variant: 'muted' },
+    { id: 'email', label: 'email', sub: 'enqueue to mail provider', variant: 'muted' },
+    { id: 'slack', label: 'slack', sub: 'POST to Slack API', variant: 'muted' },
+    { id: 'webhook', label: 'webhook', sub: 'HTTP POST to URL', variant: 'muted' },
+  ]}
+  edges={[
+    { source: 'emit', target: 'outbox' },
+    { source: 'outbox', target: 'handle' },
+    { source: 'handle', target: 'match' },
+    { source: 'match', target: 'platform' },
+    { source: 'match', target: 'tenant' },
+    { source: 'match', target: 'render' },
+    { source: 'render', target: 'inapp' },
+    { source: 'render', target: 'email' },
+    { source: 'render', target: 'slack' },
+    { source: 'render', target: 'webhook' },
+  ]}
+/>
 
 Delivery is async. The notification subscriber handler returns immediately after dispatching; the actual delivery to external channels (email, Slack, webhook) happens in background workers. This means a slow external provider cannot block event processing.
 
@@ -154,7 +220,7 @@ The `webhook` channel performs an HTTP POST to the configured URL with the follo
 }
 ```
 
-Webhook deliveries include a `X-Trazo-Signature` header computed as an HMAC-SHA256 of the request body using the tenant's webhook secret. Recipients should verify this signature before processing.
+Webhook deliveries include a `X-Heyllave-Signature` header computed as an HMAC-SHA256 of the request body using the tenant's webhook secret. Recipients should verify this signature before processing.
 
 Failed webhook deliveries are retried up to 3 times with exponential backoff. Permanently failed webhook deliveries are logged but do not go to the event dead letter queue, as the originating event was successfully processed.
 

@@ -1,0 +1,91 @@
+---
+title: Local Dev Setup Flow
+description: From a clean machine to a running Heyllave server with one tenant and the admin app connected.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+
+This flow is what every new contributor walks the first time. It assumes nothing already installed on the machine and ends at a working local environment ready for module development.
+
+---
+
+## Phases
+
+```
+1. Prereqs       →  2. Install CLI    →  3. Bootstrap DB
+                                                │
+6. Verify        ←  5. Start server   ←  4. Apply migrations
+```
+
+---
+
+## The Flow
+
+<Steps>
+
+1. **Install prerequisites.** Go 1.25+, Docker (for the local Postgres container), `make`, and `git`. macOS, Linux, and WSL are all supported. See [Prerequisites](/getting-started/prerequisites/).
+
+2. **Install the `heyllave` CLI.** Either `go install github.com/heyllave/cli@latest` for the latest tagged build or clone `heyllave-cli` and `make install` for HEAD. The CLI is the entry point for every local-dev operation. See [Installation](/getting-started/installation/).
+
+3. **Start the local Postgres container.** `heyllave db local` launches a Postgres 15 container named `heyllave-local-db` and creates the platform database. The container persists data in a named volume, so stopping/starting does not wipe it. See [Local Development](/getting-started/local-development/).
+
+4. **Apply migrations.** `heyllave migrate apply` runs every migration in `heyllave-cli/migrations/` against the local DB — `public/` first, then `tenant/` templates, then `modules/`. The `public` schema is now at the version the server expects.
+
+5. **Configure the server.** Copy `heyllave-core-service/heyllave.example.yaml` to `heyllave.yaml` (or set `HEYLLAVE_*` env vars). The defaults point at the local Postgres container, so no edits are usually needed. See the [Configuration Reference](/reference/configuration-reference/).
+
+6. **Start the API server.** From `heyllave-core-service`, run `go run ./cmd/heyllave-server` (or `make run`). The server walks the [Startup Lifecycle](/guides/flow-startup-lifecycle/) and binds to `:8080`. The OpenAPI doc is served at `/openapi.json`.
+
+7. **Create your first tenant.** `heyllave tenant create --name "Acme" --slug "acme"` provisions the tenant schema and applies the tenant migration template. See [Your First Tenant](/getting-started/first-tenant/).
+
+8. **Verify end-to-end.** Hit `GET /healthz` (no auth) and `POST /auth/login` with the bootstrap admin credentials printed during tenant creation. A successful login returns a JWT you can use against any tenant-scoped endpoint.
+
+</Steps>
+
+<Aside type="tip">
+  The same flow works for re-onboarding after a long pause: `heyllave db local` is idempotent, `heyllave migrate apply` is incremental, and the server picks up any newly-merged modules on next start.
+</Aside>
+
+---
+
+## What You Have at the End
+
+| Component | Where | How to check |
+|---|---|---|
+| Postgres 15 | Docker container `heyllave-local-db` | `docker ps` |
+| Public schema | `public` in the platform DB | `heyllave migrate status` |
+| Tenant schema | `tenant_acme` | `psql -c "\dn"` |
+| API server | `:8080` | `curl localhost:8080/healthz` |
+| OpenAPI doc | `:8080/openapi.json` | `curl localhost:8080/openapi.json` |
+| CLI | `$GOPATH/bin/heyllave` | `heyllave --version` |
+
+---
+
+## Reset & Reseed
+
+When you want a clean slate (e.g., after destructive migration testing):
+
+```bash
+heyllave db local --reset    # destroys and recreates the container
+heyllave migrate apply       # re-applies every migration
+heyllave tenant create ...   # recreate any tenants you need
+```
+
+The reset is fast — the container is recreated in seconds, not the minutes a real environment would take.
+
+---
+
+## Common First-Run Issues
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `connection refused :5432` | Container didn't start | `docker logs heyllave-local-db` |
+| `migration version mismatch` | Schema older than code expects | `heyllave migrate apply` |
+| `HEYLLAVE_AUTH_JWT_SECRET required` | No `heyllave.yaml` and no env vars | Copy the example yaml |
+| Port `8080` already in use | Another service is bound | Set `HEYLLAVE_SERVER_PORT=8081` |
+
+---
+
+## Related Flows
+
+- [Startup Lifecycle](/guides/flow-startup-lifecycle/) — what happens when you run the server.
+- [Creating a Module](/guides/flow-creating-a-module/) — your first contribution after setup.

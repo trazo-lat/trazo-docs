@@ -1,11 +1,11 @@
 ---
 title: Audit Logs
-description: Query the Trazo audit log to track every state change, inspect RFC 6902 JSON Patch diffs, and reconstruct resource history.
+description: Query the Heyllave audit log to track every state change, inspect RFC 6902 JSON Patch diffs, and reconstruct resource history.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Every time a resource is created, updated, or deleted in Trazo, an immutable audit entry is written. These entries capture who performed the action, what changed, and when — making it straightforward to meet compliance requirements and diagnose production issues.
+Every time a resource is created, updated, or deleted in Heyllave, an immutable audit entry is written. These entries capture who performed the action, what changed, and when — making it straightforward to meet compliance requirements and diagnose production issues.
 
 The `changes` field in each entry contains an RFC 6902 JSON Patch array describing the exact diff between the previous and current state of the resource.
 

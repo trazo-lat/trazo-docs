@@ -1,6 +1,6 @@
 ---
 title: Core Struct
-description: The central dependency carrier of the Trazo platform — its 11 sub-interfaces, their methods, and the rules governing how Core is used across the codebase.
+description: The central dependency carrier of the Heyllave platform — its 11 sub-interfaces, their methods, and the rules governing how Core is used across the codebase.
 ---
 
 The `Core` struct is the single point of access for every platform capability. It is constructed once at startup and passed as a pointer into every module, service, and handler. No global state is used; all shared functionality is accessed through `*Core`.

@@ -1,0 +1,518 @@
+---
+title: Approval Workflows
+description: Declarative multi-step approval chains — defining a policy, gating a status transition behind it, handling delegation, deadlines, and escalation, and wiring approvers into notifications.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+An **approval workflow** pauses a resource at a decision point until one or more authorized users consent. The engine handles request creation, approver resolution, multi-step sequencing, delegation, and deadline expiration; the module wires it into a state-machine transition, picks who can approve, and decides what to do on approve vs. reject.
+
+This guide walks through declaring a policy, gating a transition with `trigger: approval`, sending approvers an actionable notification, and handling the deadline lifecycle.
+
+For the underlying state machine that approvals plug into, see [Status Machines](/guides/status-machines/). For the action-button notification shape that approvers click, see [Sending Notifications](/guides/notifications/#step-5-action-buttons).
+
+<Aside type="note">
+  The engine itself has no HTTP surface of its own. Approvers act on requests through the same `POST /<module>/{id}/actions/{action}` endpoint the [Status Engine](/architecture/status-engine/) exposes for every other transition — the engine just substitutes "is the user an approver?" for the usual permission check.
+</Aside>
+
+## The Approval Lifecycle
+
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={360}
+  nodes={[
+    { id: 'trigger', label: '1. Trigger event', sub: 'service.EmitTx(...)' , variant: 'accent'},
+    { id: 'create', label: '2. CreateRequest', sub: 'pending or step_in_progress' },
+    { id: 'step1', label: '3. Step 1 decide', sub: 'approve · reject · delegate' },
+    { id: 'stepN', label: '4. Step N decide', sub: 'last step closes the request' },
+    { id: 'resolved', label: '5. Resolved', sub: 'approved · rejected · expired', variant: 'coral' },
+  ]}
+  edges={[
+    { source: 'trigger', target: 'create' },
+    { source: 'create', target: 'step1' },
+    { source: 'step1', target: 'stepN' },
+    { source: 'stepN', target: 'resolved' },
+  ]}
+/>
+
+Every step has the same shape: a list of resolved approver IDs, an optional deadline, and a pending status. The current step advances when an approver picks `approve`; any rejection closes the whole request immediately. Delegation rewrites the current step's approver list in place — it does not branch the chain.
+
+---
+
+## Step 1 — Declare the Policy
+
+An approval policy is a `core.ApprovalPolicy` value. It declares the trigger event, an optional skip condition, an ordered list of steps, and what happens to the source resource on approve vs. reject.
+
+```go
+package repairs
+
+import "platform/internal/core"
+
+var estimateApproval = core.ApprovalPolicy{
+    Name:         "estimate_approval",
+    Description:  "Customer must approve the estimate before work begins.",
+    TriggerEvent: "repairs.estimate_submitted",
+    Condition:    "estimate.total > 0",
+    Steps: []core.ApprovalStepPolicy{
+        {
+            Name: "customer_review",
+            Approvers: core.ApproverConfig{
+                Expression: "reference.customer",
+            },
+            Deadline: &core.DeadlineConfig{
+                Hours:    72,
+                OnExpire: core.DeadlineReject,
+            },
+        },
+    },
+    OnApprove: core.ApprovalOutcome{
+        Transition: &core.ApprovalTransitionConfig{From: "pending_approval", To: "in_progress"},
+    },
+    OnReject: core.ApprovalOutcome{
+        Transition:    &core.ApprovalTransitionConfig{From: "pending_approval", To: "pending_estimate"},
+        RequireReason: true,
+    },
+}
+```
+
+### Field reference
+
+| Field | Notes |
+|---|---|
+| `Name` | Unique within the module. Becomes the `approval_name` on every persisted request and the dedup key for "active approval for this resource." |
+| `TriggerEvent` | The event name your service emits to kick off the workflow. Documentation only — the engine itself is called explicitly via `CreateRequest`; the field reminds readers what to subscribe to. |
+| `Condition` | An [expr-lang](https://expr-lang.org) boolean expression evaluated against `EventData`. When it returns `false`, the request is persisted with status `skipped` and `completed_at` set — useful for "only require approval over $5,000." |
+| `Steps` | Ordered list. Each step has its own approvers and optional deadline. |
+| `OnApprove` / `OnReject` | What the final state should be on each outcome — a state-machine transition, an optional named action, and whether a reason is required. The engine records the outcome; the module's transition callback consumes these fields when applying the DB change. |
+
+### Approver resolution
+
+`ApproverConfig` resolves to a deduplicated list of user IDs using OR semantics across its fields:
+
+| Field | Resolves to |
+|---|---|
+| `Expression` | Dot-path lookup into `EventData` (e.g. `"reference.customer"` reads `eventData["reference"]["customer"]`). Returns a string or a list of strings. |
+| `Roles` | Every active member of the tenant whose role name appears in the list. |
+| `Permissions` | Every active member whose role's `permissions` array contains any of the named permissions, plus members whose `extra_permissions` includes them. |
+| `Users` | Direct user IDs, no lookup. |
+
+If more than one field is set, the results are unioned. If the resolver produces zero approvers the engine returns `APPROVALS.VALIDATION.NO_APPROVERS` (HTTP 422) — pick at least one path that always yields someone.
+
+<Aside type="tip">
+  The policy is plain Go state. Define it once near your module's domain types, keep it in a package-level `var`, and pass the same value to every `CreateRequest` call. The engine reads it on each invocation; no registration step is required.
+</Aside>
+
+---
+
+## Step 2 — Gate a Transition With `trigger: approval`
+
+In your module's `module.yaml`, mark the transition that should require approval by setting `trigger: approval`. The engine will skip the usual permission check and instead verify the caller is the current step's approver.
+
+```yaml
+state_machines:
+  - key: status
+    statuses:
+      base:
+        - { key: pending_estimate,  type: initial }
+        - { key: pending_approval,  type: active }
+        - { key: in_progress,       type: active }
+        - { key: completed,         type: terminal }
+        - { key: cancelled,         type: terminal }
+    transitions:
+      - from: pending_estimate
+        to: pending_approval
+        action: submit_estimate
+        permission: repairs.update.all
+
+      - from: pending_approval
+        to: in_progress
+        action: approve
+        trigger: approval
+        label: "Approve"
+        style: confirm
+        confirm: true
+
+      - from: pending_approval
+        to: pending_estimate
+        action: reject
+        trigger: approval
+        label: "Reject"
+        style: destructive
+        input:
+          fields:
+            - key: reason
+              type: text
+              required: true
+              min_length: 5
+              label: "Reason for rejection"
+```
+
+What `trigger: approval` changes in the engine:
+
+| Phase | Default trigger (`permission`) | `approval` trigger |
+|---|---|---|
+| `AvailableActions` | Shown to anyone with the permission | Shown only when `core.Approvals.IsApprover(...)` returns true for the calling user |
+| `ExecuteAction` | Permission check via `core.Permission.MustCan` | `IsApprover` check; mismatches return `APPROVALS.AUTHORIZATION.NOT_APPROVER` (403) |
+| Preconditions | Evaluated normally | Evaluated normally |
+
+Approve and reject transitions both carry `trigger: approval`. The `input` schema is the standard state-machine [action input](/guides/status-machines/) — use `required: true` on `reason` when your policy has `RequireReason: true`.
+
+---
+
+## Step 3 — Trigger the Request From a Service
+
+When the upstream action fires (in this example, submitting the estimate), call `core.Approvals.CreateRequest` inside the same transaction:
+
+```go
+func (s *Service) SubmitEstimate(ctx context.Context, repairID string, total int64) error {
+    return s.core.DB.Tx(ctx, func(tx core.Tx) error {
+        // 1. Apply your own DB change (update estimate, transition status, etc.).
+        if err := s.repo.UpdateEstimateTx(ctx, tx, repairID, total); err != nil {
+            return err
+        }
+
+        // 2. Emit the trigger event so other subscribers see it too.
+        if err := s.core.Events.EmitTx(ctx, tx, core.Event{
+            Module:        "repairs",
+            Name:          "repairs.estimate_submitted",
+            AggregateType: "repair",
+            AggregateID:   repairID,
+            Payload: map[string]any{
+                "repair_id": repairID,
+                "estimate":  map[string]any{"total": total},
+                "reference": map[string]any{"customer": s.repo.CustomerID(ctx, repairID)},
+            },
+        }); err != nil {
+            return err
+        }
+
+        // 3. Open the approval request.
+        _, err := s.core.Approvals.CreateRequest(ctx, core.CreateApprovalInput{
+            TenantID:       core.TenantFrom(ctx).InternalID,
+            Policy:         estimateApproval,
+            SourceModule:   "repairs",
+            SourceInstance: "", // set if your module is multi-instance
+            SourceID:       repairID,
+            Context: map[string]any{
+                "repair_id":     repairID,
+                "estimate_total": total,
+            },
+            EventData: map[string]any{
+                "estimate":  map[string]any{"total": total},
+                "reference": map[string]any{"customer": s.repo.CustomerID(ctx, repairID)},
+            },
+        })
+        return err
+    })
+}
+```
+
+A few things to know:
+
+- **One active request per `(source_module, source_instance, source_id, approval_name)`.** A second call while one is still pending returns `APPROVALS.CONFLICT.ALREADY_EXISTS` (409). The unique constraint lives on the table.
+- **`EventData` drives both the condition and the `expression` approver resolver.** Keep its shape stable across calls.
+- **`Context` is a frozen snapshot** stored on the row. UIs read it to render the request without re-querying the source resource — useful when the source has moved on by the time an approver looks at it.
+- **The engine emits `approvals.requested`** inside the same transaction. Subscribers (notifications, audit) see it as part of the unit of work.
+
+### What the engine writes
+
+| Table | Row | Notes |
+|---|---|---|
+| `approval_requests` | One header row | `status` starts as `pending` (single-step) or `step_in_progress` (multi-step); `current_step = 0` |
+| `approval_steps` | One row for step 0 | `approver_ids` is the resolved UUID array; `deadline_at` set if the step has a deadline |
+| `events_outbox` | `approvals.requested` event | Payload includes the step name and approver IDs |
+
+Steps for later positions in the chain are **not** materialized at creation time — they are created when the current step approves.
+
+---
+
+## Step 4 — List and Decide on Requests
+
+There is no dedicated approvals HTTP API. Approvers see and act on requests through two existing surfaces.
+
+### Listing pending work
+
+`core.Approvals.PendingForUser(ctx, userID)` returns every active step where the user is in `approver_ids`, scoped to the tenant schema bound to the context. Wire it into your dashboard endpoint:
+
+```go
+func (h *Handler) ListMyApprovals(ctx context.Context) ([]core.PendingApproval, error) {
+    user := core.UserFrom(ctx)
+    if user == nil {
+        return nil, core.ErrUnauthorized()
+    }
+    return h.core.Approvals.PendingForUser(ctx, user.InternalID)
+}
+```
+
+Each `PendingApproval` carries the source resource pointer, the step name, the request's `context` snapshot, and an optional `deadline_at` — enough to render an inbox row without joining back to the source module.
+
+### Acting on a request
+
+Approvers invoke the regular state-machine action endpoint. The engine routes the call through `IsApprover` instead of the permission check:
+
+```bash
+# Approve
+curl -X POST http://localhost:8080/api/v1/repairs/{repair_id}/actions/approve \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# Reject with a reason (required by the policy)
+curl -X POST http://localhost:8080/api/v1/repairs/{repair_id}/actions/reject \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason":"Estimate too high, please revise labor hours."}'
+```
+
+The module's `TransitionApplier` callback bridges the state-machine result to the approval engine. Inside the applier, call `Decide` in the same transaction that applies the status change:
+
+```go
+func (s *Service) applyTransition(ctx context.Context, repairID string, result *core.TransitionResult) (any, error) {
+    return s.core.DB.Tx(ctx, func(tx core.Tx) error {
+        // Apply the status change first.
+        if err := s.repo.UpdateStatusTx(ctx, tx, repairID, result.To); err != nil {
+            return err
+        }
+
+        // Mirror the decision into the approval engine.
+        if result.Action == "approve" || result.Action == "reject" {
+            decision := core.DecisionApprove
+            if result.Action == "reject" {
+                decision = core.DecisionReject
+            }
+            reason, _ := result.Input["reason"].(string)
+            _, err := s.core.Approvals.Decide(ctx, core.DecisionInput{
+                TenantID:     core.TenantFrom(ctx).InternalID,
+                SourceModule: "repairs",
+                SourceID:     repairID,
+                ApprovalName: "estimate_approval",
+                UserID:       core.UserFrom(ctx).InternalID,
+                Decision:     decision,
+                Reason:       reason,
+            })
+            return err
+        }
+        return nil
+    })
+}
+```
+
+`Decide` advances the step, persists the decision, and emits `approvals.approved`, `approvals.rejected`, or `approvals.step_completed` (multi-step interim).
+
+---
+
+## Step 5 — Delegate to Someone Else
+
+An approver who cannot decide right now can hand their slot to another user. Delegation is a separate verb on the engine — it does not consume the step or change the request status:
+
+```go
+_, err := s.core.Approvals.Delegate(ctx, core.DelegateInput{
+    TenantID:     tenant.InternalID,
+    SourceModule: "repairs",
+    SourceID:     repairID,
+    ApprovalName: "estimate_approval",
+    UserID:       core.UserFrom(ctx).InternalID, // the delegator
+    DelegateTo:   "usr_manager_42",
+    Reason:       "On vacation through Friday.",
+})
+```
+
+What the engine does:
+
+1. Verifies the caller is in the step's current `approver_ids`.
+2. Rejects self-delegation (`APPROVALS.VALIDATION.INVALID_DELEGATE`, 422).
+3. Replaces the delegator's ID with the delegatee in the step's `approver_ids` array. Other approvers on the step stay in place.
+4. Sets the step's `status` to `delegated`, records `delegated_from`/`delegated_at`, and emits `approvals.delegated`.
+
+<Aside type="caution">
+  Delegation is per-step. If the chain has three steps and you delegate step 1, steps 2 and 3 still resolve from the policy when their turn comes — your delegate does not inherit positions further down.
+</Aside>
+
+To expose delegation in the UI, add a third state-machine transition or a dedicated endpoint that calls `Delegate` directly. The engine does not require a state change for delegation, so a plain handler works:
+
+```go
+huma.Register(api, huma.Operation{
+    Method:  http.MethodPost,
+    Path:    "/api/v1/repairs/{id}/actions/delegate",
+    Summary: "Delegate the current approval step",
+}, h.delegate)
+```
+
+---
+
+## Step 6 — Deadlines and Escalation
+
+Each step can carry a `Deadline` configuration. The deadline is materialized into `approval_steps.deadline_at` when the step becomes current.
+
+```go
+Deadline: &core.DeadlineConfig{
+    Hours:    72,                       // hours from step start
+    OnExpire: core.DeadlineReject,      // or core.DeadlineEscalate
+},
+```
+
+A background **`approvals.Worker`** wakes on an interval and calls `Engine.ProcessDeadlines`. It selects every step whose `status` is still `pending` and whose `deadline_at` is in the past, then applies the configured action:
+
+| `OnExpire` | Step row | Request row | Event emitted |
+|---|---|---|---|
+| `reject` (default) | `status = expired`, `decided_at = now` | `status = expired`, `completed_at = now` | `approvals.expired` |
+| `escalate` | `status = escalated`, `escalated_at = now` | Advances to the next step if there is one; otherwise `status = rejected` | `approvals.escalated` |
+
+`escalate` is a "skip this step" semantic. The current step is closed without a decision, and either the next step takes over (its approvers are resolved at that point) or the request is rejected if there is no next step.
+
+The worker has no API surface; start it during application boot:
+
+```go
+worker := approvals.NewWorker(approvalEngine, 5*time.Minute, core.Log)
+go worker.Start(ctx)
+```
+
+<Aside type="note">
+  Deadline checks are eventually consistent. A step whose deadline passes at 12:00:01 will not flip status until the next tick — pick the interval based on how tight your SLAs are.
+</Aside>
+
+---
+
+## Step 7 — Notify Approvers With Action Buttons
+
+The natural way to get approvers' attention is a notification with `approve` and `reject` buttons. The in-app channel renders `resource`-kind actions that invoke a state-machine transition on the resource — exactly what the approval flow expects.
+
+Subscribe to `approvals.requested` and create an in-app notification with `actions` populated. From the [notifications guide](/guides/notifications/#step-5-action-buttons):
+
+```go
+func (s *Service) onApprovalRequested(ctx context.Context, ev core.Event) error {
+    approvers, _ := ev.Payload["approver_ids"].([]any)
+    sourceModule, _ := ev.Payload["source_module"].(string)
+    sourceID, _ := ev.Payload["source_id"].(string)
+
+    for _, raw := range approvers {
+        userID, _ := raw.(string)
+        if userID == "" {
+            continue
+        }
+        _, err := s.core.Notify.CreateInApp(ctx, core.InAppNotification{
+            UserID:  userID,
+            Subject: "Approval needed",
+            Body:    "An estimate is waiting for your review.",
+            Actions: []core.NotificationAction{
+                {
+                    Key:            "approve",
+                    Kind:           "resource",
+                    LabelKey:       "approvals.actions.approve",
+                    Style:          "default",
+                    Confirm:        true,
+                    Resource:       core.ResourceRef{Module: sourceModule, Type: "repair", ID: sourceID},
+                    ResourceAction: "approve",
+                },
+                {
+                    Key:            "reject",
+                    Kind:           "resource",
+                    LabelKey:       "approvals.actions.reject",
+                    Style:          "destructive",
+                    Resource:       core.ResourceRef{Module: sourceModule, Type: "repair", ID: sourceID},
+                    ResourceAction: "reject",
+                    Input: &core.ActionInput{
+                        Fields: []core.ActionField{{Key: "reason", Type: "text", Required: true}},
+                    },
+                },
+            },
+        })
+        if err != nil {
+            return err
+        }
+    }
+    return nil
+}
+```
+
+When the approver clicks `Approve`, the frontend calls `POST /api/v1/notifications/{id}/actions/approve`. The notify handler resolves the action's `resource` + `resource_action`, dispatches it as `POST /api/v1/repairs/{repair_id}/actions/approve` server-side, and the status engine routes the rest. No client logic ever knows it was an approval — it's just a state-machine action with a different authorization check.
+
+---
+
+## Worked Example: Two-Step Refund Approval
+
+A refund larger than $500 needs a manager's sign-off; refunds larger than $5,000 also need finance. Below $500, the policy auto-skips.
+
+<Steps>
+
+1. **Define the policy** with two steps and a condition that skips both for small refunds. The second step is conditional on the request reaching it — the engine creates step 1 immediately and resolves step 2's approvers only when step 1 approves:
+
+   ```go
+   var refundApproval = core.ApprovalPolicy{
+       Name:         "refund_approval",
+       TriggerEvent: "billing.refund_requested",
+       Condition:    "refund.amount >= 50000", // amounts in cents → $500
+       Steps: []core.ApprovalStepPolicy{
+           {
+               Name:      "manager_review",
+               Approvers: core.ApproverConfig{Roles: []string{"manager"}},
+               Deadline:  &core.DeadlineConfig{Hours: 48, OnExpire: core.DeadlineEscalate},
+           },
+           {
+               Name:      "finance_review",
+               Approvers: core.ApproverConfig{Roles: []string{"finance"}},
+               Deadline:  &core.DeadlineConfig{Hours: 72, OnExpire: core.DeadlineReject},
+           },
+       },
+       OnApprove: core.ApprovalOutcome{
+           Transition: &core.ApprovalTransitionConfig{From: "pending_approval", To: "approved"},
+       },
+       OnReject: core.ApprovalOutcome{
+           Transition:    &core.ApprovalTransitionConfig{From: "pending_approval", To: "rejected"},
+           RequireReason: true,
+       },
+   }
+   ```
+
+2. **Trigger from the refund service** when a user submits the refund request. The policy's condition (`amount >= 50000`) is evaluated against `EventData`; small refunds produce a `skipped` request with `completed_at` already set and no step rows, so the service can short-circuit:
+
+   ```go
+   req, err := s.core.Approvals.CreateRequest(ctx, core.CreateApprovalInput{
+       TenantID:     tenant.InternalID,
+       Policy:       refundApproval,
+       SourceModule: "billing",
+       SourceID:     refundID,
+       Context:      map[string]any{"refund_amount": amount, "customer": customerID},
+       EventData:    map[string]any{"refund": map[string]any{"amount": amount}},
+   })
+   if err != nil {
+       return err
+   }
+   if req.Status == core.ApprovalStatusSkipped {
+       return s.applyRefundImmediately(ctx, refundID)
+   }
+   ```
+
+3. **Manager approves step 1.** The applier calls `Decide` with `DecisionApprove`. The engine updates step 0 to `approved`, creates step 1 inside the same transaction with the resolved finance approvers and a fresh 72-hour deadline, sets the request's `current_step` to 1, and emits `approvals.step_completed`. The source resource's status stays at `pending_approval` — only the last step's approve actually flips it.
+
+4. **Finance approves step 2.** The engine sees `isLastStep == true`, sets the request to `approved` with `completed_at`, and emits `approvals.approved`. The applier — invoked through the same `actions/approve` endpoint — also moves the refund row to its terminal state.
+
+5. **Or: manager rejects step 1.** The engine sets step 0 to `rejected`, sets the request to `rejected`, emits `approvals.rejected`, and never creates step 2. A single rejection at any step closes the request.
+
+6. **Or: manager misses the 48-hour deadline.** The worker's next tick processes the expired step. Because `OnExpire` is `escalate`, the step flips to `escalated` and step 1 is promoted — finance picks up the decision directly, with its own 72-hour deadline running from that moment.
+
+</Steps>
+
+---
+
+## Common Mistakes
+
+- **Forgetting to call `CreateRequest` after the trigger event.** Emitting `repairs.estimate_submitted` does not by itself open an approval — the engine has to be invoked. Wire `CreateRequest` into the same service method that emits the event.
+- **Setting `trigger: approval` without a `permission` fallback for `AvailableActions`.** That's fine — `approval` transitions are deliberately permission-free. But do not also set `permission:` on the same row; the engine ignores it for approval triggers and a reader will assume both gates apply.
+- **Resolving approvers from the empty set.** A role with zero members, an `expression` pointing at a missing payload field, a tenant with no one carrying the named permission — all produce `APPROVALS.VALIDATION.NO_APPROVERS` (422) at `CreateRequest` time. Validate against your tenant fixtures before relying on a single resolver source.
+- **Using `Decide` outside a transaction that also applies the source resource's status change.** The two writes need to commit together; otherwise a crash between them leaves the resource in `pending_approval` with an `approved` request, or vice versa.
+- **Materializing later steps at creation time.** The engine creates one step row at a time. If you query `approval_steps` for a fresh request expecting `total_steps` rows you will only see step 0 — the rest land as the chain advances.
+- **Self-delegation.** Calling `Delegate` with `DelegateTo == UserID` returns `APPROVALS.VALIDATION.INVALID_DELEGATE` (422). Validate on the client before sending.
+- **Mismatched `approval_name`.** `Decide` and `Delegate` look up the active request by `(source_module, source_instance, source_id, approval_name)`. Typoing the policy name returns `APPROVALS.NOT_FOUND.REQUEST` (404) even though the request exists.
+
+---
+
+## Related
+
+- [Status Machines](/guides/status-machines/) — the transition vocabulary that approvals plug into, including the `trigger: approval` table and the `actions/{key}` endpoint shape.
+- [Sending Notifications](/guides/notifications/) — building the inbox/email message that surfaces an approval request, including the `resource`-kind action button that invokes the transition.
+- [Status Engine](/architecture/status-engine/) — trigger types, validation order, and the place `isCurrentApprover` slots into the action pipeline.
+- [Database Schema](/reference/database-schema/#approval_requests) — column reference for `approval_requests` and `approval_steps`.
+- [Core Interfaces](/reference/core-interfaces/) — the `ApprovalEngine` interface surface and its input/output types.

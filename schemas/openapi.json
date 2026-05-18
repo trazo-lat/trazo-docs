@@ -1,11 +1,11 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Trazo API",
+    "title": "Heyllave API",
     "description": "Multi-tenant SaaS platform API for service-oriented businesses",
     "version": "0.1.0",
     "contact": {
-      "name": "Trazo Team"
+      "name": "Heyllave Team"
     }
   },
   "servers": [

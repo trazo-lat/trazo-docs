@@ -1,0 +1,136 @@
+---
+title: Event Propagation Flow
+description: How a domain event travels from `EmitTx` through the outbox to subscribers, hooks, and notification channels.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Heyllave never emits events to an in-process bus. Every event is written to a durable outbox inside the same transaction as the business operation that produced it, then a background worker delivers it to subscribers. This is the guarantee that no event is lost if the process crashes between commit and delivery.
+
+---
+
+## The Path
+
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={620}
+  nodes={[
+    {
+      id: 'service',
+      label: 'Service (in txn)',
+      variant: 'accent',
+      sub: 'business operation',
+    },
+    {
+      id: 'outbox',
+      label: 'outbox table',
+      variant: 'db',
+      sub: 'same txn — durable on COMMIT',
+    },
+    {
+      id: 'worker',
+      label: 'Outbox Worker',
+      variant: 'coral',
+      sub: 'polls + claims batch under row lock',
+    },
+    {
+      id: 'subs',
+      label: 'Module Subscribers',
+      sub: 'in-process, same Core',
+    },
+    {
+      id: 'hooks',
+      label: 'Hooks',
+      sub: 'expression + webhook',
+    },
+    {
+      id: 'notif',
+      label: 'Notification Rules',
+      sub: 'in-app / email / Slack / webhook',
+    },
+    {
+      id: 'ack',
+      label: 'Mark Delivered',
+      variant: 'db',
+      sub: 'or → retry / dead letter',
+    },
+  ]}
+  edges={[
+    { source: 'service', target: 'outbox', label: 'EmitTx' },
+    { source: 'outbox', target: 'worker', label: 'COMMIT' },
+    { source: 'worker', target: 'subs', label: 'fan-out' },
+    { source: 'worker', target: 'hooks', label: 'fan-out' },
+    { source: 'worker', target: 'notif', label: 'fan-out' },
+    { source: 'subs', target: 'ack', dashed: true },
+    { source: 'hooks', target: 'ack', dashed: true },
+    { source: 'notif', target: 'ack', dashed: true },
+  ]}
+/>
+
+---
+
+## The Flow
+
+<Steps>
+
+1. **Service emits inside the transaction.** During the DB transaction phase of [Service Patterns](/guides/service-patterns/), the service calls `core.Events.EmitTx(tx, event)`. This inserts the event payload into the `outbox` table using the same `tx`. The event is durable the instant the transaction commits — no separate "publish" step.
+
+2. **Commit makes the event visible.** Until commit, the outbox row is invisible to the worker. If the transaction rolls back, the event simply never existed — there is no compensation logic to write.
+
+3. **Outbox worker polls.** A background worker (started in Phase 5 of the [Startup Lifecycle](/guides/flow-startup-lifecycle/)) polls the outbox on a configurable interval (`HEYLLAVE_EVENTS_POLL_INTERVAL`), claims a batch under a row lock, and dispatches each event.
+
+4. **Dispatch matches subscribers.** Each subscription declared in a `module.yaml` is matched against the event name. Patterns support `*` wildcards (`repairs.*` matches `repairs.created`, `repairs.updated`). Subscribers run **in-process**, so they share the same Core. See [Event Subscriptions](/architecture/event-subscriptions/).
+
+5. **Hooks fire in parallel.** Registered hooks evaluate their `when:` expression against the event payload. Matching hooks execute — either an in-process Go function or an outbound webhook. See [Hooks](/architecture/hooks/).
+
+6. **Notification rules evaluate.** Notification rules subscribed to the event are scored against their conditions; matching rules dispatch to the configured channels (in-app, email, Slack, webhook). See [Notifications](/architecture/notifications/).
+
+7. **Worker marks delivered.** Once every subscriber, hook, and notification dispatch succeeds (or is queued for retry on failure), the worker marks the outbox row delivered and moves on.
+
+</Steps>
+
+---
+
+## Retry & Dead Letter
+
+A delivery failure (subscriber returns error, webhook returns 5xx) is retried with exponential backoff up to `HEYLLAVE_EVENTS_MAX_RETRIES`. After the final attempt, the outbox row is moved to the dead letter queue and the failure is logged for operator review.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `HEYLLAVE_EVENTS_POLL_INTERVAL` | `1s` | Worker poll cadence |
+| `HEYLLAVE_EVENTS_BATCH_SIZE` | `100` | Events claimed per poll |
+| `HEYLLAVE_EVENTS_MAX_RETRIES` | `5` | Attempts before dead letter |
+| `HEYLLAVE_EVENTS_WORKER_POOL_SIZE` | `4` | Concurrent dispatchers |
+
+---
+
+## Ordering & Delivery Guarantees
+
+| Property | Guarantee |
+|---|---|
+| Delivery | At-least-once. Subscribers must be idempotent. |
+| Order | Per-aggregate FIFO. Cross-aggregate ordering is **not** guaranteed. |
+| Durability | Event survives any process crash after commit. |
+| Transactionality | Event is visible to the worker only if the producing txn committed. |
+
+<Aside type="caution">
+  Because delivery is at-least-once, every subscriber must guard against double-processing — typically by recording an "events processed" row keyed by event ID inside the subscriber's own transaction.
+</Aside>
+
+---
+
+## Common Mistakes
+
+- **Calling `Emit` instead of `EmitTx`.** `Emit` is for outside a transaction (rare). Inside a service transaction, always use `EmitTx` so the event is durable iff the data change is.
+- **Emitting after the txn commits.** The event then isn't tied to the data change and can be lost on crash.
+- **Subscribers reaching into another module's DB.** Subscribers should call the other module's service, not its repository.
+
+---
+
+## Related Flows
+
+- [Request Lifecycle](/guides/flow-request-lifecycle/) — where events are emitted in step 8.
+- [Startup Lifecycle](/guides/flow-startup-lifecycle/) — how the outbox worker is started.
+- [Creating a Module](/guides/flow-creating-a-module/) — declaring subscriptions in `module.yaml`.

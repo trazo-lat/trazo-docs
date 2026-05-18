@@ -3,7 +3,7 @@ title: File Storage
 description: Pluggable file storage system supporting local filesystem and S3-compatible backends with tenant-scoped paths.
 ---
 
-Trazo provides a pluggable file storage system through the `core.Storage` interface. File bytes are stored in the configured backend (local filesystem or S3-compatible); metadata is tracked in the per-tenant `stored_files` table (`tenant_<slug>.stored_files`, defined by `migrations/core/tenant/storage.sql`).
+Heyllave provides a pluggable file storage system through the `core.Storage` interface. File bytes are stored in the configured backend (local filesystem or S3-compatible); metadata is tracked in the per-tenant `stored_files` table (`tenant_<slug>.stored_files`, defined by `migrations/core/tenant/storage.sql`).
 
 ## Backends
 
@@ -75,7 +75,7 @@ CREATE INDEX idx_stored_files_resource ON stored_files(module, resource_id);
 ## Configuration
 
 ```yaml
-# trazo.yaml
+# heyllave.yaml
 storage:
   default_backend: local        # "local" or "s3"
   max_file_size: 52428800       # 50 MB
@@ -86,7 +86,7 @@ storage:
     base_url: http://localhost:8080/files  # optional
 
   s3:
-    bucket: trazo-uploads
+    bucket: heyllave-uploads
     region: us-east-1
     endpoint: ""                # custom endpoint for MinIO
     access_key: ""              # or use IAM roles
@@ -102,7 +102,7 @@ The S3 backend works with any S3-compatible service by setting `endpoint` and `f
 storage:
   default_backend: s3
   s3:
-    bucket: trazo
+    bucket: heyllave
     endpoint: http://localhost:9000  # MinIO
     access_key: minioadmin
     secret_key: minioadmin

@@ -1,19 +1,41 @@
+/* heyllave brand tokens — mirrors the marketing site palette.
+ * Light theme: cream surface, indigo primary, coral CTA.
+ * Dark theme: neutral grays for surface with indigo/coral kept as accents — the
+ * deep-indigo background from the website doesn't work for body docs. */
+
 :root {
-  --sl-color-accent-low: #1a2b4a;
-  --sl-color-accent: #3b82f6;
-  --sl-color-accent-high: #93c5fd;
-  --sl-color-white: #ffffff;
-  --sl-color-gray-1: #eceef2;
-  --sl-color-gray-2: #c0c2c7;
-  --sl-color-gray-3: #888b96;
-  --sl-color-gray-4: #545861;
-  --sl-color-gray-5: #353841;
-  --sl-color-gray-6: #24272f;
-  --sl-color-black: #17181c;
+  /* Dark theme (default in Starlight). Neutral surface + brand accents. */
+  --sl-color-accent-low: #1E1B4B;
+  --sl-color-accent: #6E68D9;
+  --sl-color-accent-high: #B8B5FF;
+
+  --sl-color-white: #F5F2EC;
+  --sl-color-gray-1: #E1DED7;
+  --sl-color-gray-2: #B7B4AD;
+  --sl-color-gray-3: #84827C;
+  --sl-color-gray-4: #4F4D48;
+  --sl-color-gray-5: #2B2A28;
+  --sl-color-gray-6: #1B1A19;
+  --sl-color-black: #131211;
 }
 
 :root[data-theme='light'] {
-  --sl-color-accent-low: #dbeafe;
-  --sl-color-accent: #2563eb;
-  --sl-color-accent-high: #1e3a5f;
+  --sl-color-accent-low: #E5E4F8;
+  --sl-color-accent: #3835A8;
+  --sl-color-accent-high: #1E1B4B;
+
+  --sl-color-white: #0A0820;
+  --sl-color-gray-1: #1E1B4B;
+  --sl-color-gray-2: #4A4865;
+  --sl-color-gray-3: #7A7892;
+  --sl-color-gray-4: #D8CFBC;
+  --sl-color-gray-5: #E8E2D5;
+  --sl-color-gray-6: #F2EDE3;
+  --sl-color-black: #FAF7F2;
+}
+
+/* Coral CTA accent for the primary hero button + tags. */
+:root {
+  --heyllave-coral: #FF6B5B;
+  --heyllave-coral-deep: #E84D3C;
 }

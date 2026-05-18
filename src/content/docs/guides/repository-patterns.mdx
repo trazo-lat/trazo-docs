@@ -1,11 +1,11 @@
 ---
 title: Repository Patterns
-description: Conventions for writing database repositories in Trazo using sqlx and squirrel, including scope enforcement, transactional variants, and soft deletes.
+description: Conventions for writing database repositories in Heyllave using sqlx and squirrel, including scope enforcement, transactional variants, and soft deletes.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The repository layer is responsible for all SQL generation and execution. Trazo repositories follow a strict set of conventions that make them predictable, testable, and safe in a multi-tenant environment.
+The repository layer is responsible for all SQL generation and execution. Heyllave repositories follow a strict set of conventions that make them predictable, testable, and safe in a multi-tenant environment.
 
 <Aside type="note">
 **Tenancy is enforced by the schema, not the row.** Every per-tenant table lives in a `tenant_<slug>` schema and the request transaction has `search_path = tenant_<slug>, public` set on it. Unqualified table references resolve to the active tenant automatically — repositories should **not** add `WHERE tenant_id = ?` clauses to queries against tenant-scoped tables, and tenant-scoped models should not include a `tenant_id` column. The only queries that need an explicit `tenant_id` filter are those that hit `public` tables (`memberships`, `service_principals`, `tenant_modules`, etc.).
@@ -28,7 +28,7 @@ import (
 
     sq "github.com/Masterminds/squirrel"
     "github.com/jmoiron/sqlx"
-    "github.com/trazo-dev/trazo-core-service/internal/core"
+    "github.com/heyllave/core-service/internal/core"
 )
 
 type Repository struct {

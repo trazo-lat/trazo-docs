@@ -1,13 +1,13 @@
 ---
 title: module.yaml Specification
-description: Definitive reference for every field in a Trazo module.yaml manifest — contracts, scopes, permissions, statuses, transitions, references, approvals, events, hooks, settings, attachments, comments, custom fields, audit, metrics, and errors.
+description: Definitive reference for every field in a Heyllave module.yaml manifest — contracts, scopes, permissions, statuses, transitions, references, approvals, events, hooks, settings, attachments, comments, custom fields, audit, metrics, and errors.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The `module.yaml` file is the single source of truth for a Trazo module. It declares everything the platform needs to understand, validate, enforce, and generate code for the module: permissions, state machines, event contracts, data references, audit rules, and more.
+The `module.yaml` file is the single source of truth for a Heyllave module. It declares everything the platform needs to understand, validate, enforce, and generate code for the module: permissions, state machines, event contracts, data references, audit rules, and more.
 
-The `trazo module validate` command checks the manifest against this specification. The `trazo module generate` command uses it to emit Go boilerplate.
+The `heyllave module validate` command checks the manifest against this specification. The `heyllave module generate` command uses it to emit Go boilerplate.
 
 ---
 

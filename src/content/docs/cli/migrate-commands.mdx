@@ -1,11 +1,11 @@
 ---
 title: Migrate Commands
-description: Reference for trazo migrate subcommands — applying, rolling back, and inspecting Trazo's declarative three-tier schema migrations, and creating new migration files.
+description: Reference for heyllave migrate subcommands — applying, rolling back, and inspecting Heyllave's declarative three-tier schema migrations, and creating new migration files.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-The `trazo migrate` command group inspects and reconciles Trazo's declarative, desired-state SQL migrations. Migration files live under `migrations/` in the `trazo-core-service` repository, split into three tiers:
+The `heyllave migrate` command group inspects and reconciles Heyllave's declarative, desired-state SQL migrations. Migration files live under `migrations/` in the `heyllave-core-service` repository, split into three tiers:
 
 - `migrations/core/public/` — global cross-tenant tables, applied once.
 - `migrations/core/tenant/` — per-tenant core subsystem tables, applied to every `tenant_<slug>` schema.
@@ -15,7 +15,7 @@ See [Migrations](/guides/migrations/) for the full conceptual model.
 
 ## Migration File Format
 
-Each file is plain desired-state SQL. There are no numeric prefixes and no `-- +down` separator — Trazo uses `pg-schema-diff` to compute whatever DDL is needed to bring the live schema into agreement with the file.
+Each file is plain desired-state SQL. There are no numeric prefixes and no `-- +down` separator — Heyllave uses `pg-schema-diff` to compute whatever DDL is needed to bring the live schema into agreement with the file.
 
 ```sql
 -- migrations/modules/repairs.sql
@@ -32,20 +32,20 @@ Note: there is no `tenant_id` column. The table lives in `tenant_<slug>.repairs`
 
 ---
 
-## `trazo migrate up`
+## `heyllave migrate up`
 
 Apply all pending migrations in ascending order.
 
 ```bash
-trazo migrate up
+heyllave migrate up
 ```
 
 **Example output:**
 
 ```
-[trazo] Applying 0003_create_repairs.sql ... OK
-[trazo] Applying 0004_add_repair_notes.sql ... OK
-[trazo] All migrations applied. Database is up to date.
+[heyllave] Applying 0003_create_repairs.sql ... OK
+[heyllave] Applying 0004_add_repair_notes.sql ... OK
+[heyllave] All migrations applied. Database is up to date.
 ```
 
 ### Flags
@@ -56,7 +56,7 @@ trazo migrate up
 
 ```bash
 # Apply migrations only up to version 0005
-trazo migrate up --to 0005
+heyllave migrate up --to 0005
 ```
 
 <Aside type="tip">
@@ -65,18 +65,18 @@ trazo migrate up --to 0005
 
 ---
 
-## `trazo migrate down`
+## `heyllave migrate down`
 
-Roll the schema back to a previously recorded state. Because Trazo migrations are declarative, there is no per-file `-- +down` script; the engine instead diffs against the previous recorded snapshot in `migration_history` and emits the reverse DDL.
+Roll the schema back to a previously recorded state. Because Heyllave migrations are declarative, there is no per-file `-- +down` script; the engine instead diffs against the previous recorded snapshot in `migration_history` and emits the reverse DDL.
 
 ```bash
-trazo migrate down
+heyllave migrate down
 ```
 
 **Example output:**
 
 ```
-[trazo] Rolling back 0004_add_repair_notes.sql ... OK
+[heyllave] Rolling back 0004_add_repair_notes.sql ... OK
 ```
 
 ### Flags
@@ -87,7 +87,7 @@ trazo migrate down
 
 ```bash
 # Rollback everything after version 0002
-trazo migrate down --to 0002
+heyllave migrate down --to 0002
 ```
 
 <Aside type="caution">
@@ -96,12 +96,12 @@ Rollbacks are irreversible in production unless you have a database backup. Alwa
 
 ---
 
-## `trazo migrate status`
+## `heyllave migrate status`
 
 Show which migrations have been applied and which are still pending.
 
 ```bash
-trazo migrate status
+heyllave migrate status
 ```
 
 **Example output:**
@@ -119,12 +119,12 @@ Exit code `0` when all migrations are applied; non-zero when pending migrations 
 
 ---
 
-## `trazo migrate history`
+## `heyllave migrate history`
 
 Show the full migration history including the exact timestamp each migration was applied.
 
 ```bash
-trazo migrate history
+heyllave migrate history
 ```
 
 **Example output:**
@@ -141,12 +141,12 @@ Unlike `migrate status`, `history` shows all previously applied migrations regar
 
 ---
 
-## `trazo migrate create <name>`
+## `heyllave migrate create <name>`
 
 Scaffold a new desired-state SQL file. The CLI places the file in the appropriate tier (`migrations/core/public/`, `migrations/core/tenant/`, or `migrations/modules/`) based on the flags you pass.
 
 ```bash
-trazo migrate create repairs --tier modules
+heyllave migrate create repairs --tier modules
 ```
 
 **Creates:** `migrations/modules/repairs.sql`
@@ -160,29 +160,29 @@ trazo migrate create repairs --tier modules
 ```
 
 <Aside type="tip">
-The `<name>` argument should be lowercase and use underscores. There are no numeric prefixes and no `-- +down` separators — Trazo migrations describe the desired state and the diff engine computes the DDL needed to reach it.
+The `<name>` argument should be lowercase and use underscores. There are no numeric prefixes and no `-- +down` separators — Heyllave migrations describe the desired state and the diff engine computes the DDL needed to reach it.
 </Aside>
 
 ---
 
-## `trazo migrate diff`
+## `heyllave migrate diff`
 
 Compare the current state of the database schema against the migration files and report any divergence. Useful for detecting manual schema changes or out-of-band modifications.
 
 ```bash
-trazo migrate diff
+heyllave migrate diff
 ```
 
 **Example output (no differences):**
 
 ```
-[trazo] Schema matches migration history. No differences found.
+[heyllave] Schema matches migration history. No differences found.
 ```
 
 **Example output (differences detected):**
 
 ```
-[trazo] WARNING: Schema divergence detected in tenant_acme.
+[heyllave] WARNING: Schema divergence detected in tenant_acme.
   Table "repairs" has column "technician_notes" not present in migrations/modules/repairs.sql.
   Update the SQL file to capture (or remove) this change.
 ```

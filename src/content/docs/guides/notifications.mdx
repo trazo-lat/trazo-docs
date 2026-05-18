@@ -1,0 +1,271 @@
+---
+title: Notify a Customer When Their Repair Is Ready
+description: A full walkthrough — emit the event, write one Markdown template, register two channels (in-app + email), add a "View repair" action button, and watch the customer get notified.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+A customer drops off their iPhone for a screen replacement. The technician marks the repair `completed`. The customer should immediately see an in-app card *and* receive a styled email with a "View repair" button — both rendered from a single Markdown template.
+
+This guide builds that flow end-to-end. By the end you'll have:
+
+- A `repairs.completed` event your service emits inside the repair-update transaction.
+- One template that renders cleanly as in-app JSON and as branded HTML email.
+- Two notification rules wired through a single seed file.
+- A clickable "View repair" action on the in-app card.
+
+For the deeper how-it-works, see [Architecture: Notifications](/architecture/notifications/) and the [template engine internals](/architecture/notifications/#delivery-flow).
+
+## What we're wiring
+
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={360}
+  nodes={[
+    { id: 'event', label: 'repairs.completed', sub: 'emitted in service txn', variant: 'accent' },
+    { id: 'rules', label: '2 rules match', sub: 'email + in_app' },
+    { id: 'template', label: 'One Markdown template', sub: 'rendered per channel' },
+    { id: 'email', label: 'Email', sub: 'styled HTML to customer' },
+    { id: 'inapp', label: 'In-app card', sub: '+ View repair button', variant: 'coral' },
+  ]}
+  edges={[
+    { source: 'event', target: 'rules' },
+    { source: 'rules', target: 'template' },
+    { source: 'template', target: 'email' },
+    { source: 'template', target: 'inapp' },
+  ]}
+/>
+
+---
+
+<Steps>
+
+1. ### Emit the event from the service
+
+   Inside `repairs/service/service.go`, the `CompleteRepair` method updates the row and then emits the event — both in the same transaction so the notification can never fire for a write that rolled back:
+
+   ```go
+   func (s *Service) CompleteRepair(ctx context.Context, id string) error {
+       return s.core.DB.Tx(ctx, func(tx core.Tx) error {
+           repair, err := s.repo.MarkCompleted(ctx, tx, id)
+           if err != nil {
+               return err
+           }
+
+           return s.core.Events.EmitTx(ctx, tx, core.Event{
+               Module:   "repairs",
+               Name:     "repairs.completed",
+               TenantID: tenant.ID,
+               Payload: map[string]any{
+                   "repair_id":   repair.ID,
+                   "customer_id": repair.CustomerID,  // for in-app targeting
+                   "email":       repair.CustomerEmail, // for email targeting
+                   "customer":    repair.CustomerName,
+                   "device":      repair.Device,
+               },
+           })
+       })
+   }
+   ```
+
+   The two target-lookup fields are deliberate: `customer_id` resolves the in-app row's user, `email` lets the email channel deliver even if the customer has no platform login.
+
+2. ### Write the template
+
+   Templates are JSON with `subject` (text) and `body` (Markdown). The body uses CommonMark plus Heyllave's fenced directives — same Markdown becomes HTML for email and structured JSON blocks for the in-app card.
+
+   Save this as a Go raw string you'll embed in the rule:
+
+   ```markdown
+   # Your {{.Payload.device}} is ready
+
+   Hi {{.Payload.customer}}, your repair (#{{.Payload.repair_id}}) is ready for pickup.
+
+   :::callout{variant="success"}
+   Drop by anytime during business hours.
+   :::
+
+   :::buttons
+   - [View repair](/repairs/{{.Payload.repair_id}}) {style="primary"}
+   :::
+   ```
+
+   What each channel will produce from this:
+
+   - **Email:** a full themed HTML document with the tenant's logo header, the heading, the green success callout, and a styled "View repair" button linking to `https://<tenant>.heyllave.co/repairs/...`.
+   - **In-app:** a structured JSON tree the admin app renders as a card with the same heading, callout, and a clickable button block.
+
+3. ### Register both rules in one seed entry
+
+   For a rule every tenant inherits, add it to `cmd/seed-rules/main.go`. We need two entries — same template, two channels:
+
+   ```go
+   var template = `{
+       "subject": "Your {{.Payload.device}} is ready",
+       "body": "# Your {{.Payload.device}} is ready\n\nHi {{.Payload.customer}}, your repair (#{{.Payload.repair_id}}) is ready for pickup.\n\n:::callout{variant=\"success\"}\nDrop by anytime during business hours.\n:::\n\n:::buttons\n- [View repair](/repairs/{{.Payload.repair_id}}) {style=\"primary\"}\n:::"
+   }`
+
+   var platformRules = []rule{
+       // ... existing entries ...
+       {
+           PublicID: "nrule_repairs-completed-inapp",
+           Module:   "repairs",
+           Event:    "repairs.completed",
+           Channel:  "in_app",
+           Template: template,
+           Config:   `{"target_type":"user_field","field":"customer_id"}`,
+       },
+       {
+           PublicID: "nrule_repairs-completed-email",
+           Module:   "repairs",
+           Event:    "repairs.completed",
+           Channel:  "email",
+           Template: template,
+           Config:   `{"target_type":"email_field","field":"email"}`,
+       },
+   }
+   ```
+
+   The `target_type` differs by channel: the in-app row needs a `user_id` (looked up from `customer_id`), the email channel just needs an address (read straight from `email`).
+
+   Re-running the seeder is safe — every insert is `ON CONFLICT DO NOTHING`:
+
+   ```bash
+   go run ./cmd/seed-rules/
+   ```
+
+4. ### Test it end-to-end
+
+   Trigger a completion against a local tenant and check both inboxes:
+
+   ```bash
+   # 1. Get a token
+   ACCESS_TOKEN=$(curl -s http://localhost:8080/api/v1/auth/login \
+     -d '{"email":"tech@acme.test","password":"…"}' | jq -r .access_token)
+
+   # 2. Mark a repair complete
+   curl -X PUT http://localhost:8080/api/v1/repairs/rep_01HQ.../complete \
+     -H "Authorization: Bearer $ACCESS_TOKEN"
+
+   # 3. Check the customer's in-app inbox (logged in as the customer)
+   curl http://localhost:8080/api/v1/notifications \
+     -H "Authorization: Bearer $CUSTOMER_TOKEN" | jq '.items[0]'
+   ```
+
+   You should see a notification with `title`, a Markdown-rendered `body`, and `metadata` including the `event_name`. The email arrives at the configured SMTP/Resend endpoint.
+
+5. ### Make the in-app button actually do something
+
+   The Markdown `:::buttons` directive renders a visual button block, but the click target is just a link. To make it an *invocable* action (e.g., "Mark as picked up" that calls back into your API), attach a `NotificationAction` to the row.
+
+   The cleanest path is a custom notification creator in your repair service that runs alongside the rule pipeline:
+
+   ```go
+   _, err = s.notif.CreateNotification(ctx, core.InAppNotification{
+       UserID: repair.CustomerID,
+       Title:  fmt.Sprintf("Your %s is ready", repair.Device),
+       Body:   renderedBody, // optional — the rule already does this
+       Actions: core.NotificationActions{
+           {
+               Key:      "view",
+               Kind:     core.NotificationActionLink,
+               LabelKey: "repairs.notifications.view",
+               Link:     fmt.Sprintf("/repairs/%s", repair.ID),
+               Style:    core.ActionStyleDefault,
+           },
+           {
+               Key:      "picked_up",
+               Kind:     core.NotificationActionResource,
+               LabelKey: "repairs.notifications.mark_picked_up",
+               Style:    core.ActionStyleConfirm,
+               Confirm:  true,
+               Resource: &core.NotificationResourceRef{
+                   Module: "repairs",
+                   Type:   "repair",
+                   ID:     repair.ID,
+               },
+               ResourceAction: "mark_picked_up",
+           },
+       },
+   })
+   ```
+
+   When the customer taps "Mark as picked up", the client posts to:
+
+   ```
+   POST /api/v1/notifications/{id}/actions/picked_up
+   ```
+
+   The server dispatches to the state-machine engine, runs the `mark_picked_up` transition on the repair, records the click in `notification_action_invocations`, and marks the notification read — all in one request. The full endpoint contract is in the [API guide](/api-guides/notifications/#invoke-a-notification-action).
+
+</Steps>
+
+---
+
+## What just happened
+
+```
+repair service        outbox worker          notification service        channels
+─────────────         ─────────────          ────────────────────        ────────
+EmitTx ──────► outbox ─► poll batch ────► HandleEvent(event)
+                                              │
+                                              ├── MatchingRules(repairs.completed)
+                                              │     → returns 2 rules
+                                              │
+                                              ├── For "in_app":
+                                              │     resolveTargets(user_field customer_id)
+                                              │     renderTemplate(..., in_app)  → JSON blocks
+                                              │     in_app channel ──► INSERT in_app_notifications
+                                              │
+                                              └── For "email":
+                                                    resolveTargets(email_field email)
+                                                    renderTemplate(..., email)   → themed HTML
+                                                    email channel  ──► SMTP / Resend
+```
+
+The whole fan-out lives in `notify.Service.HandleEvent` — your repair code only emitted one event.
+
+---
+
+## Variations
+
+### Notify a role instead of a specific user
+
+Want to alert every manager when a repair is completed? Swap the rule's `config`:
+
+```json
+{"target_type": "role", "role": "manager"}
+```
+
+The targeting resolver lists every tenant member with that role and creates one in-app row per manager. The template renders the same way.
+
+### Per-tenant override
+
+A tenant wants to silence the email for `repairs.completed` (they prefer SMS via a webhook). They `PUT` a rule into their tenant override store with `enabled: false` on the email channel, and add a new rule on the `webhook` channel pointing at their SMS gateway. The resolver prefers tenant overrides; no platform code changes.
+
+### Add a Slack notification
+
+Add a third rule with `channel: "slack"` and a `config` containing the tenant's Slack webhook URL. The same template renders as Slack Block Kit JSON automatically — `:::buttons` directives become Slack `actions` blocks, headings become `section` blocks with `mrkdwn` text.
+
+---
+
+## When something doesn't fire
+
+| Symptom | Likely cause |
+|---|---|
+| No notification, no error | The event name didn't match any rule. Check `enabled = true` and the exact event name in `notification_rules`. |
+| Notification fires but body is blank | A `{{.payload.foo}}` typo (lowercase `payload`). Go `text/template` is case-sensitive — use `{{.Payload.foo}}`. |
+| Email sent but in-app missing | The `target_type: user_field` couldn't resolve `customer_id` to a user. Make sure the field name in your payload matches the `field` in the rule config exactly. |
+| Email gets sent to nobody | `target_type: email_field` requires the payload key. The renderer is silent if it's empty — log your payload to confirm. |
+| Action button appears but doesn't invoke | The action's `key` must match what the client sends in the URL. Check the row's `actions` column. |
+
+---
+
+## What to learn next
+
+- **[Architecture: Notifications](/architecture/notifications/)** — rule resolution, channel routing, retry semantics, template-engine internals.
+- **[API Guide: Notifications](/api-guides/notifications/)** — every endpoint with curl/Go/JavaScript examples. Read the [Invoke a Notification Action](/api-guides/notifications/#invoke-a-notification-action) section for the action-button request/response shape.
+- **[Database Schema: in_app_notifications](/reference/database-schema/#in_app_notifications)** — column-by-column reference for the table, including the new `actions` JSONB column and the `notification_action_invocations` audit table.
+- **[Status Machines](/guides/status-machines/)** — for `kind: resource` actions, the action key maps to a state-machine transition. Learn how to declare those transitions.

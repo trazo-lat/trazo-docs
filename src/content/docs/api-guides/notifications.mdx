@@ -5,7 +5,7 @@ description: List and mark notifications, and configure notification rules that 
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-The Trazo notification system delivers messages to users when domain events occur. It has two distinct layers:
+The Heyllave notification system delivers messages to users when domain events occur. It has two distinct layers:
 
 - **Notifications** — the individual messages delivered to a specific user (e.g., "Repair #123 was completed").
 - **Notification Rules** — tenant-level configuration that maps domain events to channels and templates, determining when and how notifications are generated.
@@ -34,6 +34,20 @@ Retrieve the notifications for the currently authenticated user. Use the `read` 
       "channel": "in_app",
       "read": false,
       "read_at": null,
+      "actions": [
+        {
+          "key": "view",
+          "kind": "link",
+          "label_key": "repairs.notifications.view",
+          "link": "/repairs/rep_01HQ..."
+        },
+        {
+          "key": "dismiss",
+          "kind": "dismiss",
+          "label_key": "common.actions.dismiss",
+          "style": "default"
+        }
+      ],
       "metadata": {
         "resource_type": "repair",
         "resource_id": "rep_01HQ..."
@@ -45,6 +59,8 @@ Retrieve the notifications for the currently authenticated user. Use the `read` 
   "unread_count": 3
 }
 ```
+
+The `actions` array carries optional [action buttons](#invoke-a-notification-action) the client renders under the body. It is omitted when the notification has no actions.
 
 The `unread_count` field always reflects the total number of unread notifications for the user, regardless of the current `limit`/`offset` applied. Use it to render notification badge counts.
 
@@ -152,12 +168,12 @@ The `unread_count` field always reflects the total number of unread notification
 
 Mark a single notification as read. Returns `204 No Content` on success. Only the owner of the notification may mark it read.
 
-**`POST /api/v1/notifications/{id}/read`**
+**`PUT /api/v1/notifications/{id}/read`**
 
 <Tabs>
   <TabItem label="curl">
   ```bash
-  curl -X POST http://localhost:8080/api/v1/notifications/notif_01HQ.../read \
+  curl -X PUT http://localhost:8080/api/v1/notifications/notif_01HQ.../read \
     -H "Authorization: Bearer $ACCESS_TOKEN"
   ```
   </TabItem>
@@ -171,7 +187,7 @@ Mark a single notification as read. Returns `204 No Content` on success. Only th
   )
 
   func markNotificationRead(accessToken, notificationID string) error {
-      req, err := http.NewRequest(http.MethodPost,
+      req, err := http.NewRequest(http.MethodPut,
           fmt.Sprintf("http://localhost:8080/api/v1/notifications/%s/read", notificationID),
           nil)
       if err != nil {
@@ -199,7 +215,7 @@ Mark a single notification as read. Returns `204 No Content` on success. Only th
     const response = await fetch(
       `http://localhost:8080/api/v1/notifications/${notificationId}/read`,
       {
-        method: 'POST',
+        method: 'PUT',
         headers: { 'Authorization': `Bearer ${accessToken}` },
       }
     );
@@ -220,6 +236,156 @@ Mark a single notification as read. Returns `204 No Content` on success. Only th
   ```
   </TabItem>
 </Tabs>
+
+## Invoke a Notification Action
+
+In-app notifications can carry a list of action buttons rendered beneath the body. Invoking one records a click and — depending on the action's `kind` — either dispatches the action server-side (`dismiss`, `resource`) or returns the target so the client can carry it out (`link`, `rest`). Either way the notification is marked read on success.
+
+**`POST /api/v1/notifications/{id}/actions/{key}`**
+
+| Path parameter | Description |
+|---|---|
+| `id` | The notification ID |
+| `key` | The action's `key` field (unique within the notification) |
+
+**Request body**
+
+```json
+{
+  "input": { /* values from the action's input form, if it declares one */ }
+}
+```
+
+`input` is free-form JSON that the server validates against the action's declared `ActionInput` schema. Omit it when the action has no `input`.
+
+**Response**
+
+```json
+{
+  "invocation_id": "ninv_01HQ...",
+  "result": "ok",
+  "dispatched": true,
+  "error": ""
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `invocation_id` | ID of the recorded invocation row. Useful for analytics correlation and idempotency keys. |
+| `result` | `ok` when the server-side dispatch succeeded; `error` otherwise. |
+| `dispatched` | `true` when the server performed the action itself (`dismiss`, `resource`). For `link` and `rest`, the client carries out the action with the values returned on the original notification; the server only records the click. |
+| `error` | Human-readable failure reason when `result` is `error`. |
+
+<Tabs>
+  <TabItem label="curl">
+  ```bash
+  curl -X POST http://localhost:8080/api/v1/notifications/notif_01HQ.../actions/approve \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"input": {"note": "Approved after review"}}'
+  ```
+  </TabItem>
+  <TabItem label="Go">
+  ```go
+  package main
+
+  import (
+      "bytes"
+      "encoding/json"
+      "fmt"
+      "net/http"
+  )
+
+  type InvokeActionRequest struct {
+      Input map[string]any `json:"input,omitempty"`
+  }
+
+  type InvokeActionResponse struct {
+      InvocationID string `json:"invocation_id"`
+      Result       string `json:"result"`
+      Dispatched   bool   `json:"dispatched"`
+      Error        string `json:"error,omitempty"`
+  }
+
+  func invokeAction(accessToken, notificationID, key string, input map[string]any) (*InvokeActionResponse, error) {
+      body, err := json.Marshal(InvokeActionRequest{Input: input})
+      if err != nil {
+          return nil, err
+      }
+
+      url := fmt.Sprintf("http://localhost:8080/api/v1/notifications/%s/actions/%s",
+          notificationID, key)
+      req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+      if err != nil {
+          return nil, err
+      }
+      req.Header.Set("Authorization", "Bearer "+accessToken)
+      req.Header.Set("Content-Type", "application/json")
+
+      resp, err := http.DefaultClient.Do(req)
+      if err != nil {
+          return nil, err
+      }
+      defer resp.Body.Close()
+
+      var out InvokeActionResponse
+      if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+          return nil, err
+      }
+      return &out, nil
+  }
+  ```
+  </TabItem>
+  <TabItem label="JavaScript">
+  ```javascript
+  async function invokeNotificationAction(accessToken, notificationId, key, input) {
+    const response = await fetch(
+      `http://localhost:8080/api/v1/notifications/${notificationId}/actions/${key}`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ input }),
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to invoke action: ${response.status}`);
+    }
+    return response.json();
+  }
+
+  // Example: server-dispatched approve action
+  const result = await invokeNotificationAction(
+    accessToken,
+    'notif_01HQ...',
+    'approve',
+    { note: 'Approved after review' },
+  );
+
+  if (result.dispatched) {
+    // Server already performed the action — just refresh the UI
+    refreshNotifications();
+  } else {
+    // kind=link / kind=rest — client carries it out using the action fields
+    // returned by GET /api/v1/notifications
+  }
+  ```
+  </TabItem>
+</Tabs>
+
+### Action kinds
+
+| Kind | Server marks read? | Server dispatches? | Use case |
+|---|---|---|---|
+| `link` | Yes | No — client navigates to `link` | Open the related resource in the UI |
+| `rest` | Yes | No — client calls `method url` with the input as body | Trigger a registered REST endpoint |
+| `resource` | Yes | Yes — state-machine engine invokes `resource_action` on `{module, type, id}` | Approve / reject / advance a workflow |
+| `dismiss` | Yes | Yes — no other side effect | "Not interested" / "Snooze" |
+
+Every invocation is persisted in `notification_action_invocations` for audit, idempotency, and click analytics.
 
 ## List Notification Rules
 
@@ -342,7 +508,7 @@ Retrieve all notification rules configured for the tenant. Rules define which ev
 
 ## Create a Notification Rule
 
-Configure a new rule that maps a domain event to a notification channel. When the specified event fires, Trazo will render the template and deliver it via the chosen channel.
+Configure a new rule that maps a domain event to a notification channel. When the specified event fires, Heyllave will render the template and deliver it via the chosen channel.
 
 **`POST /api/v1/notification-rules`**
 
@@ -392,9 +558,9 @@ Each channel requires a different `config` structure:
 ```json
 {
   "config": {
-    "url": "https://api.example.com/hooks/trazo",
+    "url": "https://api.example.com/hooks/heyllave",
     "secret": "whsec_...",
-    "headers": { "X-Source": "trazo" }
+    "headers": { "X-Source": "heyllave" }
   }
 }
 ```
@@ -541,9 +707,9 @@ Each channel requires a different `config` structure:
     channel: 'webhook',
     template: 'repair_created_webhook',
     config: {
-      url: 'https://api.example.com/hooks/trazo',
+      url: 'https://api.example.com/hooks/heyllave',
       secret: 'whsec_...',
-      headers: { 'X-Source': 'trazo' },
+      headers: { 'X-Source': 'heyllave' },
     },
     enabled: true,
   });
@@ -560,10 +726,10 @@ Each channel requires a different `config` structure:
 | `slack` | Posts a message to a Slack channel via an Incoming Webhook URL |
 | `webhook` | Makes an HTTP POST to an external URL, signed with an HMAC-SHA256 signature using the configured `secret` |
 
-Webhook deliveries include an `X-Trazo-Signature` header for payload verification:
+Webhook deliveries include an `X-Heyllave-Signature` header for payload verification:
 
 ```
-X-Trazo-Signature: sha256=<hmac_hex_digest>
+X-Heyllave-Signature: sha256=<hmac_hex_digest>
 ```
 
 ## Common Errors

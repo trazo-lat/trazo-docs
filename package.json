@@ -1,5 +1,5 @@
 {
-  "name": "trazo-docs",
+  "name": "heyllave-docs",
   "type": "module",
   "version": "0.0.1",
   "scripts": {
@@ -11,9 +11,19 @@
     "fetch-openapi": "node scripts/fetch-openapi.mjs"
   },
   "dependencies": {
-    "astro": "^5.0.0",
-    "@astrojs/starlight": "^0.32.0",
-    "starlight-openapi": "^0.9.0",
-    "sharp": "^0.33.0"
+    "@astrojs/markdown-remark": "^7.1.2",
+    "@astrojs/react": "^5.0.5",
+    "@astrojs/starlight": "^0.39.2",
+    "@dagrejs/dagre": "^3.0.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@xyflow/react": "^12.10.2",
+    "astro": "^6.3.3",
+    "astro-mermaid": "^2.0.1",
+    "mermaid": "^11.0.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "sharp": "^0.34.5",
+    "starlight-openapi": "^0.25.2"
   }
 }

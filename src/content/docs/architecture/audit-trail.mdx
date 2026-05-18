@@ -1,9 +1,9 @@
 ---
 title: Audit Trail
-description: How Trazo records every state change as an immutable audit entry using RFC 6902 JSON Patch diffs, and how to query the audit log.
+description: How Heyllave records every state change as an immutable audit entry using RFC 6902 JSON Patch diffs, and how to query the audit log.
 ---
 
-Trazo maintains a complete, tamper-evident audit trail for every resource in the system. Every create, update, and delete operation produces an audit entry stored in the tenant schema's `audit_log` table. Update entries store a diff computed as an RFC 6902 JSON Patch, which captures exactly which fields changed, what their previous values were, and what they became.
+Heyllave maintains a complete, tamper-evident audit trail for every resource in the system. Every create, update, and delete operation produces an audit entry stored in the tenant schema's `audit_log` table. Update entries store a diff computed as an RFC 6902 JSON Patch, which captures exactly which fields changed, what their previous values were, and what they became.
 
 ## AuditRecorder Interface
 

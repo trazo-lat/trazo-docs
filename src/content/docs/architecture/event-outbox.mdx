@@ -1,9 +1,9 @@
 ---
 title: Event Outbox
-description: How Trazo guarantees domain event delivery using the transactional outbox pattern, including the event structure, worker pool, retry policy, and dead letter queue.
+description: How Heyllave guarantees domain event delivery using the transactional outbox pattern, including the event structure, worker pool, retry policy, and dead letter queue.
 ---
 
-Trazo implements the transactional outbox pattern to ensure that domain events are never silently lost due to process crashes, network failures, or subscriber errors. Events are not dispatched directly into memory; they are first written to a durable `events_outbox` table within the same database transaction as the originating business operation, then delivered to subscribers by a background processor.
+Heyllave implements the transactional outbox pattern to ensure that domain events are never silently lost due to process crashes, network failures, or subscriber errors. Events are not dispatched directly into memory; they are first written to a durable `events_outbox` table within the same database transaction as the originating business operation, then delivered to subscribers by a background processor.
 
 The `events_outbox` table lives **in each tenant's schema** (`tenant_<slug>.events_outbox`), defined by `migrations/core/tenant/audit_events.sql`. Because the tenancy boundary is the schema itself, the table has no `tenant_id` column — the schema name implicitly identifies the tenant.
 

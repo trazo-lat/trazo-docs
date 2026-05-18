@@ -1,6 +1,6 @@
 ---
 title: Core Types
-description: Complete reference for all Go types defined in types.go — identity, tenant, permission, event, audit, storage, metric, notification, and error types used throughout the Trazo platform.
+description: Complete reference for all Go types defined in types.go — identity, tenant, permission, event, audit, storage, metric, notification, and error types used throughout the Heyllave platform.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -8,7 +8,7 @@ import { Aside } from '@astrojs/starlight/components';
 All types described on this page are defined in `internal/core/types.go` and are shared across every module and the platform core. Import them via the core package:
 
 ```go
-import "github.com/your-org/trazo-core-service/internal/core"
+import "github.com/your-org/heyllave-core-service/internal/core"
 ```
 
 ---
@@ -350,7 +350,7 @@ A notification delivered to a user's in-app notification feed.
 
 ### Error
 
-Trazo's structured error type. It implements the standard `error` interface and carries HTTP semantics.
+Heyllave's structured error type. It implements the standard `error` interface and carries HTTP semantics.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -379,7 +379,7 @@ Trazo's structured error type. It implements the standard `error` interface and 
 
 ## Module Interface
 
-Every Trazo module must implement the `Module` interface. Nine methods are required; two are optional (indicated by returning `nil` being valid).
+Every Heyllave module must implement the `Module` interface. Nine methods are required; two are optional (indicated by returning `nil` being valid).
 
 ```go
 type Module interface {

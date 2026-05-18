@@ -1,9 +1,11 @@
 ---
 title: Authentication
-description: JWT-based authentication flow in Trazo — token lifecycle, middleware chain, session tracking, and the login, refresh, logout, and /me endpoints.
+description: JWT-based authentication flow in Heyllave — token lifecycle, middleware chain, session tracking, and the login, refresh, logout, and /me endpoints.
 ---
 
-Trazo supports **multiple authentication methods** — password, OAuth2/OIDC, magic links, and WebAuthn (FIDO2 passkeys) — unified through an `AuthManager` that dispatches to the appropriate provider. All methods produce the same JWT token pair and session record.
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Heyllave supports **multiple authentication methods** — password, OAuth2/OIDC, magic links, and WebAuthn (FIDO2 passkeys) — unified through an `AuthManager` that dispatches to the appropriate provider. All methods produce the same JWT token pair and session record.
 
 All authentication state is tracked in the `sessions` table in the `public` schema, enabling session revocation, audit trails, and per-session metadata.
 
@@ -37,40 +39,33 @@ AuthManager.Login(input)
 Short access token TTLs limit the window during which a stolen token can be used. The refresh token allows clients to obtain new access tokens transparently without re-prompting for credentials.
 
 :::note
-The JWT secret is read from the `TRAZO_AUTH_JWT_SECRET` environment variable. This must be a cryptographically random string of at least 32 bytes. Rotating this secret invalidates all existing tokens immediately.
+The JWT secret is read from the `HEYLLAVE_AUTH_JWT_SECRET` environment variable. This must be a cryptographically random string of at least 32 bytes. Rotating this secret invalidates all existing tokens immediately.
 :::
 
 ## Middleware Chain
 
 Every request passes through the following middleware in order:
 
-```
-RecoveryMiddleware
-    │   Catches panics. Returns a 500 with a sanitized error body.
-    │   Logs the full panic with stack trace.
-    ▼
-CORSMiddleware
-    │   Sets Access-Control-Allow-Origin and related headers.
-    │   Handles OPTIONS preflight requests.
-    ▼
-RequestIDMiddleware
-    │   Reads X-Request-ID from the incoming request.
-    │   Generates a new ULID if the header is absent.
-    │   Injects the ID into the context and echoes it in the response header.
-    ▼
-CanonicalLogMiddleware
-    │   Emits one structured log line per request on completion.
-    │   Includes: method, path, status, duration, request_id, tenant_id, user_id.
-    ▼
-JWTAuthMiddleware
-    │   Reads and validates the Bearer token from Authorization header.
-    │   Loads the session, user, tenant, membership, and permissions from the DB.
-    │   Injects the SessionInfo into the context.
-    │   Returns 401 if the token is missing, invalid, or expired.
-    │   Returns 401 if the session has been revoked.
-    ▼
-chi Router → Huma Handler
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={620}
+  nodes={[
+    { id: 'recovery', label: 'RecoveryMiddleware', sub: 'catches panics → sanitized 500', variant: 'accent' },
+    { id: 'cors', label: 'CORSMiddleware', sub: 'CORS headers + OPTIONS preflight' },
+    { id: 'reqid', label: 'RequestIDMiddleware', sub: 'X-Request-ID or new ULID' },
+    { id: 'canlog', label: 'CanonicalLogMiddleware', sub: 'one structured log per request' },
+    { id: 'jwt', label: 'JWTAuthMiddleware', sub: 'validates Bearer + session', variant: 'accent' },
+    { id: 'handler', label: 'chi Router → Huma Handler', variant: 'coral' },
+  ]}
+  edges={[
+    { source: 'recovery', target: 'cors' },
+    { source: 'cors', target: 'reqid' },
+    { source: 'reqid', target: 'canlog' },
+    { source: 'canlog', target: 'jwt' },
+    { source: 'jwt', target: 'handler', label: '401 if invalid' },
+  ]}
+/>
 
 Routes under `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/oauth2/*`, `/api/v1/auth/magic-link/*`, `/api/v1/auth/webauthn/*`, `/api/v1/invites`, and public health endpoints bypass `JWTAuthMiddleware`.
 
@@ -98,7 +93,7 @@ Flow:
 2. Verify the password against the stored bcrypt hash (cost: 12).
 3. Load the user's membership in the specified tenant.
 4. Create a new session record with IP, user agent, device type, and `auth_method: "password"`.
-5. Issue an access token and a refresh token, both signed with `TRAZO_AUTH_JWT_SECRET`.
+5. Issue an access token and a refresh token, both signed with `HEYLLAVE_AUTH_JWT_SECRET`.
 6. Return tokens and the current user payload.
 
 Response:
@@ -220,7 +215,7 @@ Sessions are listed and revocable via `/api/v1/auth/sessions` for the current us
 
 ## OAuth2/OIDC
 
-Configure one or more OAuth2 providers in `trazo.yaml`:
+Configure one or more OAuth2 providers in `heyllave.yaml`:
 
 ```yaml
 auth:
@@ -230,7 +225,7 @@ auth:
       client_secret: "..."
       issuer_url: "https://accounts.google.com"
       scopes: ["openid", "email", "profile"]
-      redirect_url: "https://app.trazo.lat/auth/callback"
+      redirect_url: "https://app.heyllave.co/auth/callback"
 ```
 
 Flow: client redirects to provider → user authenticates → callback with code → server exchanges code for tokens → extracts email/subject from ID token → matches to existing user or creates new one.
@@ -258,17 +253,17 @@ Hardware security keys, platform authenticators, and biometric login:
 ```yaml
 auth:
   webauthn:
-    rp_id: "trazo.lat"
-    rp_display_name: "Trazo"
+    rp_id: "heyllave.co"
+    rp_display_name: "Heyllave"
     rp_origins:
-      - "https://app.trazo.lat"
+      - "https://app.heyllave.co"
 ```
 
 Supports registration (creating a passkey) and login (authenticating with a passkey). Uses the `github.com/go-webauthn/webauthn` library.
 
 ## Password Hashing
 
-Passwords are hashed using bcrypt with a cost factor of 12 (configurable via `TRAZO_AUTH_BCRYPT_COST`). The raw password is never logged, stored, or transmitted after the initial hashing step.
+Passwords are hashed using bcrypt with a cost factor of 12 (configurable via `HEYLLAVE_AUTH_BCRYPT_COST`). The raw password is never logged, stored, or transmitted after the initial hashing step.
 
 ```go
 hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)

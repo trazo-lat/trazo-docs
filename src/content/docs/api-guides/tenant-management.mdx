@@ -1,17 +1,17 @@
 ---
 title: Tenant Management
-description: Create, list, retrieve, and update tenants in Trazo. Each tenant gets an isolated PostgreSQL schema.
+description: Create, list, retrieve, and update tenants in Heyllave. Each tenant gets an isolated PostgreSQL schema.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Trazo is a multi-tenant platform. Each tenant represents an independent organization with its own data, users, and configuration. When a tenant is created, Trazo automatically provisions a dedicated PostgreSQL schema (e.g., `tenant_acme`) ensuring complete data isolation between organizations.
+Heyllave is a multi-tenant platform. Each tenant represents an independent organization with its own data, users, and configuration. When a tenant is created, Heyllave automatically provisions a dedicated PostgreSQL schema (e.g., `tenant_acme`) ensuring complete data isolation between organizations.
 
 All tenant management endpoints require an authenticated session with the `tenants:write` permission for mutating operations, or `tenants:read` for read-only access.
 
 ## Create a Tenant
 
-Provision a new tenant. The `subdomain` field must be globally unique and is used to route requests to the correct tenant context (e.g., `acme.trazo.app`).
+Provision a new tenant. The `subdomain` field must be globally unique and is used to route requests to the correct tenant context (e.g., `acme.heyllave.co`).
 
 **`POST /api/v1/tenants`**
 
@@ -427,7 +427,7 @@ Partially update a tenant's metadata. Only include fields you want to change —
 
 ## Schema Provisioning
 
-When you call `POST /api/v1/tenants`, Trazo performs the following steps synchronously before returning:
+When you call `POST /api/v1/tenants`, Heyllave performs the following steps synchronously before returning:
 
 1. Inserts the tenant record into the `public.tenants` table.
 2. Creates a new PostgreSQL schema named `tenant_{subdomain}`.

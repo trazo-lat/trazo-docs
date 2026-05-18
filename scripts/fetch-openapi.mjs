@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Fetches the OpenAPI spec from a running Trazo server and writes it to schemas/openapi.json.
+ * Fetches the OpenAPI spec from a running Heyllave server and writes it to schemas/openapi.json.
  *
  * Usage:
  *   node scripts/fetch-openapi.mjs                  # fetch from localhost:8080

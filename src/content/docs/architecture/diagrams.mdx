@@ -1,364 +1,393 @@
 ---
 title: Architecture Diagrams
-description: Visual diagrams of the Trazo platform architecture — system overview, request flow, event pipeline, multi-tenancy, module structure, and cross-repo dependencies.
+description: Visual diagrams of the Heyllave platform architecture — system overview, request flow, event pipeline, multi-tenancy, module structure, and cross-repo dependencies.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
 
-This page provides visual architecture diagrams for the entire Trazo platform. Each diagram focuses on a different aspect of the system.
+This page provides visual architecture diagrams for the entire Heyllave platform. Each diagram focuses on a different aspect of the system. **Scroll to zoom, drag to pan, or use the controls in the bottom-left of each diagram.**
 
 ## System Overview
 
 All repositories, their tech stacks, and how they connect.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                              TRAZO PLATFORM                             │
-│                                                                         │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │  Flutter App  │  │   trazo-cli  │  │   trazo-e2e  │  │ trazo-docs │ │
-│  │  (Admin UI)   │  │  (Dev Tool)  │  │  (Tests)     │  │ (Astro)    │ │
-│  │              │  │              │  │              │  │            │ │
-│  │ Riverpod     │  │ Cobra/Viper  │  │ Custom       │  │ Starlight  │ │
-│  │ go_router    │  │ Atlas        │  │ Harness      │  │ OpenAPI    │ │
-│  │ Dio + OAS    │  │ Docker SDK   │  │ Testcontain. │  │            │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬─────┘ │
-│         │  HTTP           │  SQL/Docker     │  HTTP           │ OAS   │
-│         ▼                 ▼                 ▼                 ▼       │
-│  ┌───────────────────────────────────────────────────────────────────┐ │
-│  │                   TRAZO CORE SERVICE (Go)                         │ │
-│  │                                                                   │ │
-│  │  ┌───────┐ ┌──────┐ ┌────────┐ ┌───────┐ ┌────────┐ ┌────────┐ │ │
-│  │  │ Huma  │ │ Auth │ │ Events │ │ Hooks │ │ Notify │ │Storage │ │ │
-│  │  │(HTTP) │ │(JWT) │ │(Outbox)│ │(WH/Ex)│ │(Multi) │ │(S3/FS) │ │ │
-│  │  └───┬───┘ └──┬───┘ └───┬────┘ └───┬───┘ └───┬────┘ └───┬────┘ │ │
-│  │      └────────┴─────────┴──────────┴─────────┴──────────┘      │ │
-│  │                     *core.Core (DI Hub)                          │ │
-│  │  Session │ Permission │ Audit │ Events │ Modules │ Hooks        │ │
-│  │  Storage │ DB │ Config │ Errors │ Log                           │ │
-│  │                           │                                      │ │
-│  │  ┌────────────────────────┴──────────────────────────────────┐  │ │
-│  │  │                     MODULES                                │  │ │
-│  │  │  ┌──────────────────┐     ┌────────────────────────────┐  │  │ │
-│  │  │  │  FOUNDATION      │     │  DOMAIN (per-tenant)       │  │  │ │
-│  │  │  │  ├─ users        │     │  ├─ repairs (planned)      │  │  │ │
-│  │  │  │  └─ tenants      │     │  ├─ inventory (planned)    │  │  │ │
-│  │  │  └──────────────────┘     │  └─ invoices (planned)     │  │  │ │
-│  │  │                           └────────────────────────────┘  │  │ │
-│  │  └───────────────────────────────────────────────────────────┘  │ │
-│  └─────────────────────────────┬─────────────────────────────────┘ │
-│                                ▼                                     │
-│  ┌───────────────────────────────────────────────────────────────┐   │
-│  │                   PostgreSQL 15+                               │   │
-│  │  ┌────────┐  ┌─────────────┐  ┌─────────────┐  ┌──────────┐ │   │
-│  │  │ public │  │ tenant_acme │  │ tenant_solo │  │tenant_N  │ │   │
-│  │  │        │  │  repairs    │  │  repairs    │  │  ...     │ │   │
-│  │  │tenants │  │  invoices   │  │  invoices   │  │          │ │   │
-│  │  │users   │  │  roles      │  │  roles      │  │          │ │   │
-│  │  │sessions│  │  members    │  │  members    │  │          │ │   │
-│  │  │events  │  │             │  │             │  │          │ │   │
-│  │  │audit   │  │             │  │             │  │          │ │   │
-│  │  └────────┘  └─────────────┘  └─────────────┘  └──────────┘ │   │
-│  └───────────────────────────────────────────────────────────────┘   │
-│                                                                       │
-│  ┌─────────────────────┐  ┌──────────────────┐                       │
-│  │  S3 / MinIO / Local │  │  SMTP / Slack    │                       │
-│  │  (File Storage)     │  │  (Notifications) │                       │
-│  └─────────────────────┘  └──────────────────┘                       │
-└───────────────────────────────────────────────────────────────────────┘
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={620}
+  nodes={[
+    { id: 'flutter', label: 'Flutter App', sub: 'Riverpod · go_router · Dio' },
+    { id: 'cli', label: 'heyllave-cli', sub: 'Cobra · Viper · Atlas · Docker' },
+    { id: 'e2e', label: 'heyllave-e2e', sub: 'Custom harness · Testcontainers' },
+    { id: 'docs', label: 'heyllave-docs', sub: 'Starlight · OpenAPI' },
+
+    { id: 'huma', label: 'Huma', sub: 'HTTP', variant: 'accent', width: 140 },
+    { id: 'auth', label: 'Auth', sub: 'JWT', variant: 'accent', width: 140 },
+    { id: 'events', label: 'Events', sub: 'Outbox', variant: 'accent', width: 140 },
+    { id: 'hooks', label: 'Hooks', sub: 'WH / Expr', variant: 'accent', width: 140 },
+    { id: 'notify', label: 'Notify', sub: 'Multi-channel', variant: 'accent', width: 140 },
+    { id: 'storage', label: 'Storage', sub: 'S3 / FS', variant: 'accent', width: 140 },
+
+    {
+      id: 'core',
+      label: '*core.Core (DI Hub)',
+      sub: 'Session · Permission · Audit · Events · Modules · Hooks · Storage · DB · Config · Errors · Log',
+      variant: 'coral',
+      width: 360,
+      height: 90,
+    },
+
+    { id: 'foundation', label: 'Foundation', sub: 'users · tenants', variant: 'muted', width: 200 },
+    { id: 'domain', label: 'Domain', sub: 'repairs · inventory · invoices', variant: 'muted', width: 240 },
+
+    { id: 'pg-public', label: 'public', sub: 'tenants · users · sessions · events · audit', variant: 'db', width: 220 },
+    { id: 'pg-acme', label: 'tenant_acme', sub: 'repairs · invoices · roles', variant: 'db', width: 200 },
+    { id: 'pg-solo', label: 'tenant_solo', sub: 'repairs · invoices · roles', variant: 'db', width: 200 },
+    { id: 'pg-n', label: 'tenant_N', sub: '…', variant: 'db', width: 160 },
+
+    { id: 's3', label: 'S3 / MinIO / Local', sub: 'File storage', variant: 'muted', width: 200 },
+    { id: 'smtp', label: 'SMTP / Slack', sub: 'Notifications', variant: 'muted', width: 200 },
+  ]}
+  edges={[
+    { source: 'flutter', target: 'huma', label: 'HTTP' },
+    { source: 'cli', target: 'pg-public', label: 'SQL / Docker' },
+    { source: 'e2e', target: 'huma', label: 'HTTP' },
+    { source: 'docs', target: 'huma', label: 'OAS' },
+
+    { source: 'huma', target: 'core' },
+    { source: 'auth', target: 'core' },
+    { source: 'events', target: 'core' },
+    { source: 'hooks', target: 'core' },
+    { source: 'notify', target: 'core' },
+    { source: 'storage', target: 'core' },
+
+    { source: 'core', target: 'foundation' },
+    { source: 'core', target: 'domain' },
+
+    { source: 'foundation', target: 'pg-public' },
+    { source: 'domain', target: 'pg-acme' },
+    { source: 'domain', target: 'pg-solo' },
+    { source: 'domain', target: 'pg-n' },
+
+    { source: 'storage', target: 's3', dashed: true },
+    { source: 'notify', target: 'smtp', dashed: true },
+  ]}
+/>
 
 ## HTTP Request Lifecycle
 
 The complete middleware chain and handler flow.
 
-```
-                         HTTP Request
-                             │
-               ┌─────────────▼──────────────┐
-               │ 1. RecoveryMiddleware       │  Catches panics → 500
-               ├─────────────┬──────────────┤
-               │ 2. CORSMiddleware           │  Access-Control-* headers
-               ├─────────────┬──────────────┤
-               │ 3. RequestIDMiddleware      │  X-Request-ID → context
-               ├─────────────┬──────────────┤
-               │ 4. CanonicalLogMiddleware   │  One JSON line per request
-               ├─────────────┬──────────────┤
-               │     Public path? ──yes──→   │  Skip auth (login, healthz...)
-               │         │no                 │
-               │ 5. JWTAuthMiddleware        │  Validate token, load user/
-               │                             │  tenant/permissions/session
-               ├─────────────┬──────────────┤
-               │ 6. RateLimitMiddleware      │  Token bucket: per-IP,
-               │                             │  per-tenant, path overrides
-               └─────────────┬──────────────┘
-                             │
-               ┌─────────────▼──────────────┐
-               │     Route Handler (Huma)    │
-               │                             │
-               │  1. Validate input          │
-               │  2. MustCan(permission)     │
-               │  3. Hooks.Execute(before)   │
-               │  4. DB.Tx(ctx, func(tx) {   │
-               │       repo.Create(tx)       │
-               │       Events.EmitTx(tx)     │  ◄── same transaction
-               │     })                      │
-               │  5. Audit.Create(resource)  │
-               │  6. Return JSON response    │
-               └────────────────────────────┘
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={700}
+  nodes={[
+    { id: 'req', label: 'HTTP Request', variant: 'accent' },
+    { id: 'm1', label: '1 · RecoveryMiddleware', sub: 'Catches panics → 500' },
+    { id: 'm2', label: '2 · CORSMiddleware', sub: 'Access-Control-* headers' },
+    { id: 'm3', label: '3 · RequestIDMiddleware', sub: 'X-Request-ID → context' },
+    { id: 'm4', label: '4 · CanonicalLogMiddleware', sub: 'One JSON line per request' },
+    { id: 'pub', label: 'Public path?', variant: 'muted', width: 160 },
+    { id: 'm5', label: '5 · JWTAuthMiddleware', sub: 'Validate · load user/tenant/perms' },
+    { id: 'm6', label: '6 · RateLimitMiddleware', sub: 'Token bucket — IP, tenant, path' },
+    { id: 'handler', label: 'Route Handler (Huma)', variant: 'coral', width: 240 },
+    { id: 'h1', label: '1 · Validate input' },
+    { id: 'h2', label: '2 · MustCan(permission)' },
+    { id: 'h3', label: '3 · Hooks.Execute(before)' },
+    { id: 'h4', label: '4 · DB.Tx', sub: 'repo.Create(tx) · Events.EmitTx(tx)', width: 240 },
+    { id: 'h5', label: '5 · Audit.Create(resource)' },
+    { id: 'h6', label: '6 · Return JSON response', variant: 'accent' },
+  ]}
+  edges={[
+    { source: 'req', target: 'm1' },
+    { source: 'm1', target: 'm2' },
+    { source: 'm2', target: 'm3' },
+    { source: 'm3', target: 'm4' },
+    { source: 'm4', target: 'pub' },
+    { source: 'pub', target: 'm6', label: 'yes (login, healthz)' },
+    { source: 'pub', target: 'm5', label: 'no' },
+    { source: 'm5', target: 'm6' },
+    { source: 'm6', target: 'handler' },
+    { source: 'handler', target: 'h1' },
+    { source: 'h1', target: 'h2' },
+    { source: 'h2', target: 'h3' },
+    { source: 'h3', target: 'h4' },
+    { source: 'h4', target: 'h5' },
+    { source: 'h5', target: 'h6' },
+  ]}
+/>
 
 **Public paths** that skip auth: `/api/v1/auth/login`, `/api/v1/auth/refresh`, `/api/v1/auth/oauth2/*`, `/api/v1/auth/magic-link/*`, `/api/v1/auth/webauthn/*`, `/api/v1/invites`, `/healthz`, `/openapi`, `/docs`
 
 ## Core Struct — Dependency Injection Hub
 
-```
-                      ┌───────────────────────┐
-                      │      *core.Core       │
-                      │   (11 sub-interfaces) │
-                      └───────────┬───────────┘
-                                  │
-      ┌───────────────────────────┼───────────────────────────┐
-      │                           │                           │
- ┌────▼─────┐             ┌──────▼──────┐             ┌──────▼──────┐
- │ Session  │             │ Permission  │             │   Audit     │
- │          │             │             │             │             │
- │ Current  │             │ Can()       │             │ Create()    │
- │ User()   │             │ MustCan()   │             │ Update()    │
- │ Current  │             │ Resolve     │             │ Delete()    │
- │ Tenant() │             │ Scope()     │             │             │
- │ Request  │             │ ApplyScope()│             │ RFC 6902    │
- │ ID()     │             │ BuildScope  │             │ JSON Patch  │
- └──────────┘             │ Filter()    │             │ + Masking   │
-                          └─────────────┘             └─────────────┘
-      │                           │                           │
- ┌────▼─────┐             ┌──────▼──────┐             ┌──────▼──────┐
- │ Events   │             │  Modules    │             │   Hooks     │
- │          │             │             │             │             │
- │ Emit()   │             │ Service()   │             │ Execute()   │
- │ EmitTx() │             │ Enabled()   │             │             │
- │ Subscribe│             │ Resolve     │             │ Webhook     │
- │ Start()  │             │ Instance()  │             │ Expression  │
- │ Stop()   │             │ Get/Register│             │ Circuit     │
- │          │             │ Service[T]()│             │ Breaker     │
- └──────────┘             └─────────────┘             └─────────────┘
-      │                           │                           │
- ┌────▼─────┐             ┌──────▼──────┐             ┌──────▼──────┐
- │ Storage  │             │     DB      │             │  Config     │
- │          │             │             │             │             │
- │ Upload() │             │ Conn()      │             │ Get()       │
- │Download()│             │ Tx()        │             │ Tenant()    │
- │ Delete() │             │ WithTx()    │             │ Setting()   │
- │ URL()    │             │             │             │             │
- │          │             │ SET search  │             │ Viper → DB  │
- │ Local/S3 │             │ _path TO    │             │ → module    │
- └──────────┘             │ tenant_X    │             │ TTL cache   │
-                          └─────────────┘             └─────────────┘
-      │                           │
- ┌────▼─────┐             ┌──────▼──────┐
- │ Errors   │             │    Log      │
- │          │             │             │
- │Validation│             │ Logger()    │
- │NotFound()│             │ WithModule()│
- │Forbidden │             │ WithAction()│
- │Conflict()│             │ slog-based  │
- └──────────┘             └─────────────┘
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={620}
+  nodes={[
+    { id: 'core', label: '*core.Core', sub: '11 sub-interfaces', variant: 'coral', width: 220 },
+    { id: 'session', label: 'Session', sub: 'CurrentUser · CurrentTenant · RequestID', variant: 'accent', width: 220 },
+    { id: 'permission', label: 'Permission', sub: 'Can · MustCan · ResolveScope · ApplyScope', variant: 'accent', width: 240 },
+    { id: 'audit', label: 'Audit', sub: 'Create · Update · Delete · RFC 6902 + Masking', variant: 'accent', width: 240 },
+    { id: 'events', label: 'Events', sub: 'Emit · EmitTx · Subscribe · Start/Stop', variant: 'accent', width: 220 },
+    { id: 'modules', label: 'Modules', sub: 'Service · Enabled · ResolveInstance · Register', variant: 'accent', width: 240 },
+    { id: 'hooks', label: 'Hooks', sub: 'Execute · Webhook · Expr · Circuit Breaker', variant: 'accent', width: 240 },
+    { id: 'storage', label: 'Storage', sub: 'Upload · Download · Delete · URL · Local/S3', variant: 'accent', width: 240 },
+    { id: 'db', label: 'DB', sub: 'Conn · Tx · WithTx · SET search_path', variant: 'accent', width: 220 },
+    { id: 'config', label: 'Config', sub: 'Get · Tenant · Setting · Viper→DB→module', variant: 'accent', width: 240 },
+    { id: 'errors', label: 'Errors', sub: 'Validation · NotFound · Forbidden · Conflict', variant: 'accent', width: 240 },
+    { id: 'log', label: 'Log', sub: 'Logger · WithModule · WithAction · slog', variant: 'accent', width: 220 },
+  ]}
+  edges={[
+    { source: 'core', target: 'session' },
+    { source: 'core', target: 'permission' },
+    { source: 'core', target: 'audit' },
+    { source: 'core', target: 'events' },
+    { source: 'core', target: 'modules' },
+    { source: 'core', target: 'hooks' },
+    { source: 'core', target: 'storage' },
+    { source: 'core', target: 'db' },
+    { source: 'core', target: 'config' },
+    { source: 'core', target: 'errors' },
+    { source: 'core', target: 'log' },
+  ]}
+/>
 
 ## Event → Hook → Notification Pipeline
 
-```
- MODULE SERVICE (e.g., repairs.Create)
-   │
-   │  core.Events.EmitTx(ctx, tx, event)   ◄── same DB transaction
-   │
-   ▼
- events_outbox TABLE (committed atomically with business data)
-   │
-   ▼
- BACKGROUND WORKER (polls every 1s, batch of 50, FOR UPDATE SKIP LOCKED)
-   │
-   ├── SYNC subscribers (high priority, in delivery loop)
-   │     └── Domain module handlers
-   │
-   └── ASYNC subscribers (worker pool, size=10)
-         └── Notification Service (wildcard "*", priority: -10)
-               │
-               ├── 1. Match notification_rules (tenant + event name)
-               ├── 2. Resolve targets (by user field or role)
-               ├── 3. Render template (Markdown → channel-specific)
-               └── 4. Dispatch to channel:
-                     │
-                     ├── In-App  → stored in DB (read/unread)
-                     ├── Email   → SMTP + TLS, retry ×3
-                     ├── Slack   → Block Kit via webhook
-                     └── Webhook → HTTPS POST, retry ×3
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={700}
+  nodes={[
+    { id: 'service', label: 'Module Service', sub: 'e.g. repairs.Create', variant: 'accent' },
+    { id: 'outbox', label: 'events_outbox', sub: 'committed atomically with data', variant: 'db', width: 240 },
+    { id: 'worker', label: 'Background Worker', sub: 'poll 1s · batch 50 · SKIP LOCKED', width: 240 },
+    { id: 'sync', label: 'Sync Subscribers', sub: 'high priority — domain handlers', variant: 'muted', width: 240 },
+    { id: 'notifsvc', label: 'Notification Service', sub: "wildcard '*' · priority -10", variant: 'coral', width: 240 },
+    { id: 'n1', label: '1 · Match rules', sub: 'tenant + event name' },
+    { id: 'n2', label: '2 · Resolve targets', sub: 'by user field or role' },
+    { id: 'n3', label: '3 · Render template', sub: 'Markdown → channel-specific' },
+    { id: 'n4', label: '4 · Dispatch to channel' },
+    { id: 'inapp', label: 'In-App', sub: 'stored in DB', variant: 'muted' },
+    { id: 'email', label: 'Email', sub: 'SMTP+TLS · retry ×3', variant: 'muted' },
+    { id: 'slack', label: 'Slack', sub: 'Block Kit webhook', variant: 'muted' },
+    { id: 'webhook', label: 'Webhook', sub: 'HTTPS POST · retry ×3', variant: 'muted' },
+    { id: 'retry', label: 'Retry', sub: 'count² · max 5 → dead-letter', variant: 'muted', width: 220 },
+  ]}
+  edges={[
+    { source: 'service', target: 'outbox', label: 'EmitTx(ctx, tx, event)' },
+    { source: 'outbox', target: 'worker' },
+    { source: 'worker', target: 'sync' },
+    { source: 'worker', target: 'notifsvc' },
+    { source: 'notifsvc', target: 'n1' },
+    { source: 'n1', target: 'n2' },
+    { source: 'n2', target: 'n3' },
+    { source: 'n3', target: 'n4' },
+    { source: 'n4', target: 'inapp' },
+    { source: 'n4', target: 'email' },
+    { source: 'n4', target: 'slack' },
+    { source: 'n4', target: 'webhook' },
+    { source: 'email', target: 'retry', label: 'on failure', dashed: true },
+    { source: 'slack', target: 'retry', label: 'on failure', dashed: true },
+    { source: 'webhook', target: 'retry', label: 'on failure', dashed: true },
+  ]}
+/>
 
- RETRY: retry_count², max 5 retries → dead-letter queue
- HOOKS: tenant-scoped webhooks + expression language (expr-lang)
-        with per-URL circuit breaker (threshold → cooldown → half-open)
-```
+<Aside type="tip">
+  Hooks are tenant-scoped webhooks plus an expression language (`expr-lang`) with a per-URL circuit breaker — threshold → cooldown → half-open.
+</Aside>
 
 ## Multi-Tenancy & Schema Isolation
 
-```
- TENANT CREATION:
-   1. INSERT INTO public.tenants → schema_name = "tenant_acme"
-   2. CREATE SCHEMA tenant_acme
-   3. Run tenant migrations (roles, memberships tables)
-   4. Seed default roles (Admin, Member, Viewer)
-   5. Provision default modules → INSERT INTO tenant_modules
-   6. Sync permissions from module.yaml
+### Tenant Creation
 
- REQUEST ISOLATION:
-   JWTAuthMiddleware loads tenant.SchemaName from token claims
-   │
-   ▼
-   core.DB.Tx(ctx, func(tx) {
-     SET LOCAL search_path TO tenant_acme, public
-     //                        ▲              ▲
-     //                   tenant tables   shared tables
-     SELECT * FROM repairs  →  tenant_acme.repairs
-     SELECT * FROM tenants  →  public.tenants (fallback)
-   })
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={420}
+  nodes={[
+    { id: 't1', label: '1 · INSERT tenants', sub: "schema_name = 'tenant_acme'", variant: 'accent', width: 220 },
+    { id: 't2', label: '2 · CREATE SCHEMA', sub: 'tenant_acme', width: 220 },
+    { id: 't3', label: '3 · Run migrations', sub: 'roles, memberships tables', width: 220 },
+    { id: 't4', label: '4 · Seed roles', sub: 'Admin · Member · Viewer', width: 220 },
+    { id: 't5', label: '5 · Provision modules', sub: 'INSERT INTO tenant_modules', width: 240 },
+    { id: 't6', label: '6 · Sync permissions', sub: 'from module.yaml', variant: 'coral', width: 220 },
+  ]}
+  edges={[
+    { source: 't1', target: 't2' },
+    { source: 't2', target: 't3' },
+    { source: 't3', target: 't4' },
+    { source: 't4', target: 't5' },
+    { source: 't5', target: 't6' },
+  ]}
+/>
 
- MULTI-INSTANCE MODULES:
-   tenant_modules:
-   ┌─────────────┬──────────────┬──────────────┐
-   │ module_name │ instance_name│ table_prefix │
-   ├─────────────┼──────────────┼──────────────┤
-   │ invoices    │ invoices-in  │ invoices_in_ │
-   │ invoices    │ invoices-out │ invoices_out_│
-   └─────────────┴──────────────┴──────────────┘
+### Request Isolation
 
-   tenant_acme schema:
-     invoices_in_invoices, invoices_in_invoice_items
-     invoices_out_invoices, invoices_out_invoice_items
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={460}
+  nodes={[
+    { id: 'jwt', label: 'JWTAuthMiddleware', sub: 'loads tenant.SchemaName from claims', variant: 'accent', width: 260 },
+    { id: 'tx', label: 'core.DB.Tx(ctx, ...)', sub: 'SET LOCAL search_path TO tenant_acme, public', variant: 'coral', width: 320 },
+    { id: 'q1', label: 'SELECT * FROM repairs' },
+    { id: 'q2', label: 'SELECT * FROM tenants' },
+    { id: 'r1', label: 'tenant_acme.repairs', sub: 'tenant tables', variant: 'db', width: 220 },
+    { id: 'r2', label: 'public.tenants', sub: 'shared fallback', variant: 'db', width: 220 },
+  ]}
+  edges={[
+    { source: 'jwt', target: 'tx' },
+    { source: 'tx', target: 'q1' },
+    { source: 'q1', target: 'r1' },
+    { source: 'tx', target: 'q2' },
+    { source: 'q2', target: 'r2' },
+  ]}
+/>
 
-   Routes: GET /api/v1/tenants/{tid}/i/{instance}/invoices
-   Perms:  invoices-in.read.all (derived from invoices.read.all)
-   Events: invoices-in.created  (derived from invoices.created)
-```
+### Multi-Instance Modules
+
+`tenant_modules` table:
+
+| module_name | instance_name | table_prefix |
+|---|---|---|
+| invoices | invoices-in | `invoices_in_` |
+| invoices | invoices-out | `invoices_out_` |
+
+Resulting tables in `tenant_acme`:
+
+- `invoices_in_invoices`, `invoices_in_invoice_items`
+- `invoices_out_invoices`, `invoices_out_invoice_items`
+
+Routes: `GET /api/v1/tenants/{tenant_id}/i/{instance}/invoices`
+Perms: `invoices-in.read.all` (derived from `invoices.read.all`)
+Events: `invoices-in.created` (derived from `invoices.created`)
 
 ## Permission & Scope Resolution
 
-```
- module.yaml           SyncFromModules        permission_definitions
- ┌────────────┐  ──────────────────────→  ┌──────────────────────┐
- │permissions:│                           │ (public schema)      │
- │ - read.all │                           └──────────┬───────────┘
- │ - read.    │                                      │
- │   assigned │                                      ▼
- │ - read.own │                           roles (tenant schema)
- │            │                           ┌──────────────────────┐
- │scopes:     │                           │ Admin: [read.all,    │
- │ - all (100)│                           │         create, ...] │
- │ - assigned │                           │ Mechanic: [read.     │
- │     (50)   │                           │   assigned, create]  │
- │ - own (10) │                           └──────────┬───────────┘
- └────────────┘                                      │
-                                          tenant_memberships
-                                          ┌──────────────────────┐
-                                          │ user + role +        │
-                                          │ extra_permissions    │
-                                          └──────────┬───────────┘
-                                                     │
-                                          JWT claims.Permissions
-                                          ┌──────────────────────┐
-                                          │ ["repairs.read.      │
-                                          │   assigned",         │
-                                          │  "repairs.create"]   │
-                                          └──────────┬───────────┘
-                                                     │
- AT QUERY TIME:                                      ▼
-   ResolveScope(ctx, "repairs", "read")
-     → Match: repairs.read.assigned (Priority 50)
-     → Filter: "assigned_to = :user_id"
-     → Replace: "assigned_to = 'user-uuid-123'"
-
-   SELECT * FROM repairs
-   WHERE deleted_at IS NULL
-     AND assigned_to = 'user-uuid-123'   ◄── injected by scope
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={620}
+  nodes={[
+    { id: 'yaml', label: 'module.yaml', sub: 'permissions + scopes definitions', variant: 'accent', width: 260 },
+    { id: 'pdef', label: 'permission_definitions', sub: 'public schema', variant: 'db', width: 240 },
+    { id: 'roles', label: 'roles (tenant schema)', sub: 'Admin · Mechanic · Viewer', variant: 'db', width: 240 },
+    { id: 'mem', label: 'tenant_memberships', sub: 'user + role + extra_permissions', variant: 'db', width: 260 },
+    { id: 'claims', label: 'JWT claims.Permissions', sub: "['repairs.read.assigned', ...]", width: 260 },
+    { id: 'resolve', label: 'ResolveScope', sub: "matches priority 50 · filter: assigned_to = :user_id", variant: 'coral', width: 300 },
+    { id: 'sql', label: 'SELECT * FROM repairs', sub: "WHERE deleted_at IS NULL AND assigned_to = 'uuid'", width: 300 },
+  ]}
+  edges={[
+    { source: 'yaml', target: 'pdef', label: 'SyncFromModules' },
+    { source: 'pdef', target: 'roles' },
+    { source: 'roles', target: 'mem' },
+    { source: 'mem', target: 'claims' },
+    { source: 'claims', target: 'resolve' },
+    { source: 'resolve', target: 'sql' },
+  ]}
+/>
 
 ## Authentication Flow
 
-```
- ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐
- │ Password  │  │  OAuth2   │  │  Magic    │  │  WebAuthn  │
- │ email +   │  │  /OIDC    │  │  Link     │  │  (FIDO2)   │
- │ bcrypt    │  │ Google    │  │ email →   │  │  Passkeys  │
- │           │  │ GitHub    │  │ verify    │  │  Biometric │
- └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘
-       └──────────────┬┴──────────────┘───────────────┘
-                      │
-            ┌─────────▼──────────┐
-            │   AuthManager      │  Dispatch by method
-            │   .Login(input)    │  → AuthResult{Email, Sub, Issuer}
-            └─────────┬──────────┘
-                      ▼
-            User Lookup → Membership + Role → Permissions
-                      ▼
-            Create Session (DB record: IP, user-agent, auth_method)
-                      ▼
-            TokenService.GeneratePair()
-            ┌─────────────────────────────────────┐
-            │ Access Token (15m)  │ Refresh (7d)  │
-            │ uid, tid, mid, sid │ uid, tid, sid  │
-            │ perms: [...]       │ (no perms)     │
-            │ type: "access"     │ type: "refresh" │
-            └─────────────────────────────────────┘
-```
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={520}
+  nodes={[
+    { id: 'pw', label: 'Password', sub: 'email + bcrypt', variant: 'muted' },
+    { id: 'oauth', label: 'OAuth2 / OIDC', sub: 'Google · GitHub', variant: 'muted' },
+    { id: 'magic', label: 'Magic Link', sub: 'email → verify', variant: 'muted' },
+    { id: 'webauthn', label: 'WebAuthn (FIDO2)', sub: 'Passkeys · Biometric', variant: 'muted' },
+    { id: 'authmgr', label: 'AuthManager.Login', sub: '→ AuthResult{Email, Sub, Issuer}', variant: 'coral', width: 240 },
+    { id: 'lookup', label: 'User Lookup', sub: '→ Membership + Role → Permissions', variant: 'accent', width: 240 },
+    { id: 'session', label: 'Create Session', sub: 'IP · user-agent · auth_method', variant: 'accent', width: 220 },
+    { id: 'tokens', label: 'TokenService', sub: 'GeneratePair()', variant: 'accent', width: 200 },
+    { id: 'access', label: 'Access (15m)', sub: 'uid · tid · mid · sid · perms', variant: 'db', width: 220 },
+    { id: 'refresh', label: 'Refresh (7d)', sub: 'uid · tid · sid · no perms', variant: 'db', width: 220 },
+  ]}
+  edges={[
+    { source: 'pw', target: 'authmgr' },
+    { source: 'oauth', target: 'authmgr' },
+    { source: 'magic', target: 'authmgr' },
+    { source: 'webauthn', target: 'authmgr' },
+    { source: 'authmgr', target: 'lookup' },
+    { source: 'lookup', target: 'session' },
+    { source: 'session', target: 'tokens' },
+    { source: 'tokens', target: 'access' },
+    { source: 'tokens', target: 'refresh' },
+  ]}
+/>
 
 ## Cross-Repo Dependency Map
 
-```
- trazo-cli ──────────────────────────────── trazo-core-service
-    │                                              │
-    │  migrations/core/*.sql ── testutil reads ──→ │
-    │  migrations/modules/*  ── testutil reads ──→ │
-    │  module validate ──────── module.yaml from → │
-    │  module generate ──────── outputs Go code →  │
-    │                                              │
-    │                                OpenAPI spec  │
-    │                                     │        │
-    │                           ┌─────────┘        │
-    │                           ▼                  │
-    │                   trazo-admin-app             │
-    │                      │  dart-dio client       │
-    │                      │  (generated from OAS)  │
-    │                      └──── HTTP/JSON ────→────┘
-    │
-    │                       trazo-e2e
-    │                          │  Starts real API binary
-    │  migrate up (subproc) ◄──┤  + testcontainers PG
-    │                          └──── HTTP client ──→────
-    │
-    │                       trazo-docs
-    │                          │  pnpm fetch-openapi
-    │                          └──── pulls OAS ────→────
-    │
-    │                   trazo-claude-plugin
-    │  /migration skill ◄──────┤  Skills reference both repos
-    │                          │  /tackle creates PRs in both
-    │                          └───────────────→────────────────
-```
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={520}
+  nodes={[
+    { id: 'cli', label: 'heyllave-cli', variant: 'accent' },
+    { id: 'core', label: 'heyllave-core-service', variant: 'coral', width: 220 },
+    { id: 'admin', label: 'heyllave-admin-app', variant: 'accent', width: 220 },
+    { id: 'e2e', label: 'heyllave-e2e' },
+    { id: 'docs', label: 'heyllave-docs' },
+    { id: 'plugin', label: 'heyllave-claude-plugin', variant: 'muted', width: 220 },
+  ]}
+  edges={[
+    { source: 'cli', target: 'core', label: 'migrations + module validate/generate' },
+    { source: 'core', target: 'admin', label: 'OpenAPI spec' },
+    { source: 'admin', target: 'core', label: 'dart-dio · HTTP/JSON' },
+    { source: 'e2e', target: 'core', label: 'API binary + testcontainers' },
+    { source: 'cli', target: 'e2e', label: 'migrate up (subproc)' },
+    { source: 'core', target: 'docs', label: 'OAS (pnpm fetch-openapi)' },
+    { source: 'plugin', target: 'cli', label: '/migration skill', dashed: true },
+    { source: 'plugin', target: 'core', label: '/tackle PRs', dashed: true },
+  ]}
+/>
 
 ## Configuration Hierarchy
 
-```
- STATIC CONFIG (highest wins):
-   1. CLI Flags        --port 9090
-   2. Environment      TRAZO_SERVER_PORT=9090
-   3. trazo.yaml       server: { port: 8080 }
-   4. Defaults         (hardcoded)
+### Static Config (highest wins)
 
- RUNTIME SETTINGS (3-tier, TTL cache 60s):
-   core.Config.Setting(ctx, "repairs", "auto_assign")
-     1. tenant_settings    (per-tenant override)
-     2. global_settings    (platform-wide)
-     3. module.yaml        (module defaults)
-```
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={420}
+  nodes={[
+    { id: 's1', label: '1 · CLI Flags', sub: '--port 9090', variant: 'coral', width: 240 },
+    { id: 's2', label: '2 · Environment', sub: 'HEYLLAVE_SERVER_PORT=9090', variant: 'accent', width: 240 },
+    { id: 's3', label: '3 · heyllave.yaml', sub: 'server: { port: 8080 }', width: 240 },
+    { id: 's4', label: '4 · Defaults', sub: 'hardcoded', variant: 'muted', width: 240 },
+  ]}
+  edges={[
+    { source: 's1', target: 's2' },
+    { source: 's2', target: 's3' },
+    { source: 's3', target: 's4' },
+  ]}
+/>
+
+### Runtime Settings (3-tier · TTL cache 60s)
+
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={460}
+  nodes={[
+    { id: 'r0', label: 'core.Config.Setting', sub: "(ctx, 'repairs', 'auto_assign')", variant: 'coral', width: 280 },
+    { id: 'r1', label: '1 · tenant_settings', sub: 'per-tenant override', variant: 'db', width: 240 },
+    { id: 'r2', label: '2 · global_settings', sub: 'platform-wide', variant: 'db', width: 240 },
+    { id: 'r3', label: '3 · module.yaml', sub: 'module defaults', variant: 'muted', width: 240 },
+  ]}
+  edges={[
+    { source: 'r0', target: 'r1' },
+    { source: 'r1', target: 'r2' },
+    { source: 'r2', target: 'r3' },
+  ]}
+/>
 
 ## Complete API Endpoint Map
 
@@ -382,19 +411,28 @@ The complete middleware chain and handler flow.
 | | GET | `/api/v1/tenants` | List |
 | | GET | `/api/v1/tenants/{id}` | Get |
 | | PUT | `/api/v1/tenants/{id}` | Update |
-| **Modules** | GET | `/api/v1/tenants/{tid}/modules` | List enabled |
-| | PUT | `.../modules/{name}/enable` | Enable |
-| | PUT | `.../modules/{name}/disable` | Disable |
+| **Modules** | GET | `/api/v1/tenants/{tenant_id}/modules` | List tenant modules |
+| | GET | `.../modules/{name}` | Get module status |
+| | PUT | `.../modules/{name}/enable` | Enable module |
+| | PUT | `.../modules/{name}/disable` | Disable module |
+| | PUT | `.../modules/{name}/config` | Update module config |
 | | POST | `.../modules/{name}/instances` | Create instance |
-| | GET | `.../instances/{inst}` | Get instance |
-| | DELETE | `.../instances/{inst}` | Delete instance |
-| **Events** | GET | `/api/v1/tenants/{tid}/events` | List with filters |
+| | GET | `.../modules/{name}/instances` | List instances of a module |
+| | GET | `.../instances/{instance}` | Get instance |
+| | PUT | `.../instances/{instance}/enable` | Enable instance |
+| | PUT | `.../instances/{instance}/disable` | Disable instance |
+| | PUT | `.../instances/{instance}/config` | Update instance config |
+| | DELETE | `.../instances/{instance}` | Delete instance |
+| **Events** | GET | `/api/v1/tenants/{tenant_id}/events` | List with filters |
 | | GET | `.../events/stats` | Outbox statistics |
 | | GET | `.../events/dead-letters` | Dead-letter queue |
 | | POST | `.../events/simulate` | Emit test event |
 | **Notifications** | POST | `.../notifications/rules` | Create rule |
 | | GET | `.../notifications/rules` | List rules |
 | | GET | `/api/v1/notifications` | My notifications |
+| | GET | `/api/v1/notifications/unread-count` | Unread count |
+| | PUT | `/api/v1/notifications/{id}/read` | Mark a notification read |
 | | PUT | `/api/v1/notifications/read-all` | Mark all read |
+| | POST | `/api/v1/notifications/{id}/actions/{key}` | Invoke a notification action |
 | **Infra** | GET | `/healthz` | Health check |
 | | GET | `/openapi` | OpenAPI 3.1 spec |

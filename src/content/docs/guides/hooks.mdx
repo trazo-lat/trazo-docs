@@ -1,0 +1,399 @@
+---
+title: Defining Hooks
+description: End-to-end guide for wiring a tenant-configured webhook or expression hook into a module's lifecycle — picking the hook point, choosing the kind, configuring it via API, and understanding circuit-breaker + retry behavior.
+---
+
+import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+This guide walks through adding a hook to a tenant: identify a hook point that a module exposes, pick between a **webhook** (outbound HTTPS POST) and an **expression** (in-process evaluation), configure it via the hooks API, and reason about how the executor protects you from a misbehaving endpoint.
+
+For the architecture and storage model, see [Hooks](/architecture/hooks/). For event-driven fan-out (one event, many subscribers, retry queue), see [Event Subscriptions](/architecture/event-subscriptions/) — that is a different mechanism from hooks.
+
+## Hooks vs. Notifications
+
+Both mechanisms react to something happening in the platform, but they answer different questions:
+
+| Concern | Hooks | Notifications |
+|---|---|---|
+| Purpose | **Side-effect logic**: mutate input, call an external system, decide whether to proceed | **Inform a user**: render a templated message and deliver it |
+| Trigger | A service method invokes `core.Hooks.Execute(ctx, "<hook_name>", data)` at a defined lifecycle point | A domain event matches a `NotificationRule` |
+| Result | Optional `Modified` map merged back into the in-flight operation | An in-app row, email, Slack message, or webhook payload |
+| Tenant authoring | Tenant registers a row in `tenant_hooks` (webhook URL or expression) | Tenant overrides a `NotificationRule` per channel |
+| Failure policy | Best-effort: errors logged, business operation continues; per-URL circuit breaker | Per-attempt retry with backoff; failed deliveries land in the notification delivery table |
+
+A repair-shop tenant who wants to **set priority based on amount** writes a hook. A repair-shop tenant who wants to **email the customer when the repair is done** writes a notification rule. The two are complementary.
+
+---
+
+## The Authoring Loop
+
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={360}
+  nodes={[
+    { id: 'lifecycle', label: '1. Pick a hook point', sub: '"repairs.before_create"', variant: 'accent' },
+    { id: 'kind', label: '2. Choose kind', sub: 'webhook · expression' },
+    { id: 'config', label: '3. Configure', sub: 'POST /tenants/{id}/hooks' },
+    { id: 'execute', label: '4. Execute', sub: 'service calls Hooks.Execute' },
+    { id: 'merge', label: '5. Merge result', sub: 'modified fields back into input', variant: 'coral' },
+  ]}
+  edges={[
+    { source: 'lifecycle', target: 'kind' },
+    { source: 'kind', target: 'config' },
+    { source: 'config', target: 'execute' },
+    { source: 'execute', target: 'merge' },
+  ]}
+/>
+
+A hook point is just a string. A service method calls `core.Hooks.Execute(ctx, "repairs.before_create", input)`; the executor looks up the row in `tenant_<slug>.tenant_hooks` matching `hook_name = "repairs.before_create"`, dispatches by `hook_type`, and returns a `HookResult`. The hook name itself is the filter — there is no separate `when:` predicate. Conditional logic lives **inside** the hook (the expression returns an empty map for "no change"; the webhook responds with `{}` for "no change").
+
+---
+
+## Step 1 — Pick the Hook Point
+
+Modules declare their hook points as named string constants. A typical CRUD service exposes four:
+
+```go
+// modules/foundation/entities/model/hooks.go
+const (
+    HookBeforeCreate = "entities.before_create"
+    HookAfterCreate  = "entities.after_create"
+    HookBeforeUpdate = "entities.before_update"
+    HookBeforeDelete = "entities.before_delete"
+)
+```
+
+Inside the service those constants are called at the right moment:
+
+```go
+// Inside the create flow, before the row is inserted.
+hookResult, _ := s.core.Hooks.Execute(ctx, model.HookBeforeCreate, input.Data)
+if hookResult.Executed && hookResult.Modified != nil {
+    for k, v := range hookResult.Modified {
+        input.Data[k] = v // merge tenant-supplied modifications
+    }
+}
+```
+
+The convention is:
+
+- **`<module>.before_<op>`** — runs before the mutation, can return a `Modified` map that the service merges back into the input.
+- **`<module>.after_<op>`** — runs after the mutation succeeds, return value is ignored (read-only side effect).
+
+<Aside type="tip">
+  To discover the hook points a module exposes, look at the `model` package for that module. Hook names are constants prefixed with `Hook` — e.g. `HookBillingBeforeIssue`, `HookConversationsAfterMessage`. The CLI's module reference also lists them.
+</Aside>
+
+Only one hook row is matched per `hook_name` per tenant — the unique constraint on `(hook_name)` inside the tenant schema enforces this. If you need branching behavior for the same point, encode it inside the expression or inside your webhook endpoint.
+
+---
+
+## Step 2 — Choose the Hook Kind
+
+The two kinds answer different questions.
+
+<Tabs>
+<TabItem label="Webhook">
+
+A **webhook** is an outbound HTTPS `POST` to a tenant-supplied URL. Use it when the logic lives in the tenant's own backend, when you need to call out to a third-party service (Slack, Linear, an internal billing system), or when the rules are too involved to express as a single expression.
+
+The payload the executor sends:
+
+```json
+{
+  "hook": "repairs.before_create",
+  "tenant_id": "ten_01HQ...",
+  "user_id": "usr_01HQ...",
+  "request_id": "req-abc-123",
+  "timestamp": "2026-05-16T14:30:00Z",
+  "data": { /* whatever the service passed to Execute */ }
+}
+```
+
+The response the executor expects (optional body — empty body or non-JSON is treated as "no modifications"):
+
+```json
+{
+  "modified": {
+    "priority": "urgent",
+    "assigned_to": "usr_specialist_001"
+  }
+}
+```
+
+Security guardrails enforced by `ValidateWebhookURL`:
+
+- **HTTPS only.** `http://` URLs are rejected at create time.
+- **No private/reserved IPs.** The host is resolved and each address is checked; loopback, RFC1918, link-local — all rejected. This is the SSRF protection.
+- **Body cap.** Response is read through `io.LimitReader` capped at `MaxPayloadSize` (default 1 MB).
+- **Custom headers.** The `headers` JSON map on the hook row is set on every outbound request — handy for `Authorization: Bearer ...` to your own service.
+
+</TabItem>
+<TabItem label="Expression">
+
+An **expression** is an [expr-lang](https://github.com/expr-lang/expr) program evaluated in-process with the operation's `data` as the environment. Use it for simple transformations and conditional defaults — no external dependency, no network call, no breaker concerns.
+
+The expression compiles with these guardrails:
+
+- `expr.AllowUndefinedVariables()` — missing payload fields resolve to nil rather than panicking.
+- `expr.MaxNodes(1000)` — the AST is bounded; pathological expressions are rejected.
+- The `data` argument is normalized to `map[string]any` (structs are round-tripped through JSON) before evaluation.
+
+Return value semantics, straight from `interpretResult`:
+
+| Returns | Meaning |
+|---|---|
+| `map[string]any` (non-empty) | Used as the `Modified` map |
+| `map[string]any{}` (empty) | Hook ran, no field changes |
+| `true` | Hook matched, no field changes (same as empty map) |
+| `false` | Condition not met, skip |
+| anything else | Wrapped as `{"result": <value>}` |
+
+So a hook that **only conditionally** sets a field becomes a ternary that returns either a map or `false`:
+
+```
+amount > 1000 ? {"priority": "urgent"} : false
+```
+
+</TabItem>
+</Tabs>
+
+---
+
+## Step 3 — Configure the Hook via API
+
+Hook CRUD lives on the tenant-scoped path. The handler requires `hooks.manage` for writes and `hooks.read` for reads.
+
+<Tabs>
+<TabItem label="Create webhook">
+
+```bash
+curl -X POST http://localhost:8080/api/v1/tenants/$TENANT_ID/hooks \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hook_name": "repairs.before_create",
+    "hook_type": "webhook",
+    "url": "https://hooks.acme.com/heyllave/repairs",
+    "headers": {
+      "Authorization": "Bearer acme-shared-secret",
+      "X-Source": "heyllave"
+    },
+    "enabled": true
+  }'
+```
+
+The handler validates:
+
+- `hook_type` is exactly `"webhook"` or `"expression"`.
+- `url` is non-empty when `hook_type == "webhook"`.
+- `url` passes `ValidateWebhookURL` (HTTPS, no private IPs).
+
+</TabItem>
+<TabItem label="Create expression">
+
+```bash
+curl -X POST http://localhost:8080/api/v1/tenants/$TENANT_ID/hooks \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hook_name": "repairs.before_create",
+    "hook_type": "expression",
+    "expression": "amount > 1000 ? {\"priority\": \"urgent\"} : false",
+    "enabled": true
+  }'
+```
+
+The handler requires `expression` to be non-empty when `hook_type == "expression"`. Compilation errors surface at execution time as `result.Errors`, not at create time — the expression engine is invoked lazily.
+
+</TabItem>
+<TabItem label="List / update / delete">
+
+```bash
+# List all hooks for the tenant
+curl http://localhost:8080/api/v1/tenants/$TENANT_ID/hooks \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# Toggle a hook off without deleting it
+curl -X PUT http://localhost:8080/api/v1/tenants/$TENANT_ID/hooks/$HOOK_ID \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": false}'
+
+# Remove the hook
+curl -X DELETE http://localhost:8080/api/v1/tenants/$TENANT_ID/hooks/$HOOK_ID \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+`GET /hooks?enabled_only=true` filters out disabled rows. Every mutation is recorded by the `AuditProvider` and (if registered) the `StateNotifier`.
+
+</TabItem>
+</Tabs>
+
+<Aside type="caution">
+  The `tenant_hooks` table has a unique constraint on `hook_name` within the tenant schema. Creating a second hook for the same hook point in the same tenant returns a 500 from the store layer — disable or update the existing row instead.
+</Aside>
+
+---
+
+## Step 4 — Circuit Breaker Behavior
+
+Every webhook URL has its own circuit breaker, keyed on the URL string. The executor calls `breaker.Allow(url)` before each attempt and records success or failure afterward.
+
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={300}
+  nodes={[
+    { id: 'closed', label: 'Closed', sub: 'requests flow', variant: 'accent' },
+    { id: 'open', label: 'Open', sub: 'short-circuit fail', variant: 'coral' },
+    { id: 'half', label: 'Half-Open', sub: 'one probe allowed', variant: 'muted' },
+  ]}
+  edges={[
+    { source: 'closed', target: 'open', label: 'N consecutive failures' },
+    { source: 'open', target: 'half', label: 'cooldown elapsed' },
+    { source: 'half', target: 'closed', label: 'success' },
+    { source: 'half', target: 'open', label: 'failure', dashed: true },
+  ]}
+/>
+
+The constants come from `DefaultConfig()` in `internal/core/hooks/hooks.go`:
+
+```go
+return Config{
+    WebhookTimeout:   10 * time.Second,
+    BreakerThreshold: 5,
+    BreakerCooldown:  60 * time.Second,
+    MaxPayloadSize:   1 << 20, // 1 MB
+}
+```
+
+Behavior table:
+
+| State | What `Allow(url)` returns | How it transitions |
+|---|---|---|
+| `closed` (default) | `true` | `RecordFailure` increments a counter; at `BreakerThreshold` consecutive failures, becomes `open`. |
+| `open` | `false` if `time.Since(lastFailure) < BreakerCooldown`, else flips to `half-open` and returns `true`. | After `BreakerCooldown` (60s), the **next** Allow call probes once. |
+| `half-open` | `true` (probe attempt) | `RecordSuccess` deletes the state entry (back to implicit `closed`); `RecordFailure` re-arms `open` from the existing counter. |
+
+When the breaker is open, the executor short-circuits with `result.Errors = ["circuit breaker open for <url>"]` and does **not** consume an attempt. The business operation still completes — hooks are best-effort.
+
+Overrides live in `heyllave.yaml`:
+
+```yaml
+hooks:
+  webhook_timeout: 10s
+  breaker_threshold: 5
+  breaker_cooldown: 60s
+  max_payload_size: 1048576
+```
+
+---
+
+## Step 5 — Retry Behavior
+
+Inside a single Allow window, the HTTP call is wrapped in `retry.Do` with this config (`webhookRetryConfig` in `hooks.go`):
+
+| Setting | Value | Meaning |
+|---|---|---|
+| `MaxAttempts` | `3` | One initial call + two retries on transient errors |
+| `InitialDelay` | `500ms` | Wait before the first retry |
+| `MaxDelay` | `5s` | Cap on exponential growth |
+| `Multiplier` | `2` | 500ms → 1s → 2s (capped at 5s) |
+| `IsRetryable` | `isTransientWebhookError` | See table below |
+
+`isTransientWebhookError` only retries on:
+
+- HTTP `429` (rate-limited)
+- HTTP `5xx` (server-side failure)
+- Any non-HTTP error (`err` that isn't a `webhookError` — i.e. network/timeout)
+
+`4xx` other than `429` is treated as a permanent failure and is **not retried**. The executor records it as a single failure on the breaker.
+
+When all retries are exhausted, the executor:
+
+1. Calls `breaker.RecordFailure(url)` — pushes one tick toward the threshold.
+2. Appends `"webhook call failed: <err>"` to `result.Errors`.
+3. Returns the result. The caller (`core.Hooks.Execute`) logs at `Warn` and returns the result with no Go error.
+
+The business operation never observes a webhook failure as a Go error. If a tenant's webhook is down, repairs still get created — the `Modified` map is just empty.
+
+<Aside type="note">
+  There is no dead-letter queue or persistent retry table for hooks. After three attempts in one execution, the result is final. Persistent retry semantics belong to [event subscriptions](/architecture/event-subscriptions/) — use those when you need at-least-once delivery with backoff across process restarts.
+</Aside>
+
+---
+
+## Common Patterns
+
+### Webhook to Slack / Discord / Linear
+
+Tenants frequently want a chat ping when a high-value event fires. Point the hook at an inbound integration URL and let the third party handle the formatting:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/tenants/$TENANT_ID/hooks \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d '{
+    "hook_name": "billing.after_issue",
+    "hook_type": "webhook",
+    "url": "https://hooks.slack.com/services/T0/B0/xxxx"
+  }'
+```
+
+The Slack endpoint ignores the response shape; the executor reads back nothing and the result.Modified stays empty. Because this is an `after_*` hook, any `Modified` map would be discarded anyway — `after_*` hooks are pure side effects.
+
+### Expression: auto-tag by amount
+
+A repair-shop tenant wants high-value tickets to default to `priority = "urgent"`:
+
+```
+amount > 1000 ? {"priority": "urgent"} : false
+```
+
+Hook this on `repairs.before_create`. The service merges `{"priority": "urgent"}` into the input map before insertion. When `amount <= 1000`, the expression returns `false` and `result.Modified` stays nil.
+
+### Expression: enforce a required field
+
+```
+customer_id == nil || customer_id == "" ? {"customer_id": "default-customer"} : false
+```
+
+Defaults a field if missing. Because `AllowUndefinedVariables` is on, this works whether `customer_id` is absent or present-but-empty.
+
+### Webhook: external policy check
+
+Forward the input to a tenant-owned policy service and let it veto a rich set of fields:
+
+```bash
+{
+  "hook_name": "repairs.before_create",
+  "hook_type": "webhook",
+  "url": "https://policy.acme.com/heyllave/repairs",
+  "headers": { "Authorization": "Bearer tenant-internal-secret" }
+}
+```
+
+The policy service can return `{"modified": {"priority": "urgent", "assigned_to": "usr_..."}}` — any keys the service understands. The hook is opaque to the platform.
+
+---
+
+## Common Mistakes
+
+- **Treating `before_*` failure as a veto.** Hooks are best-effort. If the webhook 500s through all three retries, the service moves on with an empty `Modified`. To gate creation on a policy decision, your service must read `result.Errors` and decide what to do — the executor will not block on your behalf.
+- **Using `http://` URLs in dev.** `ValidateWebhookURL` rejects non-HTTPS unconditionally. Local testing against `http://localhost:...` requires a local HTTPS terminator, or use an expression hook for unit-test fixtures.
+- **Pointing the webhook at an internal host.** `127.0.0.1`, `10.x`, `192.168.x`, `172.16.x`, link-local — all rejected. Tunnel through a public HTTPS proxy if you need to reach a dev machine.
+- **Returning a non-map from an expression hook.** A scalar like `"urgent"` becomes `{"result": "urgent"}` — almost certainly not what you wanted. Always return either a map literal, `false`, or `true`.
+- **Expecting `after_*` modifications to take effect.** The service only merges `Modified` on `before_*` paths. On `after_*` paths the result is read for errors and discarded.
+- **Creating two hooks for the same `hook_name` in one tenant.** The unique constraint will reject the second one. Use `PUT` to update, or add the branching logic inside the existing hook.
+- **Assuming the webhook payload is signed.** It is not. Authenticate inbound requests on the tenant side using the custom `Authorization` header configured on the hook row.
+
+---
+
+## Related
+
+- [Architecture: Hooks](/architecture/hooks/) — storage model, payload contract, configuration knobs.
+- [Architecture: Event Subscriptions](/architecture/event-subscriptions/) — durable, at-least-once event fan-out. Use instead of hooks when you need persistent retries and a dead-letter table.
+- [Sending Notifications](/guides/notifications/) — when the goal is to inform a user, not to mutate the operation.
+- [Architecture: Module System](/architecture/module-system/) — where hook constants get declared inside a module's `model` package.

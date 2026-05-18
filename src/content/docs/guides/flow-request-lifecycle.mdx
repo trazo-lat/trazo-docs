@@ -1,0 +1,164 @@
+---
+title: Request Lifecycle Flow
+description: The journey of a single HTTP request through middleware, handler, service, and repository back to a response.
+---
+
+import { Steps, Aside } from '@astrojs/starlight/components';
+import FlowDiagram from '../../../components/FlowDiagram';
+
+Every authenticated HTTP request walks the same path. The path is fixed so that auth, rate limiting, audit, and tenant isolation cannot be accidentally bypassed by a handler.
+
+---
+
+## The Path
+
+<FlowDiagram
+  client:visible
+  direction="TB"
+  height={620}
+  nodes={[
+    { id: 'req', label: 'HTTP Request', variant: 'accent' },
+    {
+      id: 'recovery',
+      label: 'Recovery',
+      sub: 'defer/recover → 500',
+    },
+    {
+      id: 'cors',
+      label: 'CORS',
+      sub: 'preflight short-circuit',
+    },
+    {
+      id: 'reqid',
+      label: 'RequestID',
+      sub: 'X-Request-ID',
+    },
+    {
+      id: 'canlog',
+      label: 'CanonicalLog',
+      sub: 'one line / request',
+    },
+    {
+      id: 'jwt',
+      label: 'JWT Auth',
+      sub: 'session → ctx',
+    },
+    {
+      id: 'rate',
+      label: 'RateLimit',
+      sub: 'per-IP / per-tenant',
+    },
+    {
+      id: 'huma',
+      label: 'Huma Handler',
+      sub: 'OpenAPI bind + 422',
+    },
+    {
+      id: 'service',
+      label: 'Service Layer',
+      variant: 'coral',
+      sub: 'perm check, audit, EmitTx',
+    },
+    {
+      id: 'repo',
+      label: 'Repository Layer',
+      sub: 'sqlx + squirrel',
+    },
+    {
+      id: 'db',
+      label: 'PostgreSQL',
+      variant: 'db',
+      sub: 'SET search_path = tenant_<slug>',
+    },
+    {
+      id: 'resp',
+      label: 'Response',
+      variant: 'accent',
+      sub: 'serialize → unwind → client',
+    },
+  ]}
+  edges={[
+    { source: 'req', target: 'recovery' },
+    { source: 'recovery', target: 'cors' },
+    { source: 'cors', target: 'reqid' },
+    { source: 'reqid', target: 'canlog' },
+    { source: 'canlog', target: 'jwt' },
+    { source: 'jwt', target: 'rate' },
+    { source: 'rate', target: 'huma' },
+    { source: 'huma', target: 'service' },
+    { source: 'service', target: 'repo' },
+    { source: 'repo', target: 'db' },
+    { source: 'db', target: 'resp', label: 'unwind' },
+  ]}
+/>
+
+---
+
+## The Flow
+
+<Steps>
+
+1. **Recovery middleware** wraps the whole chain in a `defer/recover` so a panic anywhere downstream returns a structured 500 instead of killing the worker.
+
+2. **CORS middleware** adds the configured headers. Preflight `OPTIONS` requests short-circuit here.
+
+3. **RequestID middleware** generates or accepts an `X-Request-ID` header. This ID rides every downstream log line, audit entry, and emitted event for the request.
+
+4. **Canonical log middleware** opens a structured log record that accumulates fields throughout the request. Emitted once on response — one line per request, queryable by request ID, tenant, user, or status code.
+
+5. **JWT auth middleware** validates the bearer token, loads the session, and stores the current user + tenant into the request context. Unauthenticated requests to protected routes are short-circuited with `401` here. See [Authentication](/architecture/authentication/).
+
+6. **Rate limit middleware** applies token-bucket limits — per-IP for unauthenticated traffic, per-tenant for authenticated traffic, with per-path overrides. Exceeded buckets short-circuit with `429`. See [Rate Limiting](/architecture/rate-limiting/).
+
+7. **Huma handler** decodes the request body and path/query params, validates against the OpenAPI schema, and calls the registered handler function. Validation errors return `422` automatically. See [Handler Patterns](/guides/handler-patterns/).
+
+8. **Service layer** runs business logic in a fixed five-step shape: input validation → permission check → pre-hook → DB transaction (writes + audit + event emit) → post-hook / async side effects. The transaction sets `search_path` to the tenant schema as its first statement. See [Service Patterns](/guides/service-patterns/).
+
+9. **Repository layer** translates the service's intent into SQL via sqlx + squirrel. Repositories never reach across modules — cross-module reads go through the other module's service. See [Repository Patterns](/guides/repository-patterns/) and [Cross-Module Calls](/guides/cross-module-calls/).
+
+10. **PostgreSQL** executes inside the tenant's schema. The `public` schema is reachable as a fallback for platform tables (users, tenants, memberships).
+
+11. **Response unwinds the stack.** Huma serializes the return value, middleware finalizes the canonical log line, and the response is written to the client.
+
+</Steps>
+
+---
+
+## What Lives in the Request Context
+
+By the time the handler runs, the context carries:
+
+| Key | Set by | Used by |
+|---|---|---|
+| `request_id` | RequestID middleware | Everything downstream |
+| `session.user` | JWT middleware | Services for `created_by` / permission checks |
+| `session.tenant` | JWT middleware | DB layer to set `search_path` |
+| `session.permissions` | JWT middleware | Permission scoping in services |
+| `canonical_log` | Log middleware | Accumulated fields from every layer |
+
+Handlers and services pull these via `core.Sessions.Current(ctx)` — they never read raw context keys directly.
+
+---
+
+## Failure Paths
+
+| Status | When |
+|---|---|
+| `401` | JWT missing / invalid / expired |
+| `403` | Permission denied at service layer |
+| `404` | Resource missing under tenant schema |
+| `409` | Status engine rejects a transition |
+| `422` | Huma input validation fails |
+| `429` | Rate-limit bucket exhausted |
+| `500` | Panic caught by recovery (always logged with full stack) |
+
+<Aside type="tip">
+  Every non-2xx response carries a structured error body — `{ code, message, hint }`. See [Error Codes](/reference/error-codes/) for the full enumeration.
+</Aside>
+
+---
+
+## Related Flows
+
+- [Startup Lifecycle](/guides/flow-startup-lifecycle/) — how the middleware chain was wired.
+- [Event Propagation](/guides/flow-event-propagation/) — what happens to events emitted in Step 8.
