@@ -151,6 +151,22 @@ Every rule predicate sees the same env, populated on every `Reserve` / `Check`. 
 
 Compile errors are surfaced at write time so the admin sees them up front. Missing fields at runtime degrade to "no match" so a rule referencing `membership.role` is still safe to write — it just won't match for service-principal calls without a membership in context.
 
+### Field types and the `now()` idiom
+
+The validator infers a type per dotted path so admin-written predicates can mix string equality, numeric comparison, and time comparison cleanly:
+
+| Path pattern | Type | Example |
+|---|---|---|
+| `now.timestamp` | datetime | `now.timestamp>some.date_field` |
+| `now.hour` / `now.weekday` / `now.month` / `now.day` / `now.year` | integer | `now.weekday>=1 AND now.weekday<=5` |
+| `now.iso` / `now.weekday_str` | text | `now.weekday_str=Monday` |
+| `tenant.*` / `user.*` / `membership.*` / `plan.*` suffixed `_at` or `_date` | datetime | `tenant.metadata.trial_ends_at>now()` |
+| anything else under those roots | text | `tenant.metadata.region=EU` |
+
+For "is the trial still active," the idiomatic predicate is `tenant.metadata.trial_ends_at>now()` — `now()` evaluates the wall clock on each match, so the rule needs no maintenance as time passes. The `_at` / `_date` suffix is the signal that the metadata key holds a date; without it the value would be treated as text and the comparison wouldn't validate.
+
+Booleans in metadata are best expressed as string equality (`tenant.metadata.trial_active=yes`) or as a presence check (`tenant.metadata.beta_enrolled`) — direct boolean literals aren't supported under the current text-default convention.
+
 ### Example: split a plan limit by region
 
 ```http
@@ -179,7 +195,7 @@ POST /api/v1/tenants/tnt_acme/billing/rules
 {
   "metric_key": "conversations.messages",
   "priority": 100,
-  "condition": "tenant.metadata.trial=true AND now.timestamp<tenant.metadata.trial_ends_at",
+  "condition": "tenant.metadata.trial_ends_at>now()",
   "limit_value": 500,
   "reset_period": "day",
   "label": "Trial bump"
