@@ -4,6 +4,10 @@ description: How to translate a query AST into SQL, JSON, in-memory predicates, 
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import heroDark from '../../../assets/query-codegen-hero.webp';
+
+<Image src={heroDark} alt="One AST refracted through a prism into SQL, JSON, Go, MongoDB, and React JSX outputs" class="hero-dark" />
 
 A parsed query is a small AST in `query/ast`. The library hands you the tree and a typed visitor abstraction; you decide what to emit. The same input can drive a SQL `WHERE` clause, a MongoDB filter document, an Elasticsearch DSL query, a React filter component, or an in-memory `func(record) bool`.
 
