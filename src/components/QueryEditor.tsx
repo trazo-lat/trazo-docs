@@ -148,7 +148,7 @@ export default function QueryEditor() {
       parseError,
       roundtrip,
       validateErrors,
-      tokens: tokens.result ?? [],
+      tokens: Array.isArray(tokens.result) ? tokens.result : [],
     }));
   }, []);
 
