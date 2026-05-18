@@ -1,0 +1,505 @@
+---
+title: Using Entities in Modules
+description: How domain modules consume the entities foundation module — resolving the service, referencing entities as input, reading and searching data, managing relations, linking users, and reacting to entity lifecycle events.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The `entities` module is a foundation module that provides a configurable, per-tenant type system for real-world objects: vehicles, customers, patients, products, suppliers, and any custom types a tenant defines. Domain modules use entities as input by referencing them by `(type_name, public_id)` and resolving the `EntitiesService` at runtime.
+
+This guide shows the full surface a domain module can use, with working examples drawn from the platform's own modules.
+
+---
+
+## When to Use Entities (and When Not To)
+
+| Use entities when... | Use your own table when... |
+|---|---|
+| The shape of the record is tenant-configurable (custom fields per tenant) | The shape is fixed and uniform across tenants |
+| Multiple modules need to reference the same record (customer, vehicle, ...) | The record is internal to one module's domain |
+| You want CRUD, search, audit, permissions, and i18n for free | You need foreign-key constraints across rows the database enforces |
+| Tenants must be able to install or define the type via the UI | The structure is part of the platform's contract |
+
+A domain module that needs to **reference** an entity (a billing module referencing a `customer`, a repairs module referencing a `vehicle`) consumes entities. A module whose own data has fixed structure (an `invoice`, a `repair`, a `message`) owns its own table and references entities by ID.
+
+---
+
+## Declaring the Dependency
+
+Declare `entities` as a dependency in your `module.yaml`. The platform validates that the dependency is enabled at startup and refuses to load your module otherwise.
+
+```yaml
+# internal/modules/domain/<your-module>/module.yaml
+name: your-module
+version: "1.0.0"
+type: domain
+
+dependencies:
+  - entities
+```
+
+In `Init`, fail fast if the dependency is missing:
+
+```go
+func (m *Module) Init(c *core.Core) error {
+    m.core = c
+
+    if !c.Modules.Enabled(context.TODO(), "entities") {
+        return fmt.Errorf("your-module: required dependency %q not enabled", "entities")
+    }
+
+    // ... continue init
+    return nil
+}
+```
+
+---
+
+## Resolving the EntitiesService
+
+The entities module registers its service via `core.RegisterService[service.EntitiesService]("entities")`. Consumers retrieve it with the typed accessor.
+
+```go
+import (
+    entitiessvc "platform/internal/modules/foundation/entities/service"
+    entitiesmodel "platform/internal/modules/foundation/entities/model"
+)
+
+entities, err := core.GetService[entitiessvc.EntitiesService]("entities")
+if err != nil {
+    return fmt.Errorf("resolving entities service: %w", err)
+}
+```
+
+<Aside type="tip">
+  Resolve the service once during `Init` and store it on your service struct. Repeated lookups work but cost a registry lookup and a type assertion per call.
+</Aside>
+
+### Defining a Minimal Local Contract
+
+For testability, prefer defining the slice of the `EntitiesService` interface your module actually needs in a `deps.go` file inside your service package. Resolve and type-assert it at init time. This is the same pattern the entities module itself uses for the users module — see `internal/modules/foundation/entities/service/deps.go`.
+
+```go
+// internal/modules/domain/repairs/service/deps.go
+package service
+
+import (
+    "context"
+    "errors"
+
+    "platform/internal/core"
+    entmodel "platform/internal/modules/foundation/entities/model"
+)
+
+// entitiesLookup is the slice of EntitiesService that repairs needs.
+type entitiesLookup interface {
+    Get(ctx context.Context, typeName entmodel.EntityTypeName, id string) (*entmodel.Entity, error)
+    GetMany(ctx context.Context, typeName entmodel.EntityTypeName, ids []string) ([]entmodel.Entity, error)
+}
+
+var errEntitiesContract = errors.New("entities module does not satisfy lookup contract")
+
+func resolveEntities(c *core.Core) (entitiesLookup, error) {
+    svc, err := c.Modules.Service(core.ModuleName("entities"))
+    if err != nil {
+        return nil, err
+    }
+    el, ok := svc.(entitiesLookup)
+    if !ok {
+        return nil, errEntitiesContract
+    }
+    return el, nil
+}
+```
+
+Unit tests then inject a mock satisfying `entitiesLookup` without importing the entities package at all.
+
+---
+
+## Referencing an Entity as Input
+
+Most domain modules store an entity reference as a string field on their own row. The platform convention is to store the **public ID** (e.g. `cust_acme-corp`, `veh_toyota-camry-2024`) rather than the internal UUID — public IDs are stable, human-readable, and safe to expose in API responses.
+
+```go
+type CreateRepairInput struct {
+    VehicleID  string `json:"vehicle_id"  doc:"Public ID of the vehicle entity"`
+    CustomerID string `json:"customer_id" doc:"Public ID of the customer entity"`
+    Description string `json:"description"`
+}
+```
+
+Inside the service, validate that the referenced entities exist before persisting:
+
+```go
+func (s *Service) Create(ctx context.Context, input CreateRepairInput) (*Repair, error) {
+    // Step 1 — Validate input shape
+    if input.VehicleID == "" {
+        return nil, s.core.Errors.Validation("vehicle_id", "is required")
+    }
+    if input.CustomerID == "" {
+        return nil, s.core.Errors.Validation("customer_id", "is required")
+    }
+
+    // Step 2 — Check permission
+    if err := s.core.Permission.MustCan(ctx, "repairs.create"); err != nil {
+        return nil, err
+    }
+
+    // Validate FK references via the entities module
+    vehicle, err := s.entities.Get(ctx, "vehicle", input.VehicleID)
+    if err != nil {
+        return nil, fmt.Errorf("validating vehicle: %w", err)
+    }
+    if vehicle == nil {
+        return nil, s.core.Errors.NotFound("vehicle", input.VehicleID)
+    }
+
+    customer, err := s.entities.Get(ctx, "customer", input.CustomerID)
+    if err != nil {
+        return nil, fmt.Errorf("validating customer: %w", err)
+    }
+    if customer == nil {
+        return nil, s.core.Errors.NotFound("customer", input.CustomerID)
+    }
+
+    // ... continue with the standard 5-step pattern
+}
+```
+
+<Aside type="note">
+  The entities service already applies tenant scope and permission checks. A `Get` that returns `nil` means the entity does not exist *or* the caller cannot read it — either way, the safe response is a 404.
+</Aside>
+
+---
+
+## Reading Entity Data
+
+The `Entity` model carries fields and tenant-defined values in a `Data` JSONB blob. Field types are declared in the entity type's `Schema.Fields` and validated at write time, so reads can rely on the shape but should still handle missing optional fields defensively.
+
+```go
+// model.Entity (excerpt)
+type Entity struct {
+    ID       EntityID       // public ID, e.g. "cust_acme"
+    TypeName EntityTypeName // e.g. "customer"
+    Data     core.JSONB     // map[string]any of typed fields
+    UserID   *string        // set when linked to a user account
+    // ... timestamps, audit fields
+}
+```
+
+Read a single field from the JSONB blob:
+
+```go
+customer, err := s.entities.Get(ctx, "customer", input.CustomerID)
+if err != nil || customer == nil {
+    return nil, s.core.Errors.NotFound("customer", input.CustomerID)
+}
+
+email, _ := customer.Data["email"].(string)
+taxID, _ := customer.Data["tax_id"].(string)
+
+invoice.BillTo = BillToAddress{
+    Name:  fmt.Sprint(customer.Data["name"]),
+    Email: email,
+    TaxID: taxID,
+}
+```
+
+<Aside type="caution">
+  Always type-assert JSONB values with the comma-ok form. A field declared as `decimal` in the schema arrives as `float64`; an `integer` arrives as `float64` (JSON does not distinguish); a `select` arrives as `string`. Reading the schema via `entities.GetType` is the only way to know the exact intent — see [Discovering the Schema](#discovering-the-schema) below.
+</Aside>
+
+### Bulk Reads for List Views
+
+When rendering a list of your own rows that each reference an entity, batch the lookups with `GetMany` rather than calling `Get` in a loop:
+
+```go
+// Collect unique customer IDs from a page of invoices
+customerIDs := make([]string, 0, len(invoices))
+seen := map[string]bool{}
+for _, inv := range invoices {
+    if !seen[inv.CustomerID] {
+        seen[inv.CustomerID] = true
+        customerIDs = append(customerIDs, inv.CustomerID)
+    }
+}
+
+customers, err := s.entities.GetMany(ctx, "customer", customerIDs)
+if err != nil {
+    return nil, fmt.Errorf("loading customers: %w", err)
+}
+
+byID := make(map[string]*entmodel.Entity, len(customers))
+for i := range customers {
+    byID[string(customers[i].ID)] = &customers[i]
+}
+
+// Decorate each invoice with its customer label
+for i := range invoices {
+    if c := byID[invoices[i].CustomerID]; c != nil {
+        invoices[i].CustomerName, _ = c.Data["name"].(string)
+    }
+}
+```
+
+### Listing and Searching Entities
+
+For browsing or autocomplete inside your module's UI:
+
+```go
+// Paginated list of one type
+result, total, err := s.entities.List(ctx, "customer", entmodel.ListEntitiesParams{
+    Search: "acme",
+    Pagination: core.Pagination{Page: 1, PageSize: 25},
+})
+
+// Cross-type search powered by the platform search index
+results, total, err := s.entities.Search(ctx, entmodel.SearchParams{
+    TypeName: "vehicle", // optional; omit to search all types
+    Query:    "toyota camry",
+    Pagination: core.Pagination{Page: 1, PageSize: 10},
+})
+```
+
+---
+
+## Discovering the Schema
+
+Modules that render dynamic forms or validate input against the tenant's configured fields read the type definition:
+
+```go
+typ, err := s.entities.GetType(ctx, "customer")
+if err != nil {
+    return nil, err
+}
+
+for _, field := range typ.Schema.Fields {
+    // field.Name, field.Type ("text", "integer", "select", "image", "file", "document", ...)
+    // field.Required, field.Options (for "select"), field.Min/Max, field.Pattern
+}
+
+// The display label for an entity instance comes from this field
+labelField := typ.Config.LabelField
+```
+
+`ListTypes` returns every type the tenant has installed or defined. Useful when your module needs to declare which entity types it can target (a notification template selecting "any customer-like type", for instance).
+
+---
+
+## Managing Relations
+
+Relations are first-class. A relation definition describes how two entity types relate (`vehicle` `belongs_to` `customer`), and relation instances connect specific entities.
+
+```go
+// Create the definition once (typically as part of tenant setup)
+rd, err := s.entities.CreateRelationDef(ctx, entmodel.CreateRelationDefInput{
+    Name:       "owner",
+    SourceType: "vehicle",
+    TargetType: "customer",
+    Kind:       entmodel.RelationBelongsTo,
+    Required:   true,
+})
+
+// Link two specific entities
+rel, err := s.entities.CreateRelation(ctx, "vehicle", "veh_toyota-camry-2024",
+    entmodel.CreateRelationInput{
+        DefinitionID: string(rd.ID),
+        TargetID:     "cust_acme-corp",
+        Metadata: map[string]any{
+            "since": "2024-01-15",
+        },
+    },
+)
+
+// Read all relations for an entity (used when rendering a "Related" panel)
+relations, err := s.entities.ListRelations(ctx, "vehicle", "veh_toyota-camry-2024")
+```
+
+<Aside type="tip">
+  Relations live in the entities module — they don't appear in your module's tables. If you want a hard foreign key on your own row (e.g. an invoice that *must* point to one customer), store the public ID directly on the invoice. Use relations when the link is many-to-many, optional, carries metadata, or is configurable per tenant.
+</Aside>
+
+---
+
+## User-Linked Entities
+
+When a type sets `config.user_linkable: true`, an entity instance can be bound to a platform user account. This is how a `customer` or `patient` entity becomes the "principal" record for someone logging into the tenant.
+
+```go
+// Link a customer entity to a user
+ent, err := s.entities.LinkUser(ctx, "customer", "cust_acme",
+    entmodel.LinkUserInput{UserID: "usr_jane-doe"},
+)
+
+// Resolve the user behind an entity (returns *core.User)
+user, err := s.entities.GetLinkedUser(ctx, "customer", "cust_acme")
+
+// From the user's session: list their linked entities across types
+mine, err := s.entities.ListMyEntities(ctx)
+```
+
+A module that targets a specific user (sending a notification, scoping a query) can route by the linked entity rather than by user ID, which keeps tenant-facing IDs stable even if the underlying user account changes.
+
+---
+
+## Reacting to Entity Lifecycle Events
+
+The entities module emits domain events for every type and instance mutation. Subscribe in your `module.yaml` and handle them via the event bus.
+
+| Event | When it fires |
+|---|---|
+| `entities.type.created` | A new entity type is created (tenant-defined or installed from catalog) |
+| `entities.type.activated` / `entities.type.deactivated` | Type is enabled or disabled for CRUD |
+| `entities.created` / `entities.updated` / `entities.deleted` | An entity instance is created, updated, or soft-deleted |
+| `entities.relation.created` / `entities.relation.deleted` | An entity relation is created or removed |
+| `entities.user.linked` / `entities.user.unlinked` | A user account is linked or unlinked from an entity |
+
+```yaml
+# module.yaml
+events:
+  subscribes:
+    - event: entities.deleted
+      handler: OnEntityDeleted
+      async: true
+```
+
+```go
+// service.go
+func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
+    typeName, _ := ev.Payload["type_name"].(string)
+    publicID, _ := ev.Payload["public_id"].(string)
+
+    if typeName != "customer" {
+        return nil // not relevant to billing
+    }
+
+    // Detach the deleted customer from any open invoices
+    return s.repo.MarkCustomerDetached(ctx, publicID)
+}
+```
+
+<Aside type="caution">
+  Event handlers must be idempotent. The outbox processor retries on failure, and the same event may arrive more than once. Use the event ID (`ev.ID`) as an idempotency key when the side effect is not naturally idempotent.
+</Aside>
+
+---
+
+## Worked Example: Conversations Referencing a Participant
+
+The `conversations` module stores customer-facing chat threads. Each conversation has a `participant_id` that references a customer, patient, or any other tenant-defined entity type. The conversation row never duplicates the participant's name or email — it pulls them from the entity on read.
+
+```yaml
+# internal/modules/domain/conversations/module.yaml
+name: conversations
+type: domain
+dependencies:
+  - entities
+```
+
+```go
+// Display a conversation with its participant decorated
+func (s *Service) GetForDisplay(ctx context.Context, id string) (*ConversationView, error) {
+    conv, err := s.GetConversation(ctx, id)
+    if err != nil {
+        return nil, err
+    }
+
+    view := &ConversationView{Conversation: *conv}
+
+    if conv.ParticipantType != "" && conv.ParticipantID != "" {
+        entity, err := s.entities.Get(ctx, entmodel.EntityTypeName(conv.ParticipantType), conv.ParticipantID)
+        if err == nil && entity != nil {
+            view.ParticipantLabel, _ = entity.Data["name"].(string)
+            view.ParticipantEmail, _ = entity.Data["email"].(string)
+        }
+    }
+
+    return view, nil
+}
+```
+
+When the customer is renamed, the next conversation read reflects the change immediately — the conversations module stores nothing that can drift out of sync.
+
+---
+
+## Worked Example: Billing with a Tenant-Defined Customer Type
+
+The billing module needs the customer's tax ID and address to issue an invoice. The shape of "customer" varies by tenant: some tenants store `tax_id`, some `vat_number`, some both. Billing reads the schema once and pulls the field by name.
+
+```go
+type Service struct {
+    core     *core.Core
+    repo     *Repository
+    entities entitiesLookup // injected via deps.go
+}
+
+func (s *Service) IssueInvoice(ctx context.Context, invoiceID string) (*Invoice, error) {
+    inv, err := s.repo.Get(ctx, invoiceID)
+    if err != nil {
+        return nil, err
+    }
+
+    customer, err := s.entities.Get(ctx, "customer", inv.CustomerID)
+    if err != nil || customer == nil {
+        return nil, s.core.Errors.NotFound("customer", inv.CustomerID)
+    }
+
+    // Schema-aware field resolution: pick the tenant's configured tax field
+    typ, err := s.entities.GetType(ctx, "customer")
+    if err != nil {
+        return nil, err
+    }
+    taxFieldName := "tax_id"
+    for _, f := range typ.Schema.Fields {
+        if f.Name == "vat_number" {
+            taxFieldName = "vat_number"
+            break
+        }
+    }
+
+    inv.BillTo = BillToAddress{
+        Name:    fmt.Sprint(customer.Data["name"]),
+        Email:   stringField(customer.Data, "email"),
+        Address: stringField(customer.Data, "address"),
+        TaxID:   stringField(customer.Data, taxFieldName),
+    }
+
+    // ... continue issuing
+    return inv, nil
+}
+
+func stringField(data map[string]any, key string) string {
+    v, _ := data[key].(string)
+    return v
+}
+```
+
+---
+
+## Anti-Patterns
+
+| Anti-Pattern | Why It Breaks |
+|---|---|
+| Storing the entity's internal UUID instead of the public ID | Public IDs are the stable, human-readable contract; internal UUIDs leak implementation detail |
+| Caching `Entity.Data` across requests | Tenants can edit fields at any time; reads should hit the entities service |
+| Calling `s.entities.Get` inside a `for` loop over a list page | Use `GetMany` for bulk decoration |
+| Validating `Entity.Data` against a hardcoded shape in your module | Read `Schema.Fields` from `GetType` — the tenant may have changed the type |
+| Subscribing to `entities.updated` and writing back into the entity | Creates feedback loops; use hooks (`entities.before_update`) for synchronous validation instead |
+| Failing your module's `Init` silently when the entities service resolves to `nil` | Make the dependency explicit in `module.yaml` and return a hard error |
+
+---
+
+## API Surface at a Glance
+
+The full `EntitiesService` interface lives at `internal/modules/foundation/entities/service/interface.go`. A condensed reference:
+
+| Group | Methods |
+|---|---|
+| **Catalog** | `ListCatalog`, `InstallFromCatalog` |
+| **Types** | `GetType`, `ListTypes`, `CreateType`, `UpdateType`, `ActivateType`, `DeactivateType`, `DeleteType` |
+| **Entities** | `Get`, `GetMany`, `List`, `Create`, `Update`, `Delete` |
+| **Relations** | `ListRelationDefs`, `CreateRelationDef`, `GetRelationDef`, `UpdateRelationDef`, `DeleteRelationDef`, `ListRelations`, `CreateRelation`, `DeleteRelation` |
+| **Search** | `Search` |
+| **User linking** | `LinkUser`, `UnlinkUser`, `GetLinkedUser`, `ListMyEntities` |
+
+See [Cross-Module Calls](/guides/cross-module-calls/) for the general pattern of consuming any module's service, and [Service Patterns](/guides/service-patterns/) for the surrounding 5-step structure your own service methods should follow.
