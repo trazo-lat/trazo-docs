@@ -103,6 +103,7 @@ export default defineConfig({
               items: [
                 { label: 'Audit Trail', slug: 'architecture/audit-trail' },
                 { label: 'File Storage', slug: 'architecture/storage' },
+                { label: 'Quotas and Usage', slug: 'architecture/quotas' },
               ],
             },
           ],
