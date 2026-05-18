@@ -4,6 +4,12 @@ description: Working queries for common search and filter patterns, with the dat
 ---
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import heroDark from '../../../assets/query-examples-hero.webp';
+import heroLight from '../../../assets/query-examples-hero-light.webp';
+
+<Image src={heroDark}  alt="Five query fragments composing into one assembled expression" class="hero-dark" />
+<Image src={heroLight} alt="Five query fragments composing into one assembled expression" class="hero-light" />
 
 Every snippet on this page is a real query that compiles against the field schemas shown. The runnable equivalents live in [`examples/`](https://github.com/heyllave/query/tree/main/examples) in the query repo — `go run ./examples/<name>` prints the output.
 

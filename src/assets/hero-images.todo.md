@@ -8,8 +8,8 @@ maps to a page and a pair of WebP files (dark + light variants).
 | Page | Dark variant | Light variant | Prompt file |
 |------|--------------|---------------|-------------|
 | `query/overview` | ✅ `query-overview-hero.webp` (Gemini) | ✅ `query-overview-hero-light.webp` (Gemini) | `/tmp/query-hero-overview.md` |
-| `query/syntax` | ⬜ `query-syntax-hero.webp` | ✅ `query-syntax-hero-light.webp` (Gemini, has @last duplicate in Row 4 — acceptable for now) | `/tmp/query-hero-syntax.md` |
-| `query/examples` | ⬜ `query-examples-hero.webp` | ⬜ `query-examples-hero-light.webp` | `/tmp/query-hero-examples.md` |
+| `query/syntax` | ✅ `query-syntax-hero.webp` (Gemini, `@first` duplicate in Row 4 — acceptable per current decision) | ✅ `query-syntax-hero-light.webp` (Gemini, `@last` duplicate in Row 4 — acceptable per current decision) | `/tmp/query-hero-syntax.md` |
+| `query/examples` | ✅ `query-examples-hero.webp` (Gemini) | ✅ `query-examples-hero-light.webp` (Gemini) | `/tmp/query-hero-examples.md` |
 | `query/codegen` | ⬜ `query-codegen-hero.webp` | ⬜ `query-codegen-hero-light.webp` | `/tmp/query-hero-codegen.md` |
 | `query/faq` | ⬜ `query-faq-hero.webp` | ⬜ `query-faq-hero-light.webp` | `/tmp/query-hero-faq.md` |
 | `query/coverage` | ✅ `query-coverage-hero.webp` (Gemini) | ⬜ `query-coverage-hero-light.webp` | `/tmp/query-hero-coverage.md` |

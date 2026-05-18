@@ -5,9 +5,11 @@ description: Complete reference for every operator, value type, and grammatical 
 
 import { Aside } from '@astrojs/starlight/components';
 import { Image } from 'astro:assets';
+import heroDark from '../../../assets/query-syntax-hero.webp';
 import heroLight from '../../../assets/query-syntax-hero-light.webp';
 
-<Image src={heroLight} alt="Query operators and value types laid out as a periodic table" />
+<Image src={heroDark}  alt="Query operators and value types laid out as a periodic table" class="hero-dark" />
+<Image src={heroLight} alt="Query operators and value types laid out as a periodic table" class="hero-light" />
 
 This page is the canonical reference for what parses. If something compiles here and fails at runtime, it's an evaluation issue (missing field, type coercion) — not a syntax issue. For higher-level patterns and worked examples, see [Examples](/query/examples/).
 
