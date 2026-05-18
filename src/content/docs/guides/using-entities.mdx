@@ -1,6 +1,6 @@
 ---
 title: Using Entities in Modules
-description: How domain modules consume the entities foundation module — resolving the service, referencing entities as input, reading and searching data, managing relations, linking users, and reacting to entity lifecycle events.
+description: How domain modules consume the entities foundation module — resolving the service, referencing entities as input, targeting tenant-configurable types, reading data, managing relations, linking users, and reacting to entity lifecycle events.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -80,7 +80,7 @@ if err != nil {
 For testability, prefer defining the slice of the `EntitiesService` interface your module actually needs in a `deps.go` file inside your service package. Resolve and type-assert it at init time. This is the same pattern the entities module itself uses for the users module — see `internal/modules/foundation/entities/service/deps.go`.
 
 ```go
-// internal/modules/domain/repairs/service/deps.go
+// internal/modules/domain/service-orders/service/deps.go
 package service
 
 import (
@@ -91,10 +91,11 @@ import (
     entmodel "platform/internal/modules/foundation/entities/model"
 )
 
-// entitiesLookup is the slice of EntitiesService that repairs needs.
+// entitiesLookup is the slice of EntitiesService that service-orders needs.
 type entitiesLookup interface {
     Get(ctx context.Context, typeName entmodel.EntityTypeName, id string) (*entmodel.Entity, error)
     GetMany(ctx context.Context, typeName entmodel.EntityTypeName, ids []string) ([]entmodel.Entity, error)
+    GetType(ctx context.Context, typeName entmodel.EntityTypeName) (*entmodel.EntityType, error)
 }
 
 var errEntitiesContract = errors.New("entities module does not satisfy lookup contract")
@@ -122,8 +123,8 @@ Most domain modules store an entity reference as a string field on their own row
 
 ```go
 type CreateRepairInput struct {
-    VehicleID  string `json:"vehicle_id"  doc:"Public ID of the vehicle entity"`
-    CustomerID string `json:"customer_id" doc:"Public ID of the customer entity"`
+    VehicleID   string `json:"vehicle_id"  doc:"Public ID of the vehicle entity"`
+    CustomerID  string `json:"customer_id" doc:"Public ID of the customer entity"`
     Description string `json:"description"`
 }
 ```
@@ -168,6 +169,10 @@ func (s *Service) Create(ctx context.Context, input CreateRepairInput) (*Repair,
 
 <Aside type="note">
   The entities service already applies tenant scope and permission checks. A `Get` that returns `nil` means the entity does not exist *or* the caller cannot read it — either way, the safe response is a 404.
+</Aside>
+
+<Aside type="caution">
+  The example above hardcodes `"vehicle"` and `"customer"`, which only fits a module dedicated to one type. If your module is generic — service orders, tickets, assignments — and different tenants target different types (auto shops service vehicles, clinics service patients), read [Targeting a Tenant-Configurable Entity Type](#targeting-a-tenant-configurable-entity-type) below.
 </Aside>
 
 ---
@@ -282,7 +287,210 @@ for _, field := range typ.Schema.Fields {
 labelField := typ.Config.LabelField
 ```
 
-`ListTypes` returns every type the tenant has installed or defined. Useful when your module needs to declare which entity types it can target (a notification template selecting "any customer-like type", for instance).
+`ListTypes` returns every type the tenant has installed or defined. Useful when your module needs to declare which entity types it can target (a notification template selecting "any customer-like type", for instance), or when populating a tenant-admin dropdown to configure the target type for a generic module.
+
+---
+
+## Targeting a Tenant-Configurable Entity Type
+
+Some modules don't know upfront which entity type they target. A "service orders" module for an auto shop services `vehicle` entities; the same module for a clinic services `patient` entities; a property-management tenant might service `unit` entities they defined themselves. The module itself cannot hardcode the type — the tenant chooses.
+
+The platform supports three patterns for this. Pick based on whether one tenant ever services multiple types simultaneously, and how independent the per-type lifecycle is.
+
+### Pattern A — Polymorphic Per-Row
+
+Store both `entity_type` and `entity_id` columns on each of your own rows. Different rows in the same tenant can target different types. The module is type-agnostic at compile time.
+
+**Migration:**
+
+```sql
+-- migrations/modules/service_orders.sql
+CREATE TABLE IF NOT EXISTS service_orders (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    public_id       TEXT NOT NULL UNIQUE,
+    tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    entity_type     TEXT NOT NULL,
+    entity_id       TEXT NOT NULL,
+    description     TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'open',
+    assigned_to     UUID,
+    created_by      UUID NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at      TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_orders_entity
+    ON service_orders(entity_type, entity_id)
+    WHERE deleted_at IS NULL;
+```
+
+**Input and validation:**
+
+```go
+type CreateServiceOrderInput struct {
+    EntityType  string `json:"entity_type" doc:"Entity type name, e.g. vehicle or patient"`
+    EntityID    string `json:"entity_id"   doc:"Public ID of the target entity"`
+    Description string `json:"description"`
+}
+
+func (s *Service) Create(ctx context.Context, input CreateServiceOrderInput) (*ServiceOrder, error) {
+    if input.EntityType == "" {
+        return nil, s.core.Errors.Validation("entity_type", "is required")
+    }
+    if input.EntityID == "" {
+        return nil, s.core.Errors.Validation("entity_id", "is required")
+    }
+
+    // Validate the type exists and is active for this tenant
+    typ, err := s.entities.GetType(ctx, entmodel.EntityTypeName(input.EntityType))
+    if err != nil {
+        return nil, err
+    }
+    if typ == nil || !typ.Active {
+        return nil, s.core.Errors.Validation("entity_type", "unknown or inactive")
+    }
+
+    // Optional: restrict to a tenant-configured allow-list of types
+    allowed := core.SettingStringList(ctx, s.core.Config,
+        "service-orders", "allowed_entity_types", nil)
+    if len(allowed) > 0 && !slices.Contains(allowed, input.EntityType) {
+        return nil, s.core.Errors.Validation("entity_type", "not allowed by tenant settings")
+    }
+
+    // Validate the FK
+    target, err := s.entities.Get(ctx, typ.TypeName, input.EntityID)
+    if err != nil {
+        return nil, err
+    }
+    if target == nil {
+        return nil, s.core.Errors.NotFound(input.EntityType, input.EntityID)
+    }
+
+    // ... persist with both entity_type and entity_id
+}
+```
+
+**Allow-list setting in `module.yaml`:**
+
+```yaml
+settings:
+  - key: allowed_entity_types
+    type: string_list
+    default: []
+    description: Entity types this module may target. Empty list means all active types.
+```
+
+**Bulk decoration in list views** — group your rows by `entity_type` and `GetMany` per group:
+
+```go
+type ServiceOrderView struct {
+    ServiceOrder
+    EntityLabel string `json:"entity_label,omitempty"`
+}
+
+func (s *Service) ListForDisplay(ctx context.Context, filter ListFilter) ([]ServiceOrderView, error) {
+    orders, _, err := s.repo.List(ctx, filter)
+    if err != nil {
+        return nil, err
+    }
+
+    // Group entity IDs by type so we can batch lookups per type
+    byType := map[string][]string{}
+    for _, o := range orders {
+        byType[o.EntityType] = append(byType[o.EntityType], o.EntityID)
+    }
+
+    // Resolve labels per type
+    labels := map[string]string{} // keyed by "<type>:<id>"
+    for typeName, ids := range byType {
+        ents, err := s.entities.GetMany(ctx, entmodel.EntityTypeName(typeName), ids)
+        if err != nil {
+            return nil, err
+        }
+        typ, _ := s.entities.GetType(ctx, entmodel.EntityTypeName(typeName))
+        labelField := "name"
+        if typ != nil && typ.Config.LabelField != "" {
+            labelField = string(typ.Config.LabelField)
+        }
+        for i := range ents {
+            label, _ := ents[i].Data[labelField].(string)
+            labels[typeName+":"+string(ents[i].ID)] = label
+        }
+    }
+
+    views := make([]ServiceOrderView, len(orders))
+    for i, o := range orders {
+        views[i] = ServiceOrderView{
+            ServiceOrder: o,
+            EntityLabel:  labels[o.EntityType+":"+o.EntityID],
+        }
+    }
+    return views, nil
+}
+```
+
+<Aside type="tip">
+  Pattern A is the right answer for "service orders", "tickets", "assignments", "tasks", and other modules where the target can vary per row even within one tenant.
+</Aside>
+
+### Pattern B — Single Tenant-Configured Type
+
+When a given tenant always targets exactly one type — set during onboarding and rarely changed — store the type as a tenant setting and only the entity ID on each row. Your migration stays simple.
+
+**`module.yaml`:**
+
+```yaml
+settings:
+  - key: target_entity_type
+    type: string
+    default: ""
+    description: |
+      The entity type this module targets for this tenant
+      (e.g. "vehicle" for an auto shop, "patient" for a clinic).
+```
+
+**Service:**
+
+```go
+func (s *Service) Create(ctx context.Context, input CreateInput) (*Order, error) {
+    targetType := core.SettingString(ctx, s.core.Config,
+        "service-orders", "target_entity_type", "")
+    if targetType == "" {
+        return nil, s.core.Errors.Module(
+            "SERVICE_ORDERS.CONFIG.MISSING_TARGET_TYPE", 412,
+            "Set target_entity_type before creating service orders.")
+    }
+
+    target, err := s.entities.Get(ctx, entmodel.EntityTypeName(targetType), input.EntityID)
+    if err != nil || target == nil {
+        return nil, s.core.Errors.NotFound(targetType, input.EntityID)
+    }
+    // ... persist with just entity_id (type is implicit from the setting)
+}
+```
+
+<Aside type="caution">
+  Changing the setting after rows exist invalidates the existing rows' references — they now point into a different type's namespace. Treat `target_entity_type` as install-time configuration, not a runtime toggle. If a tenant needs to switch, that's a data migration, not a settings change.
+</Aside>
+
+### Pattern C — Multi-Instance Modules
+
+The platform's multi-instance system creates separate tables, permissions, and events per instance. An auto shop tenant installs `service-orders-vehicles`; a clinic installs `service-orders-patients`. Each instance carries its own `target_entity_type` config and runs independently.
+
+See [Multi-Instance Modules](/architecture/multi-instance-modules/). Choose this when:
+
+- Permissions, status machines, or settings must differ by type (e.g. patients need HIPAA-flavored workflows that vehicles don't)
+- Cross-instance reporting is acceptable via wildcard event subscriptions (`service-orders.*.created`)
+- The lifecycle of orders against vehicles is materially different from orders against patients
+
+### Choosing Between Them
+
+| If... | Use |
+|---|---|
+| One tenant services exactly one type, decided at install time | **B** (setting) |
+| One tenant services multiple types, mixed in the same list view | **A** (polymorphic) |
+| Each type needs different permissions, status machines, or events | **C** (multi-instance) |
 
 ---
 
@@ -364,17 +572,13 @@ events:
 ```
 
 ```go
-// service.go
+// service.go — works for both Pattern A (polymorphic) and Pattern B (single type)
 func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
     typeName, _ := ev.Payload["type_name"].(string)
     publicID, _ := ev.Payload["public_id"].(string)
 
-    if typeName != "customer" {
-        return nil // not relevant to billing
-    }
-
-    // Detach the deleted customer from any open invoices
-    return s.repo.MarkCustomerDetached(ctx, publicID)
+    // Detach the deleted entity from any open service orders that referenced it
+    return s.repo.MarkEntityDetached(ctx, typeName, publicID)
 }
 ```
 
@@ -384,47 +588,83 @@ func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
 
 ---
 
-## Worked Example: Conversations Referencing a Participant
+## Worked Example: Service Orders (Polymorphic Per-Row)
 
-The `conversations` module stores customer-facing chat threads. Each conversation has a `participant_id` that references a customer, patient, or any other tenant-defined entity type. The conversation row never duplicates the participant's name or email — it pulls them from the entity on read.
+A "service orders" module needs to work for an auto shop (target: `vehicle`), a clinic (target: `patient`), and a property-management tenant (target: a custom `unit` type they defined). Pattern A keeps the module shippable as-is to all three.
+
+**`module.yaml`:**
 
 ```yaml
-# internal/modules/domain/conversations/module.yaml
-name: conversations
+name: service-orders
 type: domain
 dependencies:
   - entities
+
+settings:
+  - key: allowed_entity_types
+    type: string_list
+    default: []
+    description: Entity types this tenant may target. Empty means all active types.
+
+permissions:
+  - key: service-orders.read.all
+  - key: service-orders.create
+  - key: service-orders.update.all
 ```
 
+**Service `Create`:**
+
 ```go
-// Display a conversation with its participant decorated
-func (s *Service) GetForDisplay(ctx context.Context, id string) (*ConversationView, error) {
-    conv, err := s.GetConversation(ctx, id)
-    if err != nil {
+func (s *Service) Create(ctx context.Context, input CreateInput) (*Order, error) {
+    if input.EntityType == "" {
+        return nil, s.core.Errors.Validation("entity_type", "is required")
+    }
+    if input.EntityID == "" {
+        return nil, s.core.Errors.Validation("entity_id", "is required")
+    }
+    if err := s.core.Permission.MustCan(ctx, "service-orders.create"); err != nil {
         return nil, err
     }
 
-    view := &ConversationView{Conversation: *conv}
-
-    if conv.ParticipantType != "" && conv.ParticipantID != "" {
-        entity, err := s.entities.Get(ctx, entmodel.EntityTypeName(conv.ParticipantType), conv.ParticipantID)
-        if err == nil && entity != nil {
-            view.ParticipantLabel, _ = entity.Data["name"].(string)
-            view.ParticipantEmail, _ = entity.Data["email"].(string)
-        }
+    typ, err := s.entities.GetType(ctx, entmodel.EntityTypeName(input.EntityType))
+    if err != nil {
+        return nil, err
+    }
+    if typ == nil || !typ.Active {
+        return nil, s.core.Errors.Validation("entity_type", "unknown or inactive")
     }
 
-    return view, nil
+    allowed := core.SettingStringList(ctx, s.core.Config,
+        "service-orders", "allowed_entity_types", nil)
+    if len(allowed) > 0 && !slices.Contains(allowed, input.EntityType) {
+        return nil, s.core.Errors.Validation("entity_type", "not allowed")
+    }
+
+    target, err := s.entities.Get(ctx, typ.TypeName, input.EntityID)
+    if err != nil || target == nil {
+        return nil, s.core.Errors.NotFound(input.EntityType, input.EntityID)
+    }
+
+    // ... 5-step pattern: hook, tx insert + EmitTx, audit, log
 }
 ```
 
-When the customer is renamed, the next conversation read reflects the change immediately — the conversations module stores nothing that can drift out of sync.
+**Tenant configuration examples:**
+
+| Tenant | `allowed_entity_types` setting |
+|---|---|
+| `auto-shop-tenant` | `["vehicle"]` |
+| `clinic-tenant` | `["patient"]` |
+| `mixed-services-tenant` | `["vehicle", "appliance", "boat"]` |
+| `property-mgmt-tenant` (custom type) | `["unit"]` |
+
+Each tenant sees the same module, the same API, the same UI — but the dropdown of allowed target types is driven entirely by their settings.
 
 ---
 
 ## Worked Example: Billing with a Tenant-Defined Customer Type
 
-The billing module needs the customer's tax ID and address to issue an invoice. The shape of "customer" varies by tenant: some tenants store `tax_id`, some `vat_number`, some both. Billing reads the schema once and pulls the field by name.
+The billing module is the inverse case: it always targets `customer`, but the *shape* of `customer` varies by tenant. Some tenants store `tax_id`, some `vat_number`, some both. Billing reads the schema and pulls the field by name.
 
 ```go
 type Service struct {
@@ -474,18 +714,22 @@ func stringField(data map[string]any, key string) string {
 }
 ```
 
+Billing hardcodes `"customer"` because every billing tenant has a customer concept — that's the contract billing requires. The customer's *fields* are tenant-configurable; the *type name* is not. Contrast with service orders, where even the type name is tenant-configurable.
+
 ---
 
 ## Anti-Patterns
 
 | Anti-Pattern | Why It Breaks |
 |---|---|
+| Hardcoding a single entity type in a generic module | Different tenants need different target types — use Pattern A, B, or C |
 | Storing the entity's internal UUID instead of the public ID | Public IDs are the stable, human-readable contract; internal UUIDs leak implementation detail |
 | Caching `Entity.Data` across requests | Tenants can edit fields at any time; reads should hit the entities service |
-| Calling `s.entities.Get` inside a `for` loop over a list page | Use `GetMany` for bulk decoration |
+| Calling `s.entities.Get` inside a `for` loop over a list page | Use `GetMany` for bulk decoration; group by `entity_type` first when polymorphic |
 | Validating `Entity.Data` against a hardcoded shape in your module | Read `Schema.Fields` from `GetType` — the tenant may have changed the type |
 | Subscribing to `entities.updated` and writing back into the entity | Creates feedback loops; use hooks (`entities.before_update`) for synchronous validation instead |
 | Failing your module's `Init` silently when the entities service resolves to `nil` | Make the dependency explicit in `module.yaml` and return a hard error |
+| Changing `target_entity_type` (Pattern B) after rows exist | Existing rows now point into a different type's namespace — treat the setting as install-time only |
 
 ---
 
@@ -502,4 +746,6 @@ The full `EntitiesService` interface lives at `internal/modules/foundation/entit
 | **Search** | `Search` |
 | **User linking** | `LinkUser`, `UnlinkUser`, `GetLinkedUser`, `ListMyEntities` |
 
-See [Cross-Module Calls](/guides/cross-module-calls/) for the general pattern of consuming any module's service, and [Service Patterns](/guides/service-patterns/) for the surrounding 5-step structure your own service methods should follow.
+All entity-level methods (`Get`, `GetMany`, `List`, `Create`, `Update`, `Delete`, `ListRelations`, ...) require an `EntityTypeName` argument. Modules that don't know the type at compile time read it from a setting (Pattern B), from a per-row column (Pattern A), or from their instance config (Pattern C).
+
+See [Cross-Module Calls](/guides/cross-module-calls/) for the general pattern of consuming any module's service, [Multi-Instance Modules](/architecture/multi-instance-modules/) for Pattern C, and [Service Patterns](/guides/service-patterns/) for the surrounding 5-step structure your own service methods should follow.
