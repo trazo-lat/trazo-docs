@@ -4,6 +4,12 @@ description: Answers to the questions that come up when integrating the query la
 ---
 
 import { Aside } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import heroDark from '../../../assets/query-faq-hero.webp';
+import heroLight from '../../../assets/query-faq-hero-light.webp';
+
+<Image src={heroDark}  alt="A magnifying glass over a truncated int/float comparison, beside three real Q-and-A cards" class="hero-dark" />
+<Image src={heroLight} alt="A magnifying glass over a truncated int/float comparison, beside three real Q-and-A cards" class="hero-light" />
 
 The semantics below are verified against the actual matcher. Each answer is followed by a short example you can paste into [`go run ./examples/sql`](https://github.com/heyllave/query/tree/main/examples/sql) or any other example program to reproduce.
 
