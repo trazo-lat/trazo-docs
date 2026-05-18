@@ -88,6 +88,7 @@ Content-Type: application/json
 |---|---|---|
 | `limit_value` | yes | `-1` for unlimited; `0` for hard-zero (disabled); positive caps usage. |
 | `reset_period` | meters only | `none` / `day` / `month` / `year`. |
+| `grace_pct` | no | Integer 0..100. Allows usage up to `limit * (1 + grace_pct/100)` before hard-denying. See [Soft Limits & Thresholds](/billing/thresholds). |
 | `reason` | no | Free-text justification surfaced in admin UI and audit log. |
 | `expires_at` | no | When set, the override stops applying after this timestamp. The resolver treats expired rows as absent. |
 

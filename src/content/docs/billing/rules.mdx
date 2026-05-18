@@ -55,6 +55,7 @@ Content-Type: application/json
 | `condition` | no | A query predicate. Empty = always match. |
 | `limit_value` | yes | `-1` unlimited, `0` hard-zero, positive cap. |
 | `reset_period` | meters only | `none` / `day` / `month` / `year`. |
+| `grace_pct` | no | Integer 0..100. When this rule matches, allows usage up to `limit * (1 + grace_pct/100)` before hard-denying. Overrides any plan-level grace. See [Soft Limits & Thresholds](/billing/thresholds). |
 | `label` | no | Human-readable name; surfaced in `QuotaDecision.rule_label` and the admin UI. |
 | `enabled` | no (default true) | Disable a rule without deleting it. |
 | `metadata` | no | Opaque JSONB; useful for tagging which workflow created the rule. |

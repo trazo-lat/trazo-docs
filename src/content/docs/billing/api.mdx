@@ -103,12 +103,27 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
      -d '{
        "metric_key": "conversations.messages",
        "limit_value": 10000,
-       "reset_period": "month"
+       "reset_period": "month",
+       "grace_pct": 10
      }' \
      https://api.example.com/api/v1/billing/plans/pro/quotas
 ```
 
-Upsert by `(plan_id, metric_key)`. Re-POSTing the same metric replaces the existing limit.
+Upsert by `(plan_id, metric_key)`. Re-POSTing the same metric replaces the existing limit. `grace_pct` is optional (default 0); see [Soft Limits & Thresholds](/billing/thresholds#declaring-grace-on-a-limit).
+
+### Clone a plan
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "new_slug": "pro-2026",
+       "new_name": "Pro 2026"
+     }' \
+     https://api.example.com/api/v1/billing/plans/pro/clone
+```
+
+Copies the plan **and** every `plan_quotas` row to a new slug. Useful for "duplicate pro to pro-2026 and tweak" without re-entering every quota line. Returns `201 Created` with the new plan. `new_name` defaults to the source plan's name with " (copy)" appended.
 
 ### Delete a plan quota line
 
@@ -187,13 +202,38 @@ curl -X PUT -H "Authorization: Bearer $TOKEN" \
      -d '{
        "limit_value": 15000,
        "reset_period": "month",
+       "grace_pct": 25,
        "reason": "approved expansion for May launch",
        "expires_at": "2026-06-01T00:00:00Z"
      }' \
      https://api.example.com/api/v1/tenants/tnt_acme/billing/overrides/conversations.messages
 ```
 
-The `metric_key` lives in the URL — re-PUTting the same path is idempotent. Use `limit_value: -1` for unlimited, `0` for hard-zero.
+The `metric_key` lives in the URL — re-PUTting the same path is idempotent. Use `limit_value: -1` for unlimited, `0` for hard-zero. `grace_pct` is optional (default 0); see [Soft Limits & Thresholds](/billing/thresholds#declaring-grace-on-a-limit).
+
+### Bulk set the same override across many tenants
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "tenant_ids": ["tnt_acme", "tnt_globex", "tnt_initech"],
+       "metric_key": "conversations.messages",
+       "limit_value": 50000,
+       "reset_period": "month",
+       "reason": "fleet-wide bump for Q3 push"
+     }' \
+     https://api.example.com/api/v1/billing/admin/bulk-overrides
+```
+
+```json
+{
+  "applied": 3,
+  "errors": {}
+}
+```
+
+Returns `200 OK` with `applied` + per-tenant `errors` map for partial failures. Returns `404 Not Found` when zero tenants match. Permission `billing.assign`.
 
 ### Delete an override
 
@@ -345,6 +385,31 @@ Every registered metric appears in the snapshot. `source` carries the provenance
 
 `remaining: -1` is the sentinel for "unlimited" (counter/meter with `limit: -1`, or any flag — flags don't track usage).
 
+Soft-limit fields (`warning`, `warn_at_pct`, `effective_cap`, `grace_pct`, `grace_active`) appear on every snapshot when the matched metric / limit source declared them; see [Soft Limits & Thresholds → Decision shape](/billing/thresholds#decision-shape).
+
+### Dry-run a reservation
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{
+       "metric_key": "conversations.messages",
+       "amount": 500
+     }' \
+     https://api.example.com/api/v1/tenants/tnt_acme/billing/usage/dry-run
+```
+
+Returns the same `QuotaDecision` `Reserve` would produce, but without mutating usage. Permission `billing.usage.read`. Useful for "would this 500-row import fit?" previews before triggering the work.
+
+### Audit log
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://api.example.com/api/v1/tenants/tnt_acme/billing/audit?since=2026-05-01T00:00:00Z&event_name=billing.quota.exceeded&limit=100"
+```
+
+Immutable per-tenant log of every threshold crossing, quota-exceeded hit, period rollover, and contract lifecycle event. Permission `billing.usage.read`. Full filter + payload reference on the [Audit Log page](/billing/audit).
+
 ## Error responses
 
 Errors follow the platform's structured-error format. The HTTP status comes from the `Status` field on the `*core.Error`.
@@ -354,6 +419,11 @@ Errors follow the platform's structured-error format. The HTTP status comes from
 | `CORE.QUOTA.EXCEEDED` | 402 | A counter or meter reservation would exceed the limit. Body includes `field` (the metric key) and `params` with `current` / `limit` / `requested` / `plan`. |
 | `CORE.QUOTA.DISABLED` | 402 | A flag metric is off for the tenant. Body includes `field` (the metric key). |
 | `CORE.QUOTA.NO_TENANT` | 500 | A counter/meter operation reached the engine without a tenant in context. |
+| `CORE.CONTRACT.ACTIVE_EXISTS` | 409 | `Contracts.Create` called for a tenant that already has an active contract. |
+| `CORE.CONTRACT.NOT_FOUND` | 404 | Contract public ID does not exist. |
+| `CORE.CONTRACT.NOT_RENEWABLE` | 422 | `Contracts.Renew` called on a cancelled or expired contract. |
+| `CORE.CONTRACT.PLAN_NOT_FOUND` | 404 | Plan slug referenced by a contract create/renew does not exist. |
+| Policy violations | (caller-defined) | When `core.Policies.Check` returns a deny match, the calling module translates the violation to its own `*core.Error` using the policy's `violation_code`. See [Policies](/billing/policies). |
 | `CORE.AUTHORIZATION.FORBIDDEN` | 403 | Caller lacks one of the `billing.*` permissions. |
 | `CORE.NOT_FOUND.PLAN` | 404 | Plan slug doesn't exist (on GET/PATCH/DELETE/PUT). |
 | `CORE.NOT_FOUND.RULE` | 404 | Rule public ID doesn't exist for the addressed tenant. |

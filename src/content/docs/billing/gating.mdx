@@ -147,6 +147,45 @@ if _, qErr := s.core.Quotas.Reserve(ctx, key, amount); qErr != nil {
 }
 ```
 
+### Soft-limit decision fields
+
+When a metric declares `warn_at_pct` (in `module.yaml`) or a matched limit source declares `grace_pct`, every successful Reserve also carries soft-limit state — so the caller can surface a warning *before* a hard 402:
+
+```go
+decision, err := s.core.Quotas.Reserve(ctx, "conversations.messages", 1)
+if err != nil {
+    return nil, err
+}
+// decision.Allowed is true at this point.
+
+if decision.GraceActive {
+    // Usage is between Limit and EffectiveCap. The reservation went through
+    // because of plan/override/rule grace — flag for billing review.
+    s.core.Events.Emit(ctx, core.Event{
+        Name: "conversations.message_sent_in_grace",
+        Payload: map[string]any{
+            "metric_key":    decision.MetricKey,
+            "current":       decision.Current,
+            "limit":         decision.Limit,
+            "effective_cap": decision.EffectiveCap,
+        },
+    })
+} else if decision.Warning {
+    // Crossed warn_at_pct of the limit — surface to the admin UI.
+    s.core.Log.Logger(ctx).WithModule("conversations").Warn(
+        "approaching quota cap",
+        map[string]any{
+            "metric_key":  decision.MetricKey,
+            "current":     decision.Current,
+            "limit":       decision.Limit,
+            "warn_at_pct": decision.WarnAtPct,
+        },
+    )
+}
+```
+
+The full decision shape is documented under [Soft Limits & Thresholds → Decision shape](/billing/thresholds#decision-shape). The engine *also* fires `billing.quota.threshold_crossed` / `.exceeded` / `.period_rolled` on the transactional outbox at the same boundaries — subscribe via `core.Events.SubscribeScoped` if you want notifications fanned out without the calling module knowing about them.
+
 ## Transactional rollback inside `core.DB.Tx`
 
 When the resource insert lives inside a transaction, the reservation lives outside it. The engine's `Reserve` opens its own short transaction; the surrounding business `Tx` does not roll back the reservation.

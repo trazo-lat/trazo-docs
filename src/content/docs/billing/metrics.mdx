@@ -40,6 +40,7 @@ quotas:
 | `default_reset` | meters only | `day` \| `month` \| `year` | Rolling-window length. Ignored for counters and flags. |
 | `unit` | no | string | Display unit (e.g. `users`, `messages`, `bytes`). |
 | `description` | no | string | Tooltip / API documentation copy. |
+| `warn_at_pct` | no | int (0..100) | Soft-warning threshold. When usage crosses this fraction of the effective limit the engine fires `billing.quota.threshold_crossed` and Decision.Warning flips to true. See [Soft Limits & Thresholds](/billing/thresholds). |
 
 ## Picking a kind
 
