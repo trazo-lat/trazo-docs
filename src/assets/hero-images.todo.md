@@ -12,7 +12,7 @@ maps to a page and a pair of WebP files (dark + light variants).
 | `query/examples` | ✅ `query-examples-hero.webp` (Gemini) | ✅ `query-examples-hero-light.webp` (Gemini) | `/tmp/query-hero-examples.md` |
 | `query/codegen` | ⬜ `query-codegen-hero.webp` | ⬜ `query-codegen-hero-light.webp` | `/tmp/query-hero-codegen.md` |
 | `query/faq` | ⬜ `query-faq-hero.webp` | ⬜ `query-faq-hero-light.webp` | `/tmp/query-hero-faq.md` |
-| `query/coverage` | ✅ `query-coverage-hero.webp` (Gemini) | ⬜ `query-coverage-hero-light.webp` | `/tmp/query-hero-coverage.md` |
+| `query/coverage` | ✅ `query-coverage-hero.webp` (Gemini) | ✅ `query-coverage-hero-light.webp` (Gemini) | `/tmp/query-hero-coverage.md` |
 
 Note: `/tmp/` is the local machine; copy the prompt files somewhere durable
 before relying on them (they don't survive a reboot).

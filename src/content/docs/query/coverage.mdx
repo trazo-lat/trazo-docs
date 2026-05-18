@@ -6,8 +6,10 @@ description: What the query language supports, what's intentionally left out, an
 import { Aside } from '@astrojs/starlight/components';
 import { Image } from 'astro:assets';
 import heroDark from '../../../assets/query-coverage-hero.webp';
+import heroLight from '../../../assets/query-coverage-hero-light.webp';
 
-<Image src={heroDark} alt="In-scope features clustered on the left, carved-out features struck through on the right" />
+<Image src={heroDark}  alt="In-scope features clustered on the left, carved-out features struck through on the right" class="hero-dark" />
+<Image src={heroLight} alt="In-scope features clustered on the left, carved-out features struck through on the right" class="hero-light" />
 
 This page is the audit trail. Every decision below is deliberate — if you find yourself wanting one of the carved-out features, the path is almost always to register a custom function or wrap the library at the boundary, not to extend the grammar.
 
