@@ -3,9 +3,79 @@ title: Examples Cookbook
 description: Working queries for common search and filter patterns, with the data shape and expected matches for each.
 ---
 
-import { Aside } from '@astrojs/starlight/components';
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
 Every snippet on this page is a real query that compiles against the field schemas shown. The runnable equivalents live in [`examples/`](https://github.com/heyllave/query/tree/main/examples) in the query repo — `go run ./examples/<name>` prints the output.
+
+---
+
+## One Query, Three Targets
+
+The same query string drives a parameterized SQL `WHERE`, a self-describing JSON AST, and an in-memory predicate — each emitted by a different `Visitor[T]` implementation from the same parsed tree. This is the core value proposition of the library; below is what it looks like end-to-end for one realistic query.
+
+**Query:** `state=draft AND total>=50000*1.1 AND orders@(status=shipped)`
+
+<Tabs>
+  <TabItem label="SQL">
+```sql
+state = $1 AND total >= ($2 * $3) AND EXISTS (SELECT 1 FROM orders WHERE status = $4)
+```
+
+Bound parameters: `["draft", 50000, 1.1, "shipped"]`. Arithmetic stays inline (it doesn't reference user input); literal operands are parameterized. The selector translates to a correlated `EXISTS` subquery — see [Code Generation](/query/codegen/#selectors--exists--not-exists) for the `@all` / `@none` translations.
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "type": "binary",
+  "op": "AND",
+  "left": {
+    "type": "binary",
+    "op": "AND",
+    "left": {
+      "type": "qualifier",
+      "op": "=",
+      "field": "state",
+      "value": "draft"
+    },
+    "right": {
+      "type": "qualifier",
+      "op": ">=",
+      "field": "total",
+      "value": { "arith": "*", "left": 50000, "right": 1.1 }
+    }
+  },
+  "right": {
+    "type": "selector",
+    "selector": "any",
+    "base": { "type": "presence", "field": "orders" },
+    "inner": {
+      "type": "qualifier",
+      "op": "=",
+      "field": "status",
+      "value": "shipped"
+    }
+  }
+}
+```
+
+Self-describing tree shape. The frontend can hand-render this back into chips, save it as a pagination cursor, or post it to another service that re-parses it later. Function- and arithmetic-valued operands keep their structure rather than collapsing to a primitive.
+  </TabItem>
+  <TabItem label="Go predicate">
+```go
+matches := ast.Visit[func(map[string]any) bool](&filterVisitor{}, expr)
+
+matches(map[string]any{
+    "state":  "draft",
+    "total":  60000.0,
+    "orders": []map[string]any{{"status": "shipped"}},
+}) // true
+```
+
+A composable closure. Useful for WASM clients, CLI tools, streaming filters, or any context where the records live in memory instead of a database. The same visitor pattern that emits SQL emits Go code — only the `T` parameter changes.
+  </TabItem>
+</Tabs>
+
+The patterns below are listed once; assume each one can be rendered into any of these targets without modification.
 
 ---
 
