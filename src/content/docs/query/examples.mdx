@@ -111,6 +111,10 @@ ttl.duration>1d
 
 The parent field must be configured with `Nested: true` on the `FieldConfig`. Dotted segments after the first do not need their own entries.
 
+<Aside type="caution">
+Nested-field lookup reads the **flat key** `"labels.dev"` from the record. The library does **not** traverse a nested `map[string]any{"labels": {...}}` — that's the consumer's job. If your data shape is genuinely nested, write a `MatchFunc` accessor that walks the dotted path before delegating to the matcher.
+</Aside>
+
 ---
 
 ## Arithmetic in Value Position
@@ -255,6 +259,83 @@ _, err = eval.CompileFor[Invoice]("Internal=secret")   // unknown field
 ```
 
 `CompileFor[T]` walks the struct tags once and feeds the field set into the validator, so typos surface during compilation rather than at the first `Match` call.
+
+---
+
+## Complex Multi-Feature Queries
+
+These show what real production queries look like when several features combine. Each one is a single string that parses, validates, and evaluates against the field config at the top of this page.
+
+### Recent high-value invoices, excluding cancelled
+
+```
+state IN (draft, issued, paid) AND total>=50000*1.1 AND created_at>=now()-30d AND NOT state=cancelled
+```
+
+Combines IN shorthand, arithmetic in value position, function in value position, and explicit `NOT`. Returns invoices in any of three states, above an inflation-adjusted threshold, created in the last 30 days, and definitely not cancelled.
+
+### Orders with at least one shipped item, none cancelled, and a recent timestamp
+
+```
+orders@(status=shipped) AND orders@none(status=cancelled) AND created_at:daysAgo(7)..now()
+```
+
+Two selectors composed with `AND`, plus a range with function endpoints on both ends.
+
+### Q1 of a recent year, with names matching a partial pattern
+
+```
+year IN (2024, 2025, 2026) AND month(created_at) IN (1, 2, 3) AND lower(name)=john*
+```
+
+`IN` lists on both a numeric field and a function result, plus a case-insensitive prefix match via `lower()`.
+
+### Either an empty cart or every item is in stock, with a default nickname fallback
+
+```
+orders@all(in_stock=true) AND coalesce(nickname, name)=*Doe*
+```
+
+`@all` over the orders list (which vacuously matches empty carts), composed with a `coalesce`-driven contains match on the fallback name chain.
+
+### Tenant-scoped sandboxed query, only equality and IN, depth-limited
+
+```go
+prog, err := eval.Compile(userInput, fields,
+    eval.WithAllowedFields("state", "year", "tags"),
+    eval.WithAllowedOps(validate.OpEq, validate.OpNeq, validate.OpRange),
+    eval.WithMaxDepth(3),
+    eval.WithMaxLength(256),
+    eval.WithCustomValidator(tenantValidatorFor(tenantID)),
+)
+```
+
+The user-supplied query is constrained by four overlapping sandboxes: a field allowlist, an operator allowlist, depth and length caps for DoS protection, and a per-tenant AST validator for cross-field or per-tenant rules.
+
+### Inflation-adjusted scaled comparison with a custom function
+
+```go
+prog, err := eval.Compile("scaled(total)>=1.1 AND state=draft", fields,
+    eval.WithFunctions(eval.Func{
+        Name: "scaled",
+        Call: func(args ...any) (any, error) {
+            // Normalize by the tenant's regional currency-adjustment factor.
+            v, _ := args[0].(float64)
+            return v / regionFactor, nil
+        },
+    }),
+)
+```
+
+Closes the "no field-ref in arithmetic" gap when you need it: register a function that performs the multiplication and call it as a field transform.
+
+### Date arithmetic with a duration multiplier
+
+```
+created_at>=now()-30d AND (renewed_at>=now()-7d*4 OR renewal_due:now()..now()+30d)
+```
+
+Two date-arithmetic comparisons combined with an OR-of-ranges. `7d*4` is duration-times-number → duration; `now()+30d` is date+duration → date.
 
 ---
 

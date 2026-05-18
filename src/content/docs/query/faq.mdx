@@ -1,0 +1,348 @@
+---
+title: FAQ & Gotchas
+description: Answers to the questions that come up when integrating the query language into a real product — case-sensitivity, missing-field semantics, type coercion, timezone handling, and codegen edge cases.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The semantics below are verified against the actual matcher. Each answer is followed by a short example you can paste into [`go run ./examples/sql`](https://github.com/heyllave/query/tree/main/examples/sql) or any other example program to reproduce.
+
+---
+
+## Equality & Comparison
+
+### Is `name=John` case-sensitive?
+
+**No.** String equality goes through `strings.EqualFold`, so `name=john` matches a record whose `name` is `"JOHN"`. This matches what users expect from search bars.
+
+```
+name=john     → matches "JOHN", "John", "john"
+state=Draft   → matches "DRAFT", "draft"
+```
+
+If you need case-sensitive equality, normalize on the way in (`strings.ToLower(record.Name)` in your accessor) or use a custom function.
+
+### Why does `total=75000` match a record where `total` is `75000.50`?
+
+The equality matcher promotes one side to the literal's type. Since the literal `75000` is parsed as `ValueInteger`, the record's float is truncated via `toInt64(75000.50) == 75000`.
+
+```
+total=75000     → matches 75000.50, 75000.99, 75000
+total=75000.50  → matches only 75000.50 (and equal floats)
+total=75001     → no match against 75000.50
+```
+
+To force float comparison, write the literal as a decimal: `total=75000.0`.
+
+### Why does `total!=75000` return **false** for a missing field?
+
+`!=` requires the field to exist before comparing. Missing fields short-circuit the matcher to `false`, so the inequality cannot be observed.
+
+```
+total!=75000 against {}       → false (field missing)
+total!=75000 against {total:0} → true
+```
+
+If you want "either missing or not equal to 75000", write `NOT total=75000`.
+
+### How do I detect a missing field?
+
+Use `NOT field` (presence-negation):
+
+```
+NOT nickname        # nickname is absent
+nickname            # nickname is present (and OpPresence is allowed)
+```
+
+`nickname` (presence) is `true` for a record where `nickname=""` — presence is "the key exists in the accessor," not "the value is non-empty." If you need "non-empty string," use `len(nickname)>0`.
+
+---
+
+## Negated Comparisons
+
+### Why does `total!>50000` return `true` for a missing field?
+
+By design. `!>` desugars to `NOT (total>50000)`, and `total>50000` is `false` when the field is missing, so `NOT false = true`. This matches end-user intuition: "show items whose total is **not** above 50000" should include items without a total.
+
+```
+total!>50000 against {}          → true
+total!>50000 against {total:30k} → true
+total!>50000 against {total:60k} → false
+```
+
+A naive operator flip (`total<=50000`) would return `false` for missing fields, which is rarely what search-bar users mean.
+
+### When should I use `!>` vs `<=`?
+
+- `total<=50000` → "total is present AND ≤ 50000"
+- `total!>50000` → "total is missing OR ≤ 50000"
+
+Use the first when the field is required, the second when "no value" should still match.
+
+---
+
+## Wildcards & Quoting
+
+### Why does `name=a*b*c` fail to parse?
+
+Wildcards only support three forms: prefix (`John*`), suffix (`*son`), and contains (`*urgent*`). Three or more `*` is rejected at parse time because the matcher has no semantics for it.
+
+```
+name=John*    OK — prefix
+name=*son     OK — suffix
+name=*ur*     OK — contains
+name=a*b*c    parse error: invalid wildcard pattern
+```
+
+For richer matching, register a custom function: `matchesRegex(name, "^John.*Doe$")`.
+
+### How do I match a literal `*` in a value?
+
+Quote the value — inside quoted strings, `*` is a literal character, not a wildcard.
+
+```
+name="*literal*"   matches only "*literal*"
+name=*literal*     matches any value containing "literal"
+```
+
+### How do I include spaces, parens, or operator characters in a value?
+
+Quote it. The escape set is `\"`, `\\`, `\n`, `\t`, `\r`.
+
+```
+name="John Doe"
+description="urgent: handle ASAP"
+description="a > b"
+name="contains a \"quote\" inside"
+```
+
+Quoted strings work anywhere a value is accepted — comparison RHS, function args, `IN` lists, range endpoints.
+
+---
+
+## Dates & Timezones
+
+### Why doesn't `created_at=2026-01-15` match my record?
+
+The literal `2026-01-15` parses to **midnight UTC** on that date. The matcher uses `time.Time.Equal`, which compares the absolute instant. So:
+
+| Record's `created_at` | Matches `created_at=2026-01-15`? |
+|-----------------------|-----------------------------------|
+| `2026-01-15 00:00:00 UTC` | yes |
+| `2026-01-15 00:00:00 +05:00` | no (different instant) |
+| `2026-01-15 12:30:00 UTC` | no (not midnight) |
+
+For "any time on this date," use a range:
+
+```
+created_at:2026-01-15..2026-01-15   # only midnight on both ends
+created_at>=2026-01-15 AND created_at<2026-01-16   # full UTC day
+```
+
+Or canonicalize record timestamps to midnight UTC before matching.
+
+### Can I write date literals in non-ISO formats?
+
+Not directly. The lexer only accepts `YYYY-MM-DD`. To accept other formats, parse them in a custom function: `dateOf("Jan 15, 2026")=created_at`.
+
+### Are duration literals timezone-aware?
+
+No. Durations are plain `time.Duration` values, identical to Go's. `7d` means "exactly 7 × 24 hours," which doesn't account for DST transitions in calendar arithmetic. For DST-aware date math, write a custom function.
+
+---
+
+## Types & Coercion
+
+### What happens if my struct field type isn't directly supported?
+
+`FieldsFromStruct` falls back to `TypeText + TextOps`. The accessor still returns the value, but the matcher treats it as a string via `fmt.Sprint`. This works for stringers but degrades to default-text comparison for anything else.
+
+To get strict typing for an unsupported field, declare the schema manually with `Compile` instead of `CompileFor[T]`.
+
+### Are booleans liberally coerced?
+
+Yes. `toBool` accepts `bool`, `"true"` / `"false"` strings, and non-zero numbers (`1` → `true`, `0` → `false`). This is intentional so HTTP query params like `?q=active=true` work without conversion.
+
+```
+active=true against {active: true}   → true
+active=true against {active: "true"} → true
+active=true against {active: 1}      → true
+active=true against {active: 0}      → false
+```
+
+### Why does my custom-function return value not behave like a date in comparisons?
+
+`valueFromAny` infers the Value type from the Go type returned by the function. Return a `time.Time` to be compared as a date; an `int64` to be compared as an integer; a `float64` to be compared as a float. Returning a `string` representation of a date does **not** make it a date.
+
+---
+
+## Selectors
+
+### What's the truth table for an empty list and a missing field?
+
+| Selector | Empty list (`[]`) | Missing field |
+|----------|--------------------|---------------|
+| `@first` / `@last` | `false` | `false` |
+| `@(...)` / `@any(...)` | `false` | `false` |
+| `@all(...)` | `true` (vacuous truth) | `false` |
+| `@none(...)` | `true` | `true` (≡ empty list) |
+
+`@all` matches an empty list because "every element satisfies the predicate" is vacuously true. `@none` matches a missing field because "no element exists, so none can satisfy" lines up with predicate logic and SQL `NOT EXISTS`.
+
+### Can I use selectors on a slice of structs?
+
+Yes, with one caveat. The inner predicate can reference fields by their `query:` tag, but those tag names have to be declared in your `[]validate.FieldConfig` for validation to pass.
+
+`FieldsFromStruct` only walks the container's tags — it does **not** recurse into element types. So `CompileFor[T]` works for `@first`/`@last` (no inner fields) but **not** for `@all(status=shipped)` on a struct slice. The workaround:
+
+```go
+fields := append(
+    FieldsFromStruct(cart{}),
+    validate.FieldConfig{Name: "status", Type: validate.TypeText, AllowedOps: validate.TextOps},
+    validate.FieldConfig{Name: "price",  Type: validate.TypeDecimal, AllowedOps: validate.NumericOps},
+)
+prog, _ := query.Compile(`orders@all(status=shipped)`, fields)
+prog.MatchFunc(eval.StructAccessor(myCart))
+```
+
+### Can selectors be nested? (`orders@(line_items@(price>100))`)
+
+Not currently. The selector inner is a regular boolean expression — `@(...)` cannot appear inside another `@(...)`. For two-level filtering, flatten the inner list in a custom function: `anyItemOver100(orders, 100) = true`.
+
+### How do I translate selectors to SQL?
+
+The library doesn't — `Visitor[T]` is the consumer's responsibility. `examples/sql/main.go` shows the canonical translation:
+
+- `@first` / `@last` → `EXISTS (SELECT 1 FROM list)`
+- `@(...)` / `@any(...)` → `EXISTS (SELECT 1 FROM list WHERE inner)`
+- `@all(...)` → `NOT EXISTS (SELECT 1 FROM list WHERE NOT (inner))` — double negation
+- `@none(...)` → `NOT EXISTS (SELECT 1 FROM list WHERE inner)`
+
+A production adapter would also map the list field name to the joined table and add the parent-child FK constraint.
+
+---
+
+## Validation & Sandboxing
+
+### A user typed a query I don't recognize — how do I get useful error messages back to them?
+
+`query.Validate` and `eval.Compile` return a `validate.ErrorList` that wraps multiple `validate.Error` values, each with a `Position`, `Kind`, and human-readable message. Loop the list to render annotated errors:
+
+```go
+prog, err := eval.Compile(q, fields)
+var list validate.ErrorList
+if errors.As(err, &list) {
+    for _, e := range list {
+        fmt.Printf("col %d: %s\n", e.Position.Offset, e.Message)
+    }
+}
+```
+
+`Kind` is one of `ErrFieldNotFound`, `ErrOperatorNotAllowed`, `ErrTypeMismatch`, or `ErrCustomRule` — useful for sending structured error responses.
+
+### How do I expose different query capabilities to different users?
+
+`eval.Compile` accepts option functions that you can layer per-request:
+
+```go
+prog, err := eval.Compile(q, allFields,
+    eval.WithAllowedFields("state", "year"),   // hide everything else
+    eval.WithAllowedOps(validate.OpEq),        // equality only
+    eval.WithMaxDepth(3),                      // DoS bound
+    eval.WithMaxLength(256),                   // input length bound
+)
+```
+
+For per-tenant field allow/deny lists or cross-field rules, implement `validate.AstValidator` and wire it via `eval.WithCustomValidator` — see the [Custom Rules](/query/syntax/#custom-rules) section.
+
+### Can I forbid `OR` entirely?
+
+There's no direct flag, but `WithMaxDepth(1)` rejects any query with a top-level `OR` (since `OR` adds nesting). A more direct path is a custom `AstValidator` that walks the AST and returns an error if it encounters a `BinaryExpr{Op: token.Or}`.
+
+---
+
+## Codegen
+
+### Why does my generated SQL have an unexpected paren around an `OR` child?
+
+`IN` desugars to a left-leaning OR chain at parse time:
+
+```
+state IN (a, b, c)   →   (state=a OR state=b) OR state=c
+```
+
+When this appears as an AND child (`state IN (a, b) AND total>1000`), a naive visitor would emit `state=a OR state=b AND total>1000`, which SQL would precedence-shift to `state=a OR (state=b AND total>1000)` — wrong. The shipped SQL visitor wraps an `OR` child of an `AND` parent in parens for exactly this reason. Copy the `binOperand` helper from `examples/sql/main.go` into your adapter.
+
+### Why does `now()` come out empty in my SQL adapter?
+
+The naive `VisitFuncCall` returns `""`. Update it to emit the SQL equivalent of the function — `now()` → `NOW()`, `daysAgo(7)` → `NOW() - INTERVAL '7 days'`, etc. The example adapter has the pattern; in real adapters, whitelist which function names to translate so users can't inject arbitrary symbols.
+
+### Can I round-trip a query for caching?
+
+Yes. `ast.String(expr)` returns a canonical form that re-parses to the same AST. Two normalizations to be aware of:
+
+- `state IN (a, b)` round-trips as `state=a OR state=b` (canonical form).
+- `total!>50000` round-trips as `NOT total>50000`.
+- Keyword case is normalized to uppercase: `and` → `AND`.
+
+For cache keys, these normalizations are usually a feature — two queries that parse to the same AST share a cache entry.
+
+---
+
+## Performance
+
+### Should I compile the query inside the request handler?
+
+For typical traffic (search bars, occasional API filters), yes — `Compile` is fast enough to run per-request. For high-QPS endpoints with a small set of distinct queries, cache the `*Program` keyed by `ast.String(expr)`:
+
+```go
+var cache = sync.Map{}
+
+func compile(q string) (*eval.Program, error) {
+    if cached, ok := cache.Load(q); ok {
+        return cached.(*eval.Program), nil
+    }
+    prog, err := eval.Compile(q, fields)
+    if err != nil {
+        return nil, err
+    }
+    cache.Store(q, prog)
+    return prog, nil
+}
+```
+
+`*Program` is safe for concurrent `Match`/`MatchStruct` calls.
+
+### Is reflection in struct binding a problem?
+
+Only on hot paths. `StructAccessor` builds a tag-to-index map once per call, then does `reflect.Value.FieldByIndex` per field lookup. For thousands of records this is negligible; for millions per second, switch to a closure that closes over typed getters:
+
+```go
+prog.MatchFunc(func(field string) (any, bool) {
+    switch field {
+    case "state":      return r.State, true
+    case "total":      return r.Total, true
+    case "created_at": return r.CreatedAt, true
+    }
+    return nil, false
+})
+```
+
+This bypasses reflection entirely and is roughly 3-5× faster than `MatchStruct` for hot loops.
+
+---
+
+## Misc
+
+### Can the language be extended with new operators?
+
+Not from outside the library. The token set, precedence, and grammar are fixed. The two extension points are:
+
+1. **Custom functions** via `eval.WithFunctions(...)` — works in field-transform, value-position, and boolean-predicate roles.
+2. **Custom validation rules** via `validate.AstValidator` — runs after built-in validation and can implement arbitrary AST-level checks.
+
+If you need a new operator, fork the parser or write a pre-processor that rewrites your sugar into the supported grammar before parsing.
+
+### Does the WASM build expose the same API?
+
+Yes, with a thin TypeScript shim. The compiled `.wasm` binary lives at `query/wasm/`; the TS wrapper at `query-ts/` (separate repo) exposes `parse`, `validate`, and `match` mirroring the Go entry points. The AST shape is identical because both come from the same `query/ast` package.

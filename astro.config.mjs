@@ -176,6 +176,7 @@ export default defineConfig({
             { label: 'Syntax Reference', slug: 'query/syntax' },
             { label: 'Examples Cookbook', slug: 'query/examples' },
             { label: 'Code Generation', slug: 'query/codegen' },
+            { label: 'FAQ & Gotchas', slug: 'query/faq' },
             { label: 'Coverage & Tradeoffs', slug: 'query/coverage' },
           ],
         },
