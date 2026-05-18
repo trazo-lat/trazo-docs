@@ -1,6 +1,6 @@
 ---
 title: Using Entities in Modules
-description: How domain modules consume the entities foundation module — resolving the service, referencing entities as input, targeting tenant-configurable types, reading data, managing relations, linking users, and reacting to entity lifecycle events.
+description: How domain modules consume the entities foundation module — resolving the service, referencing entities as input, targeting tenant-configurable types, handling orphans and permission scoping, reading data, managing relations, linking users, and reacting to entity lifecycle events.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -239,7 +239,9 @@ for i := range customers {
     byID[string(customers[i].ID)] = &customers[i]
 }
 
-// Decorate each invoice with its customer label
+// Decorate each invoice. Missing customers (deleted or not visible to the
+// caller) keep the empty CustomerName — render a placeholder in the UI,
+// do not fail the list.
 for i := range invoices {
     if c := byID[invoices[i].CustomerID]; c != nil {
         invoices[i].CustomerName, _ = c.Data["name"].(string)
@@ -325,6 +327,8 @@ CREATE INDEX IF NOT EXISTS idx_service_orders_entity
     WHERE deleted_at IS NULL;
 ```
 
+There is intentionally no foreign key from `entity_id` to the entities table — see [Cross-module FKs are service-enforced](#cross-module-fks-are-service-enforced) below.
+
 **Input and validation:**
 
 ```go
@@ -358,7 +362,10 @@ func (s *Service) Create(ctx context.Context, input CreateServiceOrderInput) (*S
         return nil, s.core.Errors.Validation("entity_type", "not allowed by tenant settings")
     }
 
-    // Validate the FK
+    // Validate the (type, id) pair as a unit. Calling Get with the resolved
+    // typ.TypeName is what catches "vehicle id paired with patient public ID":
+    // the entities service scopes by type internally, so a wrong-type ID
+    // returns nil.
     target, err := s.entities.Get(ctx, typ.TypeName, input.EntityID)
     if err != nil {
         return nil, err
@@ -381,7 +388,7 @@ settings:
     description: Entity types this module may target. Empty list means all active types.
 ```
 
-**Bulk decoration in list views** — group your rows by `entity_type` and `GetMany` per group:
+**Bulk decoration in list views** — group your rows by `entity_type`, batch per type, log and continue when a batch errors, render a placeholder when an entity is missing or invisible to the caller:
 
 ```go
 type ServiceOrderView struct {
@@ -401,12 +408,16 @@ func (s *Service) ListForDisplay(ctx context.Context, filter ListFilter) ([]Serv
         byType[o.EntityType] = append(byType[o.EntityType], o.EntityID)
     }
 
-    // Resolve labels per type
+    // Resolve labels per type. Per-type failures (e.g. a type was deleted
+    // entirely) are logged and skipped — they must not blank the whole page.
     labels := map[string]string{} // keyed by "<type>:<id>"
     for typeName, ids := range byType {
         ents, err := s.entities.GetMany(ctx, entmodel.EntityTypeName(typeName), ids)
         if err != nil {
-            return nil, err
+            s.core.Log.Logger(ctx).WithModule("service-orders").
+                Warn("loading entities for list view",
+                    map[string]any{"type": typeName, "error": err.Error()})
+            continue
         }
         typ, _ := s.entities.GetType(ctx, entmodel.EntityTypeName(typeName))
         labelField := "name"
@@ -421,10 +432,14 @@ func (s *Service) ListForDisplay(ctx context.Context, filter ListFilter) ([]Serv
 
     views := make([]ServiceOrderView, len(orders))
     for i, o := range orders {
-        views[i] = ServiceOrderView{
-            ServiceOrder: o,
-            EntityLabel:  labels[o.EntityType+":"+o.EntityID],
+        label := labels[o.EntityType+":"+o.EntityID]
+        if label == "" {
+            // Entity was soft-deleted, type was removed, or the caller lacks
+            // read permission on the entity. The order itself is still
+            // visible — render a placeholder, do not omit the row.
+            label = "(unavailable)"
         }
+        views[i] = ServiceOrderView{ServiceOrder: o, EntityLabel: label}
     }
     return views, nil
 }
@@ -471,7 +486,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (*Order, error)
 ```
 
 <Aside type="caution">
-  Changing the setting after rows exist invalidates the existing rows' references — they now point into a different type's namespace. Treat `target_entity_type` as install-time configuration, not a runtime toggle. If a tenant needs to switch, that's a data migration, not a settings change.
+  Changing the setting after rows exist invalidates the existing rows' references — they now point into a different type's namespace. See [Pattern B: setting rotation](#pattern-b-setting-rotation) below for the lock-or-snapshot mitigations.
 </Aside>
 
 ### Pattern C — Multi-Instance Modules
@@ -491,6 +506,172 @@ See [Multi-Instance Modules](/architecture/multi-instance-modules/). Choose this
 | One tenant services exactly one type, decided at install time | **B** (setting) |
 | One tenant services multiple types, mixed in the same list view | **A** (polymorphic) |
 | Each type needs different permissions, status machines, or events | **C** (multi-instance) |
+
+---
+
+## Operational Considerations
+
+The patterns above introduce risk surfaces that the platform does not fix automatically. Each must be handled by the consuming module. Skipping these turns "we depend on entities" into "we have a graveyard of broken references."
+
+### Orphaned references when entities are soft-deleted
+
+Entities are soft-deleted: `Delete` sets `deleted_at` on the row, and subsequent `Get`/`GetMany` calls return nil for it. Without action, your module's rows now point at vanished entities.
+
+Subscribe to `entities.deleted` and pick one of three strategies based on what your row means without its entity:
+
+```yaml
+# module.yaml
+events:
+  subscribes:
+    - event: entities.deleted
+      handler: OnEntityDeleted
+      async: true
+```
+
+**Strategy 1 — Detach.** Clear the reference, keep the row. Use when the row carries value independent of the entity (a closed service order is still a historical record):
+
+```go
+func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
+    typeName, _ := ev.Payload["type_name"].(string)
+    publicID, _ := ev.Payload["public_id"].(string)
+    // Idempotent: re-running the same (type, id) detach is a no-op.
+    return s.repo.MarkEntityDetached(ctx, typeName, publicID)
+}
+```
+
+**Strategy 2 — Block the deletion.** Subscribe to the entity's `before_delete` hook and refuse if open rows reference it. Trades flexibility for safety:
+
+```yaml
+hooks:
+  - name: entities.before_delete  # registered by the entities module
+    handler: VetoIfReferenced
+```
+
+```go
+func (s *Service) VetoIfReferenced(ctx context.Context, data any) (any, error) {
+    ent, _ := data.(*entmodel.Entity)
+    if ent == nil { return data, nil }
+    count, _ := s.repo.CountOpenForEntity(ctx, string(ent.TypeName), string(ent.ID))
+    if count > 0 {
+        return nil, s.core.Errors.Module(
+            "SERVICE_ORDERS.CONFLICT.ENTITY_HAS_OPEN_ORDERS", 409,
+            "Cannot delete: open service orders still reference this entity.")
+    }
+    return data, nil
+}
+```
+
+**Strategy 3 — Cascade soft-delete.** When your row is meaningless without the entity (a draft order with no other context):
+
+```go
+func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
+    typeName, _ := ev.Payload["type_name"].(string)
+    publicID, _ := ev.Payload["public_id"].(string)
+    return s.repo.SoftDeleteByEntity(ctx, typeName, publicID)
+}
+```
+
+Without one of these subscribers, orphaned references accumulate silently and surface as missing labels until someone investigates.
+
+### Permission scoping divergence between your module and entities
+
+A user with `service-orders.read.all` is not automatically granted `entities.vehicle.read.all`. The platform's permission scopes are evaluated independently per module. The expected behavior is:
+
+- The user sees every service order they're authorized to read.
+- For rows whose entity they cannot read, `GetMany` returns no entity for that ID — `byID[id]` is `nil`.
+- The list view renders the order with a placeholder label, not a 403, and not an omitted row.
+
+```go
+// Pattern A list-view decoration handles missing entities the same way
+// whether they're soft-deleted, permission-filtered, or in a removed type.
+label := labels[o.EntityType+":"+o.EntityID]
+if label == "" {
+    label = "(unavailable)"
+}
+```
+
+<Aside type="caution">
+  Do not propagate per-entity errors or permission denials into a 4xx/5xx on your module's list endpoint. The user has permission to see the rows; the missing labels are a symptom, not a failure.
+</Aside>
+
+### Deactivated types
+
+A tenant can deactivate a type via `entities.DeactivateType`. The type's existing entities remain readable; new `Create` calls fail with `ENTITIES.VALIDATION.TYPE_INACTIVE`. Your module's behavior:
+
+- **Create**: check `typ.Active` and reject. Already shown in Pattern A's `Create`.
+- **Read**: keep working. Your list view shouldn't break because the tenant paused new entity creation.
+- **Update**: typically follows Create — if you wouldn't accept new orders against an inactive type, don't accept edits to existing ones either, unless the edit is closing the order.
+
+Listen for `entities.type.deactivated` if you want to surface a warning banner in your UI for tenants ("Type 'vehicle' is inactive — open orders can still be processed").
+
+### Race between validation and write
+
+Between `s.entities.Get(...)` and your own `INSERT`, the type could be deactivated or the entity could be soft-deleted. The window is narrow but real.
+
+- **Best-effort** (default): validate outside the transaction. The next read returns the orphan-handling fallback. Cost: occasional rows pointing at just-deleted entities; correct behavior after `entities.deleted` is handled.
+- **Strict**: re-validate inside the transaction. One extra cross-module call per write. Use when the row carries financial or compliance weight (an invoice, a regulated record).
+
+```go
+// Strict variant — re-fetch inside the tx
+err = s.core.DB.Tx(ctx, func(tx core.Tx) error {
+    target, _ := s.entities.Get(ctx, typ.TypeName, input.EntityID)
+    if target == nil {
+        return s.core.Errors.NotFound(input.EntityType, input.EntityID)
+    }
+    return s.repo.CreateTx(ctx, tx, input)
+})
+```
+
+<Aside type="note">
+  `s.entities.Get` does not join your transaction — it's a cross-module call. Strict re-validation closes the entity-deletion race but cannot close the type-deactivation race atomically. For that, depend on the `entities.before_delete` hook.
+</Aside>
+
+### Pattern B: setting rotation
+
+If a tenant changes `target_entity_type` after rows exist, every `entity_id` now refers to a different type's namespace. There is no automatic guard. Two mitigations:
+
+```go
+// 1. Lock the setting once data exists. Wire this into your admin endpoint
+//    or your module's settings.before_update hook.
+func (s *Service) ValidateTargetTypeChange(ctx context.Context, newType string) error {
+    current := core.SettingString(ctx, s.core.Config,
+        "service-orders", "target_entity_type", "")
+    if newType == current {
+        return nil
+    }
+    count, _ := s.repo.RowCount(ctx)
+    if count > 0 {
+        return s.core.Errors.Module(
+            "SERVICE_ORDERS.CONFIG.TYPE_LOCKED", 409,
+            "Cannot change target_entity_type while service orders exist. Migrate first.")
+    }
+    return nil
+}
+```
+
+```sql
+-- 2. Snapshot the type onto each row at insert time. At which point you've
+--    rebuilt Pattern A — promote to it.
+ALTER TABLE service_orders ADD COLUMN entity_type TEXT NOT NULL DEFAULT '';
+```
+
+If you find yourself adding option 2, the tenant has outgrown Pattern B. Migrate to Pattern A.
+
+### Don't parse public-ID prefixes
+
+Public IDs look like `cust_acme-corp`, `veh_toyota-camry-2024`, `pat_jane-doe`. The prefix is **tenant-configurable** via `EntityTypeConfig.PublicID.Prefix` — one tenant can configure `customer` as `client_*` and another as `cust_*`. Both are valid `customer` entities.
+
+Always carry the explicit `entity_type` (Pattern A column, Pattern B setting, Pattern C instance config). Never infer the type from the prefix.
+
+### Cross-module FKs are service-enforced
+
+`entity_id TEXT` has no `REFERENCES entities(public_id)` clause. Cross-module foreign keys aren't enforced at the database level because:
+
+- The entities table lives in the entities module's tables — you don't own it.
+- The entities module scopes reads by permission. A DB-level FK would happily join across permission boundaries.
+- Soft-delete is opaque to the database: a row with `deleted_at` is still present in the table.
+
+Referential integrity for entity references is enforced at the **service layer** (via the `entities.Get`/`GetMany` API and the `entities.deleted` subscription), not by the database. Plan for it.
 
 ---
 
@@ -571,20 +752,11 @@ events:
       async: true
 ```
 
-```go
-// service.go — works for both Pattern A (polymorphic) and Pattern B (single type)
-func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
-    typeName, _ := ev.Payload["type_name"].(string)
-    publicID, _ := ev.Payload["public_id"].(string)
-
-    // Detach the deleted entity from any open service orders that referenced it
-    return s.repo.MarkEntityDetached(ctx, typeName, publicID)
-}
-```
-
 <Aside type="caution">
-  Event handlers must be idempotent. The outbox processor retries on failure, and the same event may arrive more than once. Use the event ID (`ev.ID`) as an idempotency key when the side effect is not naturally idempotent.
+  Event handlers must be idempotent. The outbox processor retries on failure, and the same event may arrive more than once. The repository update should be naturally idempotent (e.g. `UPDATE service_orders SET entity_status='detached' WHERE entity_type=$1 AND entity_id=$2`) or use the event ID as an idempotency key when the side effect is not.
 </Aside>
+
+See [Orphaned references when entities are soft-deleted](#orphaned-references-when-entities-are-soft-deleted) above for the three handler strategies (detach, block via `before_delete` hook, cascade soft-delete).
 
 ---
 
@@ -610,6 +782,12 @@ permissions:
   - key: service-orders.read.all
   - key: service-orders.create
   - key: service-orders.update.all
+
+events:
+  subscribes:
+    - event: entities.deleted
+      handler: OnEntityDeleted
+      async: true
 ```
 
 **Service `Create`:**
@@ -646,6 +824,17 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (*Order, error)
     }
 
     // ... 5-step pattern: hook, tx insert + EmitTx, audit, log
+}
+```
+
+**Orphan handler:**
+
+```go
+func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
+    typeName, _ := ev.Payload["type_name"].(string)
+    publicID, _ := ev.Payload["public_id"].(string)
+    // Detach strategy: clear the reference, keep the order as a historical record
+    return s.repo.MarkEntityDetached(ctx, typeName, publicID)
 }
 ```
 
@@ -723,13 +912,18 @@ Billing hardcodes `"customer"` because every billing tenant has a customer conce
 | Anti-Pattern | Why It Breaks |
 |---|---|
 | Hardcoding a single entity type in a generic module | Different tenants need different target types — use Pattern A, B, or C |
+| Parsing the `cust_*` / `veh_*` prefix to infer the entity type | Prefixes are tenant-configurable via `EntityTypeConfig.PublicID.Prefix`; always carry an explicit `entity_type` |
 | Storing the entity's internal UUID instead of the public ID | Public IDs are the stable, human-readable contract; internal UUIDs leak implementation detail |
+| Adding a real DB-level FK from your `entity_id` column to entities | Cross-module FKs aren't enforced; the entities module owns those tables and applies permission scoping. Use the service API and the `entities.deleted` event |
+| Treating `entities.deleted` subscription as optional | Without a subscriber, your rows accumulate orphan references that surface as null labels forever |
+| Returning a 403 or omitting rows when `GetMany` filters entities by permission | The user has permission to see your row; render a placeholder for the missing entity |
+| Failing the entire list view when one entity fetch errors | Log and continue per-type; a partial decoration is better than a blank page |
 | Caching `Entity.Data` across requests | Tenants can edit fields at any time; reads should hit the entities service |
 | Calling `s.entities.Get` inside a `for` loop over a list page | Use `GetMany` for bulk decoration; group by `entity_type` first when polymorphic |
 | Validating `Entity.Data` against a hardcoded shape in your module | Read `Schema.Fields` from `GetType` — the tenant may have changed the type |
 | Subscribing to `entities.updated` and writing back into the entity | Creates feedback loops; use hooks (`entities.before_update`) for synchronous validation instead |
 | Failing your module's `Init` silently when the entities service resolves to `nil` | Make the dependency explicit in `module.yaml` and return a hard error |
-| Changing `target_entity_type` (Pattern B) after rows exist | Existing rows now point into a different type's namespace — treat the setting as install-time only |
+| Changing `target_entity_type` (Pattern B) after rows exist without a lock | Existing rows now point into a different type's namespace — lock the setting or snapshot the type per row (which is Pattern A in disguise) |
 
 ---
 
