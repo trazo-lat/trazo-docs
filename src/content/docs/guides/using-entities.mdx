@@ -1,6 +1,6 @@
 ---
 title: Using Entities in Modules
-description: How domain modules consume the entities foundation module — resolving the service, referencing entities as input, targeting tenant-configurable types, handling orphans and permission scoping, reading data, managing relations, linking users, and reacting to entity lifecycle events.
+description: How domain modules consume the entities foundation module — resolving the service, referencing entities as input, targeting tenant-configurable types, handling orphans and permission scoping, testing, and reacting to lifecycle events.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
@@ -113,7 +113,7 @@ func resolveEntities(c *core.Core) (entitiesLookup, error) {
 }
 ```
 
-Unit tests then inject a mock satisfying `entitiesLookup` without importing the entities package at all.
+This keeps your module testable without an entities-package import — see [Testing Modules that Consume Entities](#testing-modules-that-consume-entities) below.
 
 ---
 
@@ -290,6 +290,39 @@ labelField := typ.Config.LabelField
 ```
 
 `ListTypes` returns every type the tenant has installed or defined. Useful when your module needs to declare which entity types it can target (a notification template selecting "any customer-like type", for instance), or when populating a tenant-admin dropdown to configure the target type for a generic module.
+
+---
+
+## Bootstrapping Types for a Tenant
+
+Tenants get entity types into their schema in two ways, then activate them:
+
+```go
+// 1. Install from the platform's catalog of built-in templates.
+//    Built-ins live in internal/modules/foundation/entities/catalog/*.yaml:
+//    vehicle, customer, patient, product, supplier.
+created, err := s.entities.InstallFromCatalog(ctx, []entmodel.EntityTypeName{
+    "vehicle", "customer",
+})
+
+// 2. Or define a custom type from scratch with a tenant-specific schema.
+custom, err := s.entities.CreateType(ctx, entmodel.CreateEntityTypeInput{
+    TypeName:    "unit",
+    DisplayName: "Property Unit",
+    Schema: entmodel.EntitySchema{Fields: []entmodel.FieldDef{
+        {Name: "address", Type: entmodel.FieldTypeText, Required: true},
+        {Name: "floor",   Type: entmodel.FieldTypeInteger},
+    }},
+    Config: entmodel.EntityTypeConfig{LabelField: "address"},
+})
+
+// 3. Activate. Both paths produce types in an inactive state.
+//    Activation generates the dynamic per-type permissions
+//    (entities.<type>.read.all, entities.<type>.create, ...).
+err = s.entities.ActivateType(ctx, "unit")
+```
+
+The typical flow runs all three from a tenant-admin API call or CLI command during onboarding. A consumer module that requires a specific type (Pattern B below) should detect its absence and surface a setup instruction — it should **not** silently install types on the tenant's behalf.
 
 ---
 
@@ -517,7 +550,7 @@ The patterns above introduce risk surfaces that the platform does not fix automa
 
 Entities are soft-deleted: `Delete` sets `deleted_at` on the row, and subsequent `Get`/`GetMany` calls return nil for it. Without action, your module's rows now point at vanished entities.
 
-Subscribe to `entities.deleted` and pick one of three strategies based on what your row means without its entity:
+Subscribe to `entities.deleted` and pick a cleanup strategy:
 
 ```yaml
 # module.yaml
@@ -528,7 +561,10 @@ events:
       async: true
 ```
 
-**Strategy 1 — Detach.** Clear the reference, keep the row. Use when the row carries value independent of the entity (a closed service order is still a historical record):
+| Strategy | Use when | Implementation |
+|---|---|---|
+| **Detach** | Row has value without the entity (a closed service order is a historical record) | Clear the FK column, optionally set a status flag, keep the row |
+| **Cascade soft-delete** | Row is meaningless without the entity (a draft with no other context) | Soft-delete your row in the same handler |
 
 ```go
 func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
@@ -539,39 +575,17 @@ func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
 }
 ```
 
-**Strategy 2 — Block the deletion.** Subscribe to the entity's `before_delete` hook and refuse if open rows reference it. Trades flexibility for safety:
+<Aside type="caution">
+  **You cannot block the deletion synchronously from your module's Go code.** The `entities.before_delete` hook is a [tenant-configurable webhook or expression](/architecture/hooks/), not a Go-side handler registration. Per the architecture: "Hooks are best-effort — errors are logged but never block the business operation." Even a tenant's webhook that returns an error cannot reject the delete; the error surfaces in `result.Errors` for visibility only.
+</Aside>
 
-```yaml
-hooks:
-  - name: entities.before_delete  # registered by the entities module
-    handler: VetoIfReferenced
-```
+If "cannot delete entity while X references it" is a hard requirement, enforce it at the **UX layer** instead:
 
-```go
-func (s *Service) VetoIfReferenced(ctx context.Context, data any) (any, error) {
-    ent, _ := data.(*entmodel.Entity)
-    if ent == nil { return data, nil }
-    count, _ := s.repo.CountOpenForEntity(ctx, string(ent.TypeName), string(ent.ID))
-    if count > 0 {
-        return nil, s.core.Errors.Module(
-            "SERVICE_ORDERS.CONFLICT.ENTITY_HAS_OPEN_ORDERS", 409,
-            "Cannot delete: open service orders still reference this entity.")
-    }
-    return data, nil
-}
-```
+- Your module's API exposes a count or check endpoint (e.g. `GET /api/v1/service-orders/by-entity/{type}/{id}/count`) that the entity-delete UI calls before allowing the action.
+- The entity-admin UI displays the dependent rows and requires the user to close or transfer them first.
+- A tenant who wants a stricter guard can configure a `entities.before_delete` webhook that calls your count endpoint and surfaces the issue in `result.Errors` — still best-effort, but at least visible in the entity-admin response.
 
-**Strategy 3 — Cascade soft-delete.** When your row is meaningless without the entity (a draft order with no other context):
-
-```go
-func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
-    typeName, _ := ev.Payload["type_name"].(string)
-    publicID, _ := ev.Payload["public_id"].(string)
-    return s.repo.SoftDeleteByEntity(ctx, typeName, publicID)
-}
-```
-
-Without one of these subscribers, orphaned references accumulate silently and surface as missing labels until someone investigates.
+Without one of these in place, plan on the **Detach** strategy as the default. Orphan references that surface as "(unavailable)" labels are recoverable. A delete that quietly cascades through a poorly-tested handler is not.
 
 ### Permission scoping divergence between your module and entities
 
@@ -623,7 +637,7 @@ err = s.core.DB.Tx(ctx, func(tx core.Tx) error {
 ```
 
 <Aside type="note">
-  `s.entities.Get` does not join your transaction — it's a cross-module call. Strict re-validation closes the entity-deletion race but cannot close the type-deactivation race atomically. For that, depend on the `entities.before_delete` hook.
+  `s.entities.Get` does not join your transaction — it's a cross-module call. Strict re-validation closes the entity-deletion race but cannot close the type-deactivation race atomically. The platform offers no synchronous cross-module veto mechanism for this case (hooks are tenant-side and best-effort).
 </Aside>
 
 ### Pattern B: setting rotation
@@ -632,7 +646,7 @@ If a tenant changes `target_entity_type` after rows exist, every `entity_id` now
 
 ```go
 // 1. Lock the setting once data exists. Wire this into your admin endpoint
-//    or your module's settings.before_update hook.
+//    that updates the setting.
 func (s *Service) ValidateTargetTypeChange(ctx context.Context, newType string) error {
     current := core.SettingString(ctx, s.core.Config,
         "service-orders", "target_entity_type", "")
@@ -743,20 +757,123 @@ The entities module emits domain events for every type and instance mutation. Su
 | `entities.relation.created` / `entities.relation.deleted` | An entity relation is created or removed |
 | `entities.user.linked` / `entities.user.unlinked` | A user account is linked or unlinked from an entity |
 
-```yaml
-# module.yaml
-events:
-  subscribes:
-    - event: entities.deleted
-      handler: OnEntityDeleted
-      async: true
-```
-
 <Aside type="caution">
-  Event handlers must be idempotent. The outbox processor retries on failure, and the same event may arrive more than once. The repository update should be naturally idempotent (e.g. `UPDATE service_orders SET entity_status='detached' WHERE entity_type=$1 AND entity_id=$2`) or use the event ID as an idempotency key when the side effect is not.
+  Event handlers must be idempotent. The outbox processor retries on failure, and the same event may arrive more than once. A naturally idempotent `UPDATE ... WHERE entity_type=$1 AND entity_id=$2` is the simplest form. When the side effect isn't naturally idempotent, use `ev.ID` as an idempotency key.
 </Aside>
 
-See [Orphaned references when entities are soft-deleted](#orphaned-references-when-entities-are-soft-deleted) above for the three handler strategies (detach, block via `before_delete` hook, cascade soft-delete).
+The entities module also exposes **hooks** — `entities.before_create`, `entities.before_update`, `entities.before_delete`, `entities.after_create`, `entities.after_update` — but these are [tenant-configurable webhooks/expressions](/architecture/hooks/), not module subscriptions. Tenants use them to inject business logic without code changes; other modules use **events** (above) for cross-module coordination.
+
+---
+
+## Testing Modules that Consume Entities
+
+The local-contract pattern (`entitiesLookup` interface in `deps.go`) keeps unit tests cheap. Mock the contract with testify, no entities-module import needed.
+
+Expose a test-only constructor that takes `entitiesLookup` directly — the production `New` resolves it via `resolveEntities(c)`:
+
+```go
+// internal/modules/domain/service-orders/service/service.go
+func New(c *core.Core, repo Repository) *Service {
+    entities, err := resolveEntities(c)
+    if err != nil {
+        // surfaced at module Init; service constructor stays simple
+        return nil
+    }
+    return &Service{core: c, repo: repo, entities: entities}
+}
+
+// NewWithDeps is for tests. It bypasses the registry lookup.
+func NewWithDeps(c *core.Core, repo Repository, entities entitiesLookup) *Service {
+    return &Service{core: c, repo: repo, entities: entities}
+}
+```
+
+A testify mock satisfying `entitiesLookup`:
+
+```go
+// internal/modules/domain/service-orders/service/service_test.go
+package service_test
+
+import (
+    "context"
+    "errors"
+    "testing"
+
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/mock"
+
+    "platform/internal/core"
+    "platform/internal/core/testutil"
+    "platform/internal/modules/domain/service-orders/service"
+    entmodel "platform/internal/modules/foundation/entities/model"
+)
+
+type mockEntities struct{ mock.Mock }
+
+func (m *mockEntities) Get(ctx context.Context, t entmodel.EntityTypeName, id string) (*entmodel.Entity, error) {
+    args := m.Called(ctx, t, id)
+    if e := args.Get(0); e != nil {
+        return e.(*entmodel.Entity), args.Error(1)
+    }
+    return nil, args.Error(1)
+}
+
+func (m *mockEntities) GetMany(ctx context.Context, t entmodel.EntityTypeName, ids []string) ([]entmodel.Entity, error) {
+    args := m.Called(ctx, t, ids)
+    return args.Get(0).([]entmodel.Entity), args.Error(1)
+}
+
+func (m *mockEntities) GetType(ctx context.Context, t entmodel.EntityTypeName) (*entmodel.EntityType, error) {
+    args := m.Called(ctx, t)
+    if et := args.Get(0); et != nil {
+        return et.(*entmodel.EntityType), args.Error(1)
+    }
+    return nil, args.Error(1)
+}
+
+func TestCreate_RejectsInactiveType(t *testing.T) {
+    bundle := testutil.NewMockCore(t)
+    entities := &mockEntities{}
+
+    entities.On("GetType", mock.Anything, entmodel.EntityTypeName("vehicle")).
+        Return(&entmodel.EntityType{TypeName: "vehicle", Active: false}, nil)
+
+    svc := service.NewWithDeps(bundle.Core, nil, entities)
+
+    _, err := svc.Create(context.Background(), service.CreateInput{
+        EntityType: "vehicle",
+        EntityID:   "veh_x",
+    })
+
+    var coreErr *core.Error
+    assert.True(t, errors.As(err, &coreErr))
+    assert.Equal(t, 422, coreErr.HTTPStatus())
+    entities.AssertExpectations(t)
+}
+
+func TestCreate_RejectsMismatchedTypeAndID(t *testing.T) {
+    bundle := testutil.NewMockCore(t)
+    entities := &mockEntities{}
+
+    entities.On("GetType", mock.Anything, entmodel.EntityTypeName("vehicle")).
+        Return(&entmodel.EntityType{TypeName: "vehicle", Active: true}, nil)
+    // Vehicle type scope + patient-style ID returns nil.
+    entities.On("Get", mock.Anything, entmodel.EntityTypeName("vehicle"), "pat_jane").
+        Return(nil, nil)
+
+    svc := service.NewWithDeps(bundle.Core, nil, entities)
+
+    _, err := svc.Create(context.Background(), service.CreateInput{
+        EntityType: "vehicle",
+        EntityID:   "pat_jane",
+    })
+
+    assert.Error(t, err)
+    entities.AssertExpectations(t)
+}
+```
+
+For integration and e2e tests, wire the real entities module via `testutil.NewTestServer(t, entities.New(), serviceorders.New())` — tests then run against a real PostgreSQL schema via testcontainers. See the [Testing Guide](/guides/testing-guide/) for the broader pattern, fixtures, and helpers.
 
 ---
 
@@ -790,54 +907,6 @@ events:
       async: true
 ```
 
-**Service `Create`:**
-
-```go
-func (s *Service) Create(ctx context.Context, input CreateInput) (*Order, error) {
-    if input.EntityType == "" {
-        return nil, s.core.Errors.Validation("entity_type", "is required")
-    }
-    if input.EntityID == "" {
-        return nil, s.core.Errors.Validation("entity_id", "is required")
-    }
-    if err := s.core.Permission.MustCan(ctx, "service-orders.create"); err != nil {
-        return nil, err
-    }
-
-    typ, err := s.entities.GetType(ctx, entmodel.EntityTypeName(input.EntityType))
-    if err != nil {
-        return nil, err
-    }
-    if typ == nil || !typ.Active {
-        return nil, s.core.Errors.Validation("entity_type", "unknown or inactive")
-    }
-
-    allowed := core.SettingStringList(ctx, s.core.Config,
-        "service-orders", "allowed_entity_types", nil)
-    if len(allowed) > 0 && !slices.Contains(allowed, input.EntityType) {
-        return nil, s.core.Errors.Validation("entity_type", "not allowed")
-    }
-
-    target, err := s.entities.Get(ctx, typ.TypeName, input.EntityID)
-    if err != nil || target == nil {
-        return nil, s.core.Errors.NotFound(input.EntityType, input.EntityID)
-    }
-
-    // ... 5-step pattern: hook, tx insert + EmitTx, audit, log
-}
-```
-
-**Orphan handler:**
-
-```go
-func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
-    typeName, _ := ev.Payload["type_name"].(string)
-    publicID, _ := ev.Payload["public_id"].(string)
-    // Detach strategy: clear the reference, keep the order as a historical record
-    return s.repo.MarkEntityDetached(ctx, typeName, publicID)
-}
-```
-
 **Tenant configuration examples:**
 
 | Tenant | `allowed_entity_types` setting |
@@ -847,7 +916,7 @@ func (s *Service) OnEntityDeleted(ctx context.Context, ev core.Event) error {
 | `mixed-services-tenant` | `["vehicle", "appliance", "boat"]` |
 | `property-mgmt-tenant` (custom type) | `["unit"]` |
 
-Each tenant sees the same module, the same API, the same UI — but the dropdown of allowed target types is driven entirely by their settings.
+Each tenant sees the same module, the same API, the same UI — but the dropdown of allowed target types is driven entirely by their settings. The `Create` and `ListForDisplay` implementations are shown under [Pattern A](#pattern-a--polymorphic-per-row). The `OnEntityDeleted` handler uses the **Detach** strategy.
 
 ---
 
@@ -912,6 +981,7 @@ Billing hardcodes `"customer"` because every billing tenant has a customer conce
 | Anti-Pattern | Why It Breaks |
 |---|---|
 | Hardcoding a single entity type in a generic module | Different tenants need different target types — use Pattern A, B, or C |
+| Expecting hooks (`entities.before_delete` etc.) to block operations from your Go code | Hooks are tenant-configured webhooks/expressions, best-effort by design. They cannot reject an operation and cannot be subscribed to from another module's Go code. Use events for coordination and UX-layer guards for blocking |
 | Parsing the `cust_*` / `veh_*` prefix to infer the entity type | Prefixes are tenant-configurable via `EntityTypeConfig.PublicID.Prefix`; always carry an explicit `entity_type` |
 | Storing the entity's internal UUID instead of the public ID | Public IDs are the stable, human-readable contract; internal UUIDs leak implementation detail |
 | Adding a real DB-level FK from your `entity_id` column to entities | Cross-module FKs aren't enforced; the entities module owns those tables and applies permission scoping. Use the service API and the `entities.deleted` event |
@@ -921,9 +991,35 @@ Billing hardcodes `"customer"` because every billing tenant has a customer conce
 | Caching `Entity.Data` across requests | Tenants can edit fields at any time; reads should hit the entities service |
 | Calling `s.entities.Get` inside a `for` loop over a list page | Use `GetMany` for bulk decoration; group by `entity_type` first when polymorphic |
 | Validating `Entity.Data` against a hardcoded shape in your module | Read `Schema.Fields` from `GetType` — the tenant may have changed the type |
-| Subscribing to `entities.updated` and writing back into the entity | Creates feedback loops; use hooks (`entities.before_update`) for synchronous validation instead |
+| Subscribing to `entities.updated` and writing back into the entity | Creates feedback loops; reach for tenant-configured `entities.before_update` hooks (modify-only, not block) if you need synchronous customization |
+| Installing entity types on the tenant's behalf without explicit permission | Bootstrap is a tenant-admin action; consumer modules should detect absence and guide setup |
 | Failing your module's `Init` silently when the entities service resolves to `nil` | Make the dependency explicit in `module.yaml` and return a hard error |
 | Changing `target_entity_type` (Pattern B) after rows exist without a lock | Existing rows now point into a different type's namespace — lock the setting or snapshot the type per row (which is Pattern A in disguise) |
+
+---
+
+## Error Codes
+
+The entities module returns typed errors via `core.Error` — defined in `internal/modules/foundation/entities/model/errors.go`. Common codes a consumer module should recognize:
+
+| Code | HTTP | When |
+|---|---|---|
+| `ENTITIES.NOT_FOUND.TYPE` | 404 | Type does not exist for this tenant |
+| `ENTITIES.NOT_FOUND.ENTITY` | 404 | Entity does not exist, or caller cannot read it |
+| `ENTITIES.NOT_FOUND.RELATION_DEF` | 404 | Relation definition lookup failed |
+| `ENTITIES.NOT_FOUND.RELATION` | 404 | Relation instance lookup failed |
+| `ENTITIES.VALIDATION.TYPE_INACTIVE` | 422 | Type is deactivated; cannot create new entities |
+| `ENTITIES.VALIDATION.INVALID_DATA` | 422 | Entity data does not match the type schema |
+| `ENTITIES.VALIDATION.TYPE_HAS_ENTITIES` | 422 | Attempt to delete a type that still has entities |
+| `ENTITIES.VALIDATION.PUBLIC_ID_CONFIG_LOCKED` | 422 | Public ID config cannot change after entities exist |
+| `ENTITIES.CONFLICT.DUPLICATE_ENTITY` | 409 | Public ID collision |
+| `ENTITIES.CONFLICT.DUPLICATE_RELATION` | 409 | Relation already exists |
+| `ENTITIES.VALIDATION.TYPE_NOT_LINKABLE` | 422 | Type does not support user linking |
+| `ENTITIES.CONFLICT.ALREADY_LINKED` | 409 | Entity already linked to a user |
+| `ENTITIES.CONFLICT.USER_ALREADY_LINKED` | 409 | User already linked to an entity of this type |
+| `ENTITIES.VALIDATION.NOT_LINKED` | 422 | Entity is not linked to any user |
+
+In your consumer module, wrap entities errors with `fmt.Errorf("validating %s: %w", typeName, err)` for logging, or translate to your module's namespace when the caller-facing semantic differs — e.g. `ENTITIES.NOT_FOUND.ENTITY` becomes `SERVICE_ORDERS.NOT_FOUND.TARGET` if you want to abstract the dependency from API consumers.
 
 ---
 
@@ -942,4 +1038,4 @@ The full `EntitiesService` interface lives at `internal/modules/foundation/entit
 
 All entity-level methods (`Get`, `GetMany`, `List`, `Create`, `Update`, `Delete`, `ListRelations`, ...) require an `EntityTypeName` argument. Modules that don't know the type at compile time read it from a setting (Pattern B), from a per-row column (Pattern A), or from their instance config (Pattern C).
 
-See [Cross-Module Calls](/guides/cross-module-calls/) for the general pattern of consuming any module's service, [Multi-Instance Modules](/architecture/multi-instance-modules/) for Pattern C, and [Service Patterns](/guides/service-patterns/) for the surrounding 5-step structure your own service methods should follow.
+See [Cross-Module Calls](/guides/cross-module-calls/) for the general pattern of consuming any module's service, [Multi-Instance Modules](/architecture/multi-instance-modules/) for Pattern C, [Hooks](/architecture/hooks/) for the tenant-configurable customization mechanism, and [Service Patterns](/guides/service-patterns/) for the surrounding 5-step structure your own service methods should follow.
