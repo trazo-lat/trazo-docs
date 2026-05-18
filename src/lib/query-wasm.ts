@@ -227,18 +227,53 @@ export function loadQueryWasm(): Promise<QueryAPI> {
 
 /** Default schema preloaded into the playground. */
 export function defaultFields(): FieldConfig[] {
+  const TEXT: Op[] = ["=", "!=", "*", "?"];
+  const NUM: Op[] = ["=", "!=", ">", ">=", "<", "<=", ".."];
+  const DUR: Op[] = ["=", "!=", ">", ">=", "<", "<=", ".."];
+  const BOOL: Op[] = ["=", "!="];
   return [
-    { Name: "state", Type: FieldValueType.Text, AllowedOps: ["=", "!=", "*"] },
-    { Name: "name", Type: FieldValueType.Text, AllowedOps: ["=", "!=", "*"] },
-    { Name: "total", Type: FieldValueType.Decimal, AllowedOps: ["=", "!=", ">", ">=", "<", "<=", ".."] },
-    { Name: "year", Type: FieldValueType.Integer, AllowedOps: ["=", "!=", ">", ">=", "<", "<=", ".."] },
-    { Name: "active", Type: FieldValueType.Boolean, AllowedOps: ["=", "!="] },
-    { Name: "created_at", Type: FieldValueType.Date, AllowedOps: ["=", "!=", ">", ">=", "<", "<=", ".."] },
-    { Name: "ttl", Type: FieldValueType.Duration, AllowedOps: ["=", "!=", ">", ">=", "<", "<=", ".."] },
-    { Name: "labels", Type: FieldValueType.Text, AllowedOps: ["=", "!=", "*"], Nested: true },
-    { Name: "orders", Type: FieldValueType.Text, AllowedOps: ["=", "!=", "*"] },
-    { Name: "status", Type: FieldValueType.Text, AllowedOps: ["=", "!="] },
-    { Name: "price", Type: FieldValueType.Decimal, AllowedOps: ["=", "!=", ">", ">=", "<", "<="] },
+    // --- top-level scalars -------------------------------------------------
+    { Name: "state", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "name", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "nickname", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "description", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "customer_id", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "region", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "tags", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "category", Type: FieldValueType.Text, AllowedOps: TEXT },
+
+    // --- numeric ----------------------------------------------------------
+    { Name: "total", Type: FieldValueType.Decimal, AllowedOps: NUM },
+    { Name: "balance", Type: FieldValueType.Decimal, AllowedOps: NUM },
+    { Name: "year", Type: FieldValueType.Integer, AllowedOps: NUM },
+    { Name: "priority", Type: FieldValueType.Integer, AllowedOps: NUM },
+    { Name: "quantity", Type: FieldValueType.Integer, AllowedOps: NUM },
+
+    // --- boolean ----------------------------------------------------------
+    { Name: "active", Type: FieldValueType.Boolean, AllowedOps: BOOL },
+    { Name: "archived", Type: FieldValueType.Boolean, AllowedOps: BOOL },
+
+    // --- date / datetime / duration --------------------------------------
+    { Name: "created_at", Type: FieldValueType.Date, AllowedOps: NUM },
+    { Name: "updated_at", Type: FieldValueType.Datetime, AllowedOps: NUM },
+    { Name: "due_date", Type: FieldValueType.Date, AllowedOps: NUM },
+    { Name: "ttl", Type: FieldValueType.Duration, AllowedOps: DUR },
+
+    // --- nested dotted paths (labels.dev, labels.env, ttl.duration, ...) --
+    { Name: "labels", Type: FieldValueType.Text, AllowedOps: TEXT, Nested: true },
+    { Name: "tenant", Type: FieldValueType.Text, AllowedOps: TEXT, Nested: true },
+    { Name: "plan", Type: FieldValueType.Text, AllowedOps: TEXT, Nested: true },
+
+    // --- list containers (used as selector bases) -------------------------
+    { Name: "orders", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "line_items", Type: FieldValueType.Text, AllowedOps: TEXT },
+
+    // --- element-scoped fields resolved inside selectors -----------------
+    { Name: "status", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "sku", Type: FieldValueType.Text, AllowedOps: TEXT },
+    { Name: "price", Type: FieldValueType.Decimal, AllowedOps: NUM },
+    { Name: "qty", Type: FieldValueType.Integer, AllowedOps: NUM },
+    { Name: "in_stock", Type: FieldValueType.Boolean, AllowedOps: BOOL },
   ];
 }
 
@@ -249,7 +284,13 @@ export const EXAMPLES: { label: string; query: string }[] = [
   { label: "Arithmetic in value position", query: "total>=50000*1.1" },
   { label: "Selector (any)", query: "orders@(status=shipped)" },
   { label: "Selector (all)", query: "orders@all(price>0)" },
+  { label: "Selector (none)", query: "orders@none(status=cancelled)" },
   { label: "IN list + implicit AND", query: "state IN (draft, issued) year>=2025" },
+  { label: "Wildcard prefix", query: "name=John*" },
+  { label: "Wildcard contains", query: "description=*urgent*" },
+  { label: "Negated comparison (missing-field safe)", query: "total!>50000" },
   { label: "Quoted string + escape", query: 'name="John Doe"' },
-  { label: "Coalesce / if", query: 'coalesce(nickname, name)="John"' },
+  { label: "Coalesce + fallback", query: 'coalesce(nickname, name)="John"' },
+  { label: "if (ternary builtin)", query: 'if(active, "on", "off")="on"' },
+  { label: "Nested field", query: "labels.env=prod AND tenant.status=trial" },
 ];

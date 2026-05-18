@@ -46,22 +46,60 @@ interface State {
 
 const DEFAULT_RECORDS = JSON.stringify(
   [
-    { state: "draft", total: 60000, name: "John Doe", year: 2026 },
-    { state: "draft", total: 30000, name: "Jane Smith", year: 2026 },
-    { state: "issued", total: 75000, name: "Acme Corp", year: 2026 },
-    { state: "draft", name: "Missing total" },
+    {
+      state: "draft",
+      total: 60000,
+      name: "John Doe",
+      nickname: "Johnny",
+      year: 2026,
+      active: true,
+      region: "US",
+      orders: [{ status: "shipped", price: 200 }, { status: "pending", price: 50 }],
+    },
+    {
+      state: "draft",
+      total: 30000,
+      name: "Jane Smith",
+      year: 2026,
+      active: true,
+      region: "EU",
+      orders: [{ status: "shipped", price: 100 }],
+    },
+    {
+      state: "issued",
+      total: 75000,
+      name: "Acme Corp",
+      year: 2026,
+      active: true,
+      region: "US",
+      orders: [{ status: "delivered", price: 500 }, { status: "delivered", price: 300 }],
+    },
+    {
+      state: "cancelled",
+      total: 90000,
+      name: "Globex Inc",
+      year: 2025,
+      active: false,
+      region: "EU",
+      orders: [{ status: "cancelled", price: 0 }],
+    },
+    { state: "draft", name: "Missing total", year: 2026 },
   ],
   null,
   2,
 );
 
+// Reference Starlight's theme tokens so the editor swaps cleanly between
+// light and dark. The panel uses gray-5 (more contrast against the page
+// background, which is gray-6/black) and inner code surfaces use gray-6.
 const PALETTE = {
-  panelBg: "var(--sl-color-gray-6, #1B1A19)",
-  surface: "var(--sl-color-gray-5, #2B2A28)",
-  border: "var(--sl-color-gray-4, #4F4D48)",
-  text: "var(--sl-color-white, #F5F2EC)",
-  muted: "var(--sl-color-gray-2, #B7B4AD)",
-  accent: "var(--sl-color-accent, #6E68D9)",
+  panelBg: "var(--sl-color-gray-5)",
+  surface: "var(--sl-color-gray-6)",
+  border: "var(--sl-color-gray-3)",
+  borderSubtle: "var(--sl-color-gray-4)",
+  text: "var(--sl-color-white)",
+  muted: "var(--sl-color-gray-2)",
+  accent: "var(--sl-color-accent)",
   coral: "var(--heyllave-coral, #FF6B5B)",
   coralDeep: "var(--heyllave-coral-deep, #E84D3C)",
 };
@@ -268,7 +306,7 @@ export default function QueryEditor() {
     <div
       style={{
         background: PALETTE.panelBg,
-        border: `1px solid ${PALETTE.border}`,
+        border: `1px solid ${PALETTE.borderSubtle}`,
         borderRadius: 12,
         padding: 16,
         margin: "1.5rem 0",
@@ -276,6 +314,7 @@ export default function QueryEditor() {
           "system-ui, -apple-system, 'Segoe UI', Roboto, Inter, sans-serif",
         fontSize: 14,
         color: PALETTE.text,
+        boxShadow: "0 1px 3px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.04)",
       }}
     >
       <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
@@ -330,7 +369,15 @@ export default function QueryEditor() {
         />
       )}
 
-      <nav style={{ display: "flex", gap: 4, marginTop: 12, borderBottom: `1px solid ${PALETTE.border}` }}>
+      <nav
+        style={{
+          display: "flex",
+          gap: 2,
+          marginTop: 14,
+          padding: "0 0 0 0",
+          borderBottom: `1px solid ${PALETTE.borderSubtle}`,
+        }}
+      >
         {(Object.keys(TAB_LABELS) as Tab[]).map((tab) => {
           const active = state.tab === tab;
           const badge =
@@ -344,11 +391,19 @@ export default function QueryEditor() {
               key={tab}
               onClick={() => setState((s) => ({ ...s, tab }))}
               style={{
-                background: "transparent",
+                background: active ? PALETTE.surface : "transparent",
                 border: "none",
-                borderBottom: active ? `2px solid ${PALETTE.coral}` : "2px solid transparent",
+                borderTop: active ? `1px solid ${PALETTE.borderSubtle}` : "1px solid transparent",
+                borderLeft: active ? `1px solid ${PALETTE.borderSubtle}` : "1px solid transparent",
+                borderRight: active ? `1px solid ${PALETTE.borderSubtle}` : "1px solid transparent",
+                borderBottom: active
+                  ? `2px solid ${PALETTE.coral}`
+                  : "2px solid transparent",
+                borderTopLeftRadius: 6,
+                borderTopRightRadius: 6,
                 color: active ? PALETTE.text : PALETTE.muted,
-                padding: "8px 12px",
+                padding: "8px 14px",
+                marginBottom: -1, // overlap the nav's border-bottom for a tabbed look
                 cursor: "pointer",
                 fontFamily: "inherit",
                 fontSize: 13,
@@ -356,6 +411,7 @@ export default function QueryEditor() {
                 display: "flex",
                 gap: 6,
                 alignItems: "center",
+                transition: "color 0.12s ease",
               }}
             >
               {TAB_LABELS[tab]}
