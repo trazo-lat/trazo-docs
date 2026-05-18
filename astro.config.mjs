@@ -123,6 +123,7 @@ export default defineConfig({
         {
           label: 'Subsystem Guides',
           items: [
+            { label: 'Using Entities', slug: 'guides/using-entities' },
             { label: 'Sending Notifications', slug: 'guides/notifications' },
             { label: 'Status Machines', slug: 'guides/status-machines' },
             { label: 'Hooks', slug: 'guides/hooks' },
