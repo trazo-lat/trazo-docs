@@ -22,7 +22,7 @@ import {
 } from "../lib/query-wasm";
 import { toSql } from "../lib/query-sql";
 
-type Tab = "ast" | "roundtrip" | "errors" | "tokens" | "sql";
+type Tab = "ast" | "roundtrip" | "errors" | "tokens" | "sql" | "match";
 
 interface State {
   query: string;
@@ -35,10 +35,25 @@ interface State {
   roundtrip: string | null;
   validateErrors: string[];
   tokens: TokenInfo[];
+  recordsText: string;
+  recordsError: string | null;
+  matchError: string | null;
+  matched: boolean[];
   tab: Tab;
   showSchema: boolean;
   copied: "ast" | "url" | null;
 }
+
+const DEFAULT_RECORDS = JSON.stringify(
+  [
+    { state: "draft", total: 60000, name: "John Doe", year: 2026 },
+    { state: "draft", total: 30000, name: "Jane Smith", year: 2026 },
+    { state: "issued", total: 75000, name: "Acme Corp", year: 2026 },
+    { state: "draft", name: "Missing total" },
+  ],
+  null,
+  2,
+);
 
 const PALETTE = {
   panelBg: "var(--sl-color-gray-6, #1B1A19)",
@@ -52,6 +67,7 @@ const PALETTE = {
 };
 
 const TAB_LABELS: Record<Tab, string> = {
+  match: "Match",
   ast: "AST",
   roundtrip: "Round-trip",
   errors: "Errors",
@@ -100,7 +116,11 @@ export default function QueryEditor() {
     roundtrip: null,
     validateErrors: [],
     tokens: [],
-    tab: "ast",
+    recordsText: DEFAULT_RECORDS,
+    recordsError: null,
+    matchError: null,
+    matched: [],
+    tab: "match",
     showSchema: false,
     copied: null,
   });
@@ -122,41 +142,81 @@ export default function QueryEditor() {
     };
   }, []);
 
-  // Recompute outputs whenever query / fields / api change.
-  const compute = useCallback((api: QueryAPI, query: string, fields: FieldConfig[]) => {
-    const parsed = api.parse(query);
-    const tokens = api.tokens(query);
+  // Recompute outputs whenever query / fields / records / api change.
+  const compute = useCallback(
+    (
+      api: QueryAPI,
+      query: string,
+      fields: FieldConfig[],
+      recordsText: string,
+    ) => {
+      const parsed = api.parse(query);
+      const tokens = api.tokens(query);
 
-    let ast: Expression | null = null;
-    let parseError: string | null = null;
-    let roundtrip: string | null = null;
-    let validateErrors: string[] = [];
+      let ast: Expression | null = null;
+      let parseError: string | null = null;
+      let roundtrip: string | null = null;
+      let validateErrors: string[] = [];
 
-    if (parsed.error) {
-      parseError = parsed.error;
-    } else if (parsed.result) {
-      ast = parsed.result;
-      const rt = api.stringify(ast);
-      roundtrip = rt.result ?? rt.error ?? null;
-      const v = api.validate(ast, fields);
-      if (!v.valid && v.errors) validateErrors = v.errors;
-    }
+      if (parsed.error) {
+        parseError = parsed.error;
+      } else if (parsed.result) {
+        ast = parsed.result;
+        const rt = api.stringify(ast);
+        roundtrip = rt.result ?? rt.error ?? null;
+        const v = api.validate(ast, fields);
+        if (!v.valid && v.errors) validateErrors = v.errors;
+      }
 
-    setState((s) => ({
-      ...s,
-      ast,
-      parseError,
-      roundtrip,
-      validateErrors,
-      tokens: Array.isArray(tokens.result) ? tokens.result : [],
-    }));
-  }, []);
+      // Match against the records textarea — independent of validation errors,
+      // so a tenant playing with a schema can still see matches against the
+      // base parsed query.
+      let recordsError: string | null = null;
+      let matchError: string | null = null;
+      let matched: boolean[] = [];
+      let records: Array<Record<string, unknown>> = [];
+      try {
+        const parsedRecords = JSON.parse(recordsText);
+        if (!Array.isArray(parsedRecords)) {
+          recordsError = "Records must be a JSON array of objects.";
+        } else {
+          records = parsedRecords;
+        }
+      } catch (e) {
+        recordsError = (e as Error).message;
+      }
+      if (!recordsError && ast && !parseError) {
+        // For matching, we ignore validation errors and call match against the
+        // bare query — eval.Compile re-validates internally and surfaces any
+        // compilation error here.
+        const r = api.match(query, fields, records);
+        if (r.error) matchError = r.error;
+        else matched = r.result?.matched ?? [];
+      }
+
+      setState((s) => ({
+        ...s,
+        ast,
+        parseError,
+        roundtrip,
+        validateErrors,
+        tokens: Array.isArray(tokens.result) ? tokens.result : [],
+        recordsError,
+        matchError,
+        matched,
+      }));
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!state.api) return;
-    const handle = window.setTimeout(() => compute(state.api!, state.query, state.fields), 80);
+    const handle = window.setTimeout(
+      () => compute(state.api!, state.query, state.fields, state.recordsText),
+      80,
+    );
     return () => window.clearTimeout(handle);
-  }, [state.api, state.query, state.fields, compute]);
+  }, [state.api, state.query, state.fields, state.recordsText, compute]);
 
   const sql = useMemo(() => (state.ast ? toSql(state.ast) : null), [state.ast]);
 
@@ -321,6 +381,50 @@ export default function QueryEditor() {
       </nav>
 
       <div style={{ padding: "12px 0", minHeight: 220 }}>
+        {state.tab === "match" && (
+          <Pane>
+            <p style={{ color: PALETTE.muted, fontSize: 12, marginBottom: 6 }}>
+              Records (JSON array). The query is compiled and evaluated against
+              each record; the result column shows whether it matched.
+            </p>
+            <textarea
+              value={state.recordsText}
+              onChange={(e) =>
+                setState((s) => ({ ...s, recordsText: e.target.value }))
+              }
+              spellCheck={false}
+              rows={8}
+              style={{
+                width: "100%",
+                padding: "10px 12px",
+                background: PALETTE.surface,
+                border: `1px solid ${state.recordsError ? PALETTE.coral : PALETTE.border}`,
+                borderRadius: 8,
+                color: PALETTE.text,
+                fontFamily:
+                  "ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace",
+                fontSize: 12,
+                lineHeight: 1.5,
+                resize: "vertical",
+                outline: "none",
+                marginBottom: 10,
+              }}
+            />
+            {state.recordsError && (
+              <ErrorRow label="Records JSON" message={state.recordsError} />
+            )}
+            {state.matchError && (
+              <ErrorRow label="Match" message={state.matchError} />
+            )}
+            {!state.recordsError && !state.matchError && (
+              <MatchTable
+                recordsText={state.recordsText}
+                matched={state.matched}
+              />
+            )}
+          </Pane>
+        )}
+
         {state.tab === "ast" && (
           <Pane
             actions={
@@ -610,6 +714,74 @@ function FieldRow({
       >
         ×
       </button>
+    </>
+  );
+}
+
+function MatchTable({
+  recordsText,
+  matched,
+}: {
+  recordsText: string;
+  matched: boolean[];
+}) {
+  let records: Array<Record<string, unknown>> = [];
+  try {
+    const parsed = JSON.parse(recordsText);
+    if (Array.isArray(parsed)) records = parsed;
+  } catch {
+    return null;
+  }
+  if (records.length === 0) {
+    return <Empty>No records.</Empty>;
+  }
+  const matchCount = matched.filter(Boolean).length;
+  return (
+    <>
+      <p style={{ color: PALETTE.muted, fontSize: 12, marginBottom: 6 }}>
+        {matchCount} of {records.length} match.
+      </p>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+        <thead>
+          <tr>
+            <Th>#</Th>
+            <Th>record</Th>
+            <Th>matched</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {records.map((r, i) => {
+            const m = matched[i] ?? false;
+            return (
+              <tr key={i}>
+                <Td muted>{i}</Td>
+                <Td mono>{JSON.stringify(r)}</Td>
+                <td
+                  style={{
+                    padding: "5px 8px",
+                    fontWeight: 600,
+                    fontSize: 12,
+                    color: m ? "#1B1A19" : PALETTE.muted,
+                    borderBottom: `1px solid ${PALETTE.surface}`,
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "inline-block",
+                      padding: "2px 8px",
+                      borderRadius: 999,
+                      background: m ? PALETTE.coral : "transparent",
+                      border: m ? "none" : `1px solid ${PALETTE.border}`,
+                    }}
+                  >
+                    {m ? "match" : "—"}
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </>
   );
 }

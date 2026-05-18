@@ -138,12 +138,22 @@ export interface TokensResult {
   error?: string;
 }
 
+export interface MatchResult {
+  result?: { matched: boolean[] };
+  error?: string;
+}
+
 export interface QueryAPI {
   parse: (q: string, maxLength?: number) => ParseResult;
   validate: (ast: Expression, fields: FieldConfig[]) => ValidateResult;
   stringify: (ast: Expression) => StringifyResult;
   parseAndValidate: (q: string, fields: FieldConfig[]) => ParseResult;
   tokens: (q: string, maxLength?: number) => TokensResult;
+  match: (
+    q: string,
+    fields: FieldConfig[],
+    records: Array<Record<string, unknown>>,
+  ) => MatchResult;
 }
 
 declare global {
@@ -153,6 +163,11 @@ declare global {
   function queryStringify(astJSON: string): StringifyResult;
   function queryParseAndValidate(q: string, fieldsJSON: string): ParseResult;
   function queryTokens(q: string, maxLength?: number): TokensResult;
+  function queryMatch(
+    q: string,
+    fieldsJSON: string,
+    recordsJSON: string,
+  ): MatchResult;
 
   // wasm_exec.js attaches Go to the global scope.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -203,6 +218,8 @@ export function loadQueryWasm(): Promise<QueryAPI> {
       parseAndValidate: (q, fields) =>
         queryParseAndValidate(q, JSON.stringify(fields)),
       tokens: (q, maxLength) => queryTokens(q, maxLength),
+      match: (q, fields, records) =>
+        queryMatch(q, JSON.stringify(fields), JSON.stringify(records)),
     } satisfies QueryAPI;
   })();
   return loaderPromise;
