@@ -321,47 +321,47 @@ export default function QueryEditor() {
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 12,
+          gap: 8,
           flexWrap: "wrap",
-          marginBottom: 12,
+          marginBottom: 10,
         }}
       >
-        <span style={{ fontWeight: 600, letterSpacing: -0.2 }}>
-          Query playground
-        </span>
+        <ExampleDropdown
+          onPick={(q) => setState((s) => ({ ...s, query: q }))}
+          disabled={!state.api}
+        />
+        <Button onClick={copyShareUrl} disabled={!state.api}>
+          {state.copied === "url" ? "URL copied" : "Share URL"}
+        </Button>
+        <Button
+          onClick={() =>
+            setState((s) => ({ ...s, showSchema: !s.showSchema }))
+          }
+        >
+          {state.showSchema ? "Hide schema" : "Edit schema"}
+        </Button>
         {state.loading && (
-          <span style={{ color: PALETTE.muted, fontSize: 12 }}>
+          <span
+            style={{
+              color: PALETTE.muted,
+              fontSize: 12,
+              marginLeft: "auto",
+            }}
+          >
             Loading WASM…
           </span>
         )}
         {state.loadError && (
-          <span style={{ color: PALETTE.coral, fontSize: 12 }}>
+          <span
+            style={{
+              color: PALETTE.coral,
+              fontSize: 12,
+              marginLeft: "auto",
+            }}
+          >
             WASM load failed: {state.loadError}
           </span>
         )}
-        <div
-          style={{
-            display: "flex",
-            gap: 8,
-            alignItems: "center",
-            marginLeft: "auto",
-          }}
-        >
-          <ExampleDropdown
-            onPick={(q) => setState((s) => ({ ...s, query: q }))}
-            disabled={!state.api}
-          />
-          <Button onClick={copyShareUrl} disabled={!state.api}>
-            {state.copied === "url" ? "URL copied" : "Share URL"}
-          </Button>
-          <Button
-            onClick={() =>
-              setState((s) => ({ ...s, showSchema: !s.showSchema }))
-            }
-          >
-            {state.showSchema ? "Hide schema" : "Edit schema"}
-          </Button>
-        </div>
       </header>
 
       <textarea
@@ -397,9 +397,8 @@ export default function QueryEditor() {
       <nav
         style={{
           display: "flex",
-          gap: 2,
+          gap: 4,
           marginTop: 14,
-          padding: "0 0 0 0",
           borderBottom: `1px solid ${PALETTE.borderSubtle}`,
         }}
       >
@@ -416,19 +415,14 @@ export default function QueryEditor() {
               key={tab}
               onClick={() => setState((s) => ({ ...s, tab }))}
               style={{
-                background: active ? PALETTE.surface : "transparent",
+                background: "transparent",
                 border: "none",
-                borderTop: active ? `1px solid ${PALETTE.borderSubtle}` : "1px solid transparent",
-                borderLeft: active ? `1px solid ${PALETTE.borderSubtle}` : "1px solid transparent",
-                borderRight: active ? `1px solid ${PALETTE.borderSubtle}` : "1px solid transparent",
                 borderBottom: active
                   ? `2px solid ${PALETTE.coral}`
                   : "2px solid transparent",
-                borderTopLeftRadius: 6,
-                borderTopRightRadius: 6,
                 color: active ? PALETTE.text : PALETTE.muted,
-                padding: "8px 14px",
-                marginBottom: -1, // overlap the nav's border-bottom for a tabbed look
+                padding: "8px 10px",
+                marginBottom: -1, // overlap the nav's border-bottom
                 cursor: "pointer",
                 fontFamily: "inherit",
                 fontSize: 13,
@@ -436,6 +430,7 @@ export default function QueryEditor() {
                 display: "flex",
                 gap: 6,
                 alignItems: "center",
+                lineHeight: 1.2,
                 transition: "color 0.12s ease",
               }}
             >
