@@ -317,15 +317,36 @@ export default function QueryEditor() {
         boxShadow: "0 1px 3px rgba(0, 0, 0, 0.06), 0 8px 24px rgba(0, 0, 0, 0.04)",
       }}
     >
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 }}>
-        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-          <span style={{ fontWeight: 600, letterSpacing: -0.2 }}>Query playground</span>
-          {state.loading && <span style={{ color: PALETTE.muted, fontSize: 12 }}>Loading WASM…</span>}
-          {state.loadError && (
-            <span style={{ color: PALETTE.coral, fontSize: 12 }}>WASM load failed: {state.loadError}</span>
-          )}
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+      <header
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 12,
+        }}
+      >
+        <span style={{ fontWeight: 600, letterSpacing: -0.2 }}>
+          Query playground
+        </span>
+        {state.loading && (
+          <span style={{ color: PALETTE.muted, fontSize: 12 }}>
+            Loading WASM…
+          </span>
+        )}
+        {state.loadError && (
+          <span style={{ color: PALETTE.coral, fontSize: 12 }}>
+            WASM load failed: {state.loadError}
+          </span>
+        )}
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            marginLeft: "auto",
+          }}
+        >
           <ExampleDropdown
             onPick={(q) => setState((s) => ({ ...s, query: q }))}
             disabled={!state.api}
@@ -333,7 +354,11 @@ export default function QueryEditor() {
           <Button onClick={copyShareUrl} disabled={!state.api}>
             {state.copied === "url" ? "URL copied" : "Share URL"}
           </Button>
-          <Button onClick={() => setState((s) => ({ ...s, showSchema: !s.showSchema }))}>
+          <Button
+            onClick={() =>
+              setState((s) => ({ ...s, showSchema: !s.showSchema }))
+            }
+          >
             {state.showSchema ? "Hide schema" : "Edit schema"}
           </Button>
         </div>
@@ -639,6 +664,8 @@ function ExampleDropdown({
         fontFamily: "inherit",
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.5 : 1,
+        width: 160,
+        maxWidth: 200,
       }}
     >
       <option value="" disabled>

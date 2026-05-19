@@ -301,20 +301,21 @@ export function defaultFields(): FieldConfig[] {
   ];
 }
 
-/** Canned example queries for the dropdown. */
+/** Canned example queries for the dropdown. Labels are kept short so the
+ * dropdown stays compact in the playground toolbar. */
 export const EXAMPLES: { label: string; query: string }[] = [
   { label: "Equality + comparison", query: "state=draft AND total>=50000" },
-  { label: "Range + functions", query: "created_at:daysAgo(30)..now()" },
-  { label: "Arithmetic in value position", query: "total>=50000*1.1" },
-  { label: "Selector (any)", query: "orders@(status=shipped)" },
-  { label: "Selector (all)", query: "orders@all(price>0)" },
-  { label: "Selector (none)", query: "orders@none(status=cancelled)" },
-  { label: "IN list + implicit AND", query: "state IN (draft, issued) year>=2025" },
+  { label: "Range with functions", query: "created_at:daysAgo(30)..now()" },
+  { label: "Arithmetic in value", query: "total>=50000*1.1" },
+  { label: "Selector @any", query: "orders@(status=shipped)" },
+  { label: "Selector @all", query: "orders@all(price>0)" },
+  { label: "Selector @none", query: "orders@none(status=cancelled)" },
+  { label: "IN + implicit AND", query: "state IN (draft, issued) year>=2025" },
   { label: "Wildcard prefix", query: "name=John*" },
   { label: "Wildcard contains", query: "description=*urgent*" },
-  { label: "Negated comparison (missing-field safe)", query: "total!>50000" },
-  { label: "Quoted string + escape", query: 'name="John Doe"' },
-  { label: "Coalesce + fallback", query: 'coalesce(nickname, name)="John"' },
-  { label: "if (ternary builtin)", query: 'if(active, "on", "off")="on"' },
+  { label: "Negated comparison", query: "total!>50000" },
+  { label: "Quoted string", query: 'name="John Doe"' },
+  { label: "coalesce()", query: 'coalesce(nickname, name)="John"' },
+  { label: "if() ternary", query: 'if(active, "on", "off")="on"' },
   { label: "Nested field", query: "labels.env=prod AND tenant.status=trial" },
 ];
