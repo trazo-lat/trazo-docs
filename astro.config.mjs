@@ -171,6 +171,18 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Query Language',
+          items: [
+            { label: 'Overview', slug: 'query/overview' },
+            { label: 'Playground', slug: 'query/playground', badge: { text: 'New', variant: 'tip' } },
+            { label: 'Syntax Reference', slug: 'query/syntax' },
+            { label: 'Examples Cookbook', slug: 'query/examples' },
+            { label: 'Code Generation', slug: 'query/codegen' },
+            { label: 'FAQ & Gotchas', slug: 'query/faq' },
+            { label: 'Coverage & Tradeoffs', slug: 'query/coverage' },
+          ],
+        },
+        {
           label: 'Reference',
           items: [
             { label: 'Core Types', slug: 'reference/core-types' },

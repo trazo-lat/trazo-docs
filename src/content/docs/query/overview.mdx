@@ -1,0 +1,165 @@
+---
+title: Query Language Overview
+description: Unified query syntax used across Heyllave clients (CLI, Web UI, API, VS Code, WASM). Pure Go, zero external dependencies, WASM-compilable.
+---
+
+import { Aside, Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import FlowDiagram from '../../../components/FlowDiagram';
+import heroDark from '../../../assets/query-overview-hero.webp';
+import heroLight from '../../../assets/query-overview-hero-light.webp';
+
+<Image src={heroDark}  alt="A search bar parses into an abstract syntax tree that fans out into SQL, JSON, and Go predicate targets." class="hero-dark" />
+<Image src={heroLight} alt="A search bar parses into an abstract syntax tree that fans out into SQL, JSON, and Go predicate targets." class="hero-light" />
+
+Heyllave ships a single query language shared by every client surface: the search bar in the Web UI, the `?q=` parameter on API endpoints, the CLI `query explain` command, the VS Code extension, and the WASM bundle that runs in the browser. The library lives at [`github.com/heyllave/query`](https://github.com/heyllave/query).
+
+The language is designed for two readers at once:
+
+- **End users** typing into a search bar. No quotes around identifiers, no `==`, no `&&` — just `state=draft AND total>50000`. The literal characters survive a `?q=` round-trip without URL encoding.
+- **Backends** that need to push the filter down to PostgreSQL, MongoDB, or an in-memory list. A single AST drives multiple code generators via a typed `Visitor[T]` pattern; see [Code Generation](/query/codegen/).
+
+---
+
+## At a Glance
+
+<CardGrid>
+  <Card title="URL-safe syntax" icon="magnifier">
+    `state=draft AND total>50000` survives a `?q=` round-trip without encoding. No quotes around identifiers, no `==`, no `&&`.
+  </Card>
+  <Card title="Zero dependencies" icon="seti:go">
+    Pure Go standard library. Compiles to WASM without pulling in `reflect/unsafe/regex` from third parties.
+  </Card>
+  <Card title="Multi-target codegen" icon="puzzle">
+    One AST drives SQL `WHERE`, MongoDB filters, in-memory predicates, React filter chips — anything implementable as `Visitor[T]`.
+  </Card>
+  <Card title="Compile-time type safety" icon="approve-check-circle">
+    `CompileFor[T]` infers field configs from `query:"..."` struct tags. Typos and type mismatches surface before the first record is evaluated.
+  </Card>
+  <Card title="Query sandboxing" icon="seti:lock">
+    `WithAllowedFields`, `WithAllowedOps`, `WithMaxDepth`, `WithMaxLength`, and custom `AstValidator` let you expose different capabilities to different roles.
+  </Card>
+  <Card title="Rich value types" icon="seti:clock">
+    Wildcards (`John*`), dates (`2026-01-01`), durations (`7d`, `4h`), ranges (`start..end`), arithmetic (`now()-7d`), and functions as first-class values.
+  </Card>
+</CardGrid>
+
+---
+
+## Quick Example
+
+```go
+import (
+    "github.com/heyllave/query/eval"
+    "github.com/heyllave/query/validate"
+)
+
+fields := []validate.FieldConfig{
+    {Name: "state", Type: validate.TypeText, AllowedOps: validate.TextOps},
+    {Name: "total", Type: validate.TypeDecimal, AllowedOps: validate.NumericOps},
+    {Name: "created_at", Type: validate.TypeDate, AllowedOps: validate.DateOps},
+}
+
+prog, err := eval.Compile("state=draft AND total>=50000*1.1 AND created_at>=now()-7d", fields)
+if err != nil {
+    // validation error: unknown field, disallowed operator, type mismatch, etc.
+}
+
+prog.Match(map[string]any{
+    "state":      "draft",
+    "total":      60000.0,
+    "created_at": time.Now().Add(-3 * 24 * time.Hour),
+}) // true
+```
+
+One call compiles, validates, and produces an executable program. `Match` returns `true`/`false` against a `map[string]any` accessor; `MatchStruct` does the same with reflection-backed Go structs.
+
+<Aside type="tip">
+For type-safe compilation against a Go struct, use `eval.CompileFor[T]` — field name typos and value-type mismatches are caught at compile time, before any data is evaluated.
+</Aside>
+
+---
+
+## Pipeline
+
+A query expression flows through five stages, each living in a focused sub-package. The AST is the inflection point: every consumer downstream of parsing sees the same tree, whether they evaluate against records or generate code for a different target.
+
+<FlowDiagram
+  client:visible
+  direction="LR"
+  height={320}
+  nodes={[
+    { id: 'q', label: 'Raw string', sub: 'state=draft AND total>50000', variant: 'muted', width: 220 },
+    { id: 'tok', label: 'token', sub: 'lex → []Token', variant: 'default' },
+    { id: 'par', label: 'parser', sub: 'recursive descent', variant: 'default' },
+    { id: 'ast', label: 'ast', sub: 'Expression tree', variant: 'accent' },
+    { id: 'val', label: 'validate', sub: 'fields · ops · types', variant: 'default' },
+    { id: 'eval', label: 'eval', sub: 'closure tree', variant: 'default' },
+    { id: 'match', label: 'Match(record)', sub: 'true / false', variant: 'coral' },
+    { id: 'vis', label: 'Visitor[T]', sub: 'SQL · JSON · filter', variant: 'coral', width: 220 },
+  ]}
+  edges={[
+    { source: 'q', target: 'tok' },
+    { source: 'tok', target: 'par' },
+    { source: 'par', target: 'ast' },
+    { source: 'ast', target: 'val' },
+    { source: 'val', target: 'eval' },
+    { source: 'eval', target: 'match' },
+    { source: 'ast', target: 'vis', label: 'codegen', dashed: true },
+  ]}
+/>
+
+| Stage | Package | Responsibility |
+|-------|---------|----------------|
+| Lex | `query/token` | Token types, position tracking, the `Quoted` flag |
+| Parse | `query/parser` | Recursive descent → AST; arithmetic, IN, selectors, implicit AND |
+| AST | `query/ast` | Node types, `Walk`, `Visitor[T]`, `String` round-trip |
+| Validate | `query/validate` | Field config, type compatibility, operator allowlists, custom rules |
+| Evaluate | `query/eval` | Compile to closure tree, match against accessors or structs |
+
+The top-level `query` package re-exposes the common entry points (`Parse`, `Validate`, `ParseAndValidate`) so callers that only need parsing can avoid pulling in `eval`.
+
+---
+
+## Where It Runs
+
+| Surface | Entry point | Notes |
+|---------|-------------|-------|
+| Web UI search bar | WASM (`query/wasm`) | Compiled to `.wasm` and loaded by the TypeScript wrapper; same AST as the server |
+| HTTP `?q=` filter | `query.ParseAndValidate` → repository layer | Each repository declares allowed fields via `validate.FieldConfig` |
+| CLI | `query explain <q>` | AST tree, JSON, or token stream for debugging |
+| VS Code extension | WASM bridge to TS extension host | Round-trips through `ast.String` for formatting |
+| Custom adapters | `ast.Visitor[T]` | One AST, many outputs — SQL `WHERE`, MongoDB filter, in-memory predicate |
+
+---
+
+## Next Steps
+
+<CardGrid>
+  <LinkCard
+    title="Syntax Reference"
+    description="Every operator, value type, and grammatical construct that parses."
+    href="/query/syntax/"
+  />
+  <LinkCard
+    title="Examples Cookbook"
+    description="Working queries for common patterns, plus complex multi-feature examples."
+    href="/query/examples/"
+  />
+  <LinkCard
+    title="Code Generation"
+    description="Build SQL, JSON, or in-memory adapters via the Visitor[T] pattern."
+    href="/query/codegen/"
+  />
+  <LinkCard
+    title="FAQ & Gotchas"
+    description="Empirically verified answers to the questions integrators actually ask."
+    href="/query/faq/"
+  />
+</CardGrid>
+
+---
+
+## When to Use This vs. expr-lang
+
+This library covers the **search/filter** lane — narrow on purpose so the syntax stays URL-safe and the AST stays easy to translate to other targets. For business-rule evaluation (arithmetic over arbitrary expressions, computed fields, templates) use [`expr-lang/expr`](https://github.com/expr-lang/expr) instead. The [Coverage & Tradeoffs](/query/coverage/) page lays out the deliberate carve-outs.

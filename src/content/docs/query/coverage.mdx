@@ -1,0 +1,198 @@
+---
+title: Coverage & Tradeoffs
+description: What the query language supports, what's intentionally left out, and the performance characteristics of the evaluation engine.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import heroDark from '../../../assets/query-coverage-hero.webp';
+import heroLight from '../../../assets/query-coverage-hero-light.webp';
+
+<Image src={heroDark}  alt="In-scope features clustered on the left, carved-out features struck through on the right" class="hero-dark" />
+<Image src={heroLight} alt="In-scope features clustered on the left, carved-out features struck through on the right" class="hero-light" />
+
+This page is the audit trail. Every decision below is deliberate — if you find yourself wanting one of the carved-out features, the path is almost always to register a custom function or wrap the library at the boundary, not to extend the grammar.
+
+---
+
+## Closed Gaps (Now Supported)
+
+The library was originally a tiny filter syntax. Over time the search bar grew, and the gap with general-purpose expression languages started to bite. The following items have been **resolved** since the initial release:
+
+| Feature | Syntax |
+|---------|--------|
+| Quoted string literals | `name="John Doe"` with `\"`, `\\`, `\n`, `\t`, `\r` |
+| `IN` shorthand | `state IN (draft, issued, paid)` |
+| Case-insensitive keywords | `and`, `or`, `not`, `in` accepted in any case |
+| Negated comparisons | `total!>50000` ≡ `NOT total>50000` (missing-field safe) |
+| Functions in value position | `created_at>=now()`, `total>=daysAgo(7)` |
+| Functions in any position | `addDays(start, 7)`, `between(start, 2026-01-01, 2026-12-31)` |
+| Arithmetic in value position | `total>=50000*1.1`, `(50000+1000)*1.1`, `now()-7d` |
+| Implicit `AND` | `state=draft total>1000` |
+| Universal selectors | `orders@all(price>0)` |
+| Negative selectors | `orders@none(status=cancelled)` |
+| Selector alias | `orders@any(...)` ≡ `orders@(...)` |
+| Ternary / nullish | `if(active, "on", "off")`, `coalesce(nickname, name)` |
+
+The README in the query repo carries the same list for repo-local visibility.
+
+---
+
+## Intentional Carve-Outs
+
+The following are **not supported** and there are no plans to add them. Each one trades expressivity for the property that makes this language useful at all: a search-bar string that survives a `?q=` URL round-trip without encoding, validates statically, and translates cleanly to SQL/JSON.
+
+### String concatenation
+
+```
+firstName + " " + lastName     # not supported
+```
+
+The `+` operator is numeric/date arithmetic only. To build a string at match time, register a function: `eval.WithFunctions(eval.Func{Name: "fullName", Call: ...})`, then write `fullName(firstName, lastName)="John Doe"`.
+
+Why not add it: string concatenation makes operator parsing ambiguous (every operator could appear inside or outside a string) and the search-bar use case rarely needs it — the database concatenation lives upstream.
+
+### Bare field references as arithmetic operands
+
+```
+total>=base*1.1                # not supported
+total>=scaled(total)*1.1       # supported via function
+```
+
+Arithmetic operands must be literals, function calls, or sub-parens. Bare identifiers are not allowed because hyphenated field names (`customer-id`) would collide with subtraction.
+
+Why not add it: the alternative is requiring all field names to be alphanumeric, which would break thousands of existing queries against fields like `customer_id`, `tire_size-front`, `internal/legacy-id`.
+
+### Map / filter / reduce over arrays
+
+```
+orders.map(o => o.price).sum() > 1000      # not supported
+```
+
+The selector family (`@all`, `@any`, `@none`, `@first`, `@last`) is the entire array story. For aggregations (sum, count, min, max over list fields), register a function:
+
+```go
+eval.WithFunctions(eval.Func{
+    Name: "sumPrice",
+    Call: func(args ...any) (any, error) {
+        var s float64
+        for _, item := range args[0].([]map[string]any) {
+            if p, ok := item["price"].(float64); ok { s += p }
+        }
+        return s, nil
+    },
+})
+```
+
+Then write `sumPrice(orders)>1000`.
+
+Why not add it: closures inside the query syntax explode the AST shape (every map/filter/reduce takes a sub-expression as an argument) and most adapters can't translate them — SQL `EXISTS` covers `@any`, SQL `NOT EXISTS WHERE NOT` covers `@all`, but `orders.filter(...).map(...)` would require denormalizing to a CTE or subquery.
+
+### Full ternary syntax
+
+```
+active ? "on" : "off"          # not supported
+```
+
+Use the `if()` builtin:
+
+```
+if(active, "on", "off")
+```
+
+Why not the `?:` form: `?` and `:` are already in use — `?` for HTTP query params (the language must survive being a `?q=` value), `:` for range expressions (`created_at:start..end`). Carving them out for ternary would prevent both.
+
+### Regex matching
+
+```
+name=~^John.*Doe$              # not supported
+```
+
+The wildcard set (`*` at start/end/both) covers the search-bar use case. For richer matching, register a function: `matchesRegex(name, "^John.*Doe$")`.
+
+Why not add it: regex syntax leaks `?`, `^`, `$`, and `()` into the value, all of which conflict with other parts of the grammar.
+
+---
+
+## Validation Boundary
+
+Validation is intentionally **structural**, not semantic:
+
+- ✅ The field exists and the operator is allowed.
+- ✅ The literal value's type matches the field's declared type.
+- ✅ Field references inside function args resolve.
+- ❌ The function's return type fits the field. (Opaque — checked at match time.)
+- ❌ Arithmetic operand types are compatible. (Opaque — checked at match time.)
+- ❌ Cross-field invariants (e.g., `start_date < end_date`). Use a custom `AstValidator`.
+
+This is the tradeoff for "register any function and use it in any position." A stricter system (typed function signatures, full type inference through arithmetic) would catch more errors at compile time but would also require the consumer to keep their function registry in lockstep with the validator config — and would make WASM bundling heavier.
+
+---
+
+## Evaluation Model
+
+The engine compiles the AST into a **closure tree** — every node becomes a small function, and `Match(record)` traverses the tree calling them. This is the standard "expression interpreter" pattern.
+
+**Implications:**
+
+- One-time cost (compilation) is paid up front: `eval.Compile` parses + validates + builds the closure tree.
+- Per-record cost is one function call per AST node. For a typical search bar query (5–10 nodes) over a result set of thousands of records, this is negligible.
+- For millions of records on a hot path (e.g., a streaming filter), the closure overhead matters. The pragma is **compile once, match many** — call `Compile` outside the loop and reuse the `*Program`.
+
+There is no bytecode VM. If you need one, the AST is stable and well-documented — `query/eval` can be replaced with a `query/eval-bytecode` adapter without changing anything upstream.
+
+---
+
+## Reflection in Struct Binding
+
+`eval.CompileFor[T]` and `eval.StructAccessor` use reflection to bind query field names to struct fields via `query:"..."` tags. Two cost centers:
+
+- **Tag resolution at compile time.** `CompileFor[T]` walks the struct once per generic instantiation and caches the result. Constant per type.
+- **Field lookup at match time.** `StructAccessor.Get(field)` is a map lookup followed by a `reflect.Value.FieldByIndex(...)` call. For hot loops over millions of records, the reflection adds measurable overhead vs a `map[string]any` accessor.
+
+**Recommendation:** for inner loops, switch to a custom `MatchFunc` that closes over typed getters:
+
+```go
+prog.MatchFunc(func(field string) (any, bool) {
+    switch field {
+    case "state":      return record.State, true
+    case "total":      return record.Total, true
+    case "created_at": return record.CreatedAt, true
+    }
+    return nil, false
+})
+```
+
+This is a few lines of boilerplate and bypasses reflection entirely.
+
+---
+
+## WASM Bundle Size
+
+The library is stdlib-only — no `testify`, no `expr-lang`, no `regexp` (the wildcard matcher is hand-rolled). The compiled WASM bundle is small enough to ship in the browser without lazy-loading. The reflection cost above is the only thing that pulls in the `reflect` package; if you don't need `CompileFor[T]` or `StructAccessor`, those symbols are dead-code-eliminated.
+
+---
+
+## Comparison with expr-lang
+
+| Feature | `heyllave/query` | `expr-lang/expr` |
+|---------|-----------------|------------------|
+| Use case | Search bars, URL params, API filters | Business rules, computed fields, templates |
+| Syntax style | `state=draft AND total>50000` | `state == "draft" && total > 50000` |
+| URL-safe | Yes (no quotes, no special chars) | No (requires encoding) |
+| Wildcards | Native (`name=John*`) | Regex or custom function |
+| Ranges | Native (`created_at:start..end`) | Manual `>=` and `<=` |
+| Field validation | Per-field type + operator config | Struct-based type checking |
+| Multi-target codegen | `Visitor[T]` (SQL/JSON/React/...) | Not designed for this |
+| Dependencies | Zero (stdlib only) | `reflect`, `unsafe`, internal |
+| WASM | First-class target | Possible but heavy |
+| Arithmetic | Numeric/date/duration literals + function results | Full, including field refs |
+| String operations | Via functions (`lower`, `contains`); no concat | Native (`+`, `contains`, etc.) |
+| Ternary/nullish | `if()`, `coalesce()` builtins | `?:`, `??` |
+| Array operations | Selectors (`@any`/`@all`/`@none`) | `map`, `filter`, `all`, `any` |
+| Implicit AND | Yes (`state=draft total>1000`) | No (`&&` required) |
+| Maturity | New | Battle-tested, years in production |
+
+**Choose `heyllave/query`** for a search/filter language for end users with multi-target code generation and query sandboxing.
+
+**Choose `expr-lang`** for a general-purpose expression engine for business rules, computed fields, or template evaluation where full arithmetic, array operations, and ternary matter.

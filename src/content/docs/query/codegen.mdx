@@ -1,0 +1,249 @@
+---
+title: Code Generation
+description: How to translate a query AST into SQL, JSON, in-memory predicates, or any other target via the typed Visitor[T] pattern.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import heroDark from '../../../assets/query-codegen-hero.webp';
+
+<Image src={heroDark} alt="One AST refracted through a prism into SQL, JSON, Go, MongoDB, and React JSX outputs" class="hero-dark" />
+
+A parsed query is a small AST in `query/ast`. The library hands you the tree and a typed visitor abstraction; you decide what to emit. The same input can drive a SQL `WHERE` clause, a MongoDB filter document, an Elasticsearch DSL query, a React filter component, or an in-memory `func(record) bool`.
+
+---
+
+## The `Visitor[T]` Interface
+
+```go
+type Visitor[T any] interface {
+    VisitBinary(*BinaryExpr) T
+    VisitUnary(*UnaryExpr) T
+    VisitQualifier(*QualifierExpr) T
+    VisitPresence(*PresenceExpr) T
+    VisitGroup(*GroupExpr) T
+    VisitSelector(*SelectorExpr) T
+    VisitFuncCall(*FuncCallExpr) T
+}
+
+func Visit[T any](v Visitor[T], e Expression) T
+```
+
+`T` is the output type. For SQL generation `T` is `string` plus a slice of bound parameters held on the visitor. For an in-memory filter, `T` is `func(map[string]any) bool`. For a JSON tree, `T` is `*jsonNode`. Implement the seven methods, call `ast.Visit[T]`, get your result.
+
+The library exposes helpers for common translations:
+
+- `ast.SQLOperator(op token.Type, wildcard bool) string` — `=`, `!=`, `<>`, `LIKE`, etc.
+- `ast.WildcardToLike(pattern string) string` — converts `John*` → `John%`.
+
+---
+
+## SQL WHERE Clause
+
+A parameterized SQL generator. The full file lives at [`examples/sql/main.go`](https://github.com/heyllave/query/blob/main/examples/sql/main.go) — what follows is the shape.
+
+```go
+type sqlVisitor struct {
+    params []any
+}
+
+func (v *sqlVisitor) VisitBinary(e *ast.BinaryExpr) string {
+    left  := v.binOperand(e.Op, e.Left)
+    right := v.binOperand(e.Op, e.Right)
+    if e.Op == token.And {
+        return left + " AND " + right
+    }
+    return left + " OR " + right
+}
+
+// binOperand wraps an OR child of an AND in parens. Without this,
+// `state IN (a, b) AND total>10000` emits ambiguous SQL because IN
+// desugared to a nested OR chain.
+func (v *sqlVisitor) binOperand(parentOp token.Type, child ast.Expression) string {
+    s := ast.Visit[string](v, child)
+    if parentOp == token.And {
+        if b, ok := child.(*ast.BinaryExpr); ok && b.Op == token.Or {
+            return "(" + s + ")"
+        }
+    }
+    return s
+}
+
+func (v *sqlVisitor) VisitQualifier(e *ast.QualifierExpr) string {
+    field := e.Field.String()
+    if e.IsRange() {
+        return fmt.Sprintf("%s BETWEEN %s AND %s",
+            field, v.renderValue(&e.Value), v.renderValue(e.EndValue))
+    }
+    if e.IsWildcard() {
+        v.params = append(v.params, ast.WildcardToLike(e.Value.Str))
+        return fmt.Sprintf("%s LIKE $%d", field, len(v.params))
+    }
+    op := ast.SQLOperator(e.Operator, false)
+    return fmt.Sprintf("%s %s %s", field, op, v.renderValue(&e.Value))
+}
+```
+
+`renderValue` is where the dynamic value types matter. Literals get parameterized; function calls and arithmetic emit inline SQL (they reference SQL-side state like `NOW()`, not user input):
+
+```go
+func (v *sqlVisitor) renderValue(val *ast.Value) string {
+    switch val.Type {
+    case ast.ValueFunc:
+        return v.renderFuncCall(val.Func)
+    case ast.ValueArith:
+        return "(" + v.renderValue(val.Arith.Left) +
+            " " + val.Arith.Op + " " +
+            v.renderValue(val.Arith.Right) + ")"
+    default:
+        v.params = append(v.params, val.Any())
+        return fmt.Sprintf("$%d", len(v.params))
+    }
+}
+```
+
+### Selectors → EXISTS / NOT EXISTS
+
+```go
+func (v *sqlVisitor) VisitSelector(e *ast.SelectorExpr) string {
+    listField := e.Base.(*ast.PresenceExpr).Field.String()
+    if e.Inner == nil {
+        return fmt.Sprintf("EXISTS (SELECT 1 FROM %s)", listField)
+    }
+    inner := ast.Visit[string](v, e.Inner)
+    switch e.Selector {
+    case "all":  return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM %s WHERE NOT (%s))", listField, inner)
+    case "none": return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM %s WHERE %s)", listField, inner)
+    default:     return fmt.Sprintf("EXISTS (SELECT 1 FROM %s WHERE %s)", listField, inner)
+    }
+}
+```
+
+`@all` uses double negation — "for-all P" is the same as "there does not exist anything that violates P." Real adapters resolve the join target (FK, table name) from a schema rather than using the field name verbatim.
+
+---
+
+## JSON AST for API Responses
+
+When the frontend builds the query UI, you often want to ship the parsed AST back as JSON for inspection or pagination tokens. [`examples/json/main.go`](https://github.com/heyllave/query/blob/main/examples/json/main.go) demonstrates a self-describing schema:
+
+```json
+{
+  "type": "binary",
+  "op": "AND",
+  "left": {
+    "type": "selector",
+    "selector": "all",
+    "base": { "type": "presence", "field": "orders" },
+    "inner": {
+      "type": "qualifier", "op": "=", "field": "status", "value": "shipped"
+    }
+  },
+  "right": {
+    "type": "qualifier",
+    "op": ">=",
+    "field": "total",
+    "value": { "arith": "*", "left": 50000, "right": 1.1 }
+  }
+}
+```
+
+Dynamic values — `ValueFunc` and `ValueArith` — emit `{ "func": "name", "args": [...] }` and `{ "arith": "op", "left": ..., "right": ... }` instead of being collapsed to a primitive, so the receiving end can decide how to render or translate them.
+
+---
+
+## In-Memory Predicate
+
+For WASM clients or CLI tools that filter slices without a database, `Visitor[T]` produces a `func(record) bool`. [`examples/filter/main.go`](https://github.com/heyllave/query/blob/main/examples/filter/main.go) covers it end-to-end, including selectors over `[]map[string]any`:
+
+```go
+type predicate = func(map[string]any) bool
+
+func (v *filterVisitor) VisitSelector(e *ast.SelectorExpr) predicate {
+    listField := e.Base.(*ast.PresenceExpr).Field.String()
+    var inner predicate
+    if e.Inner != nil {
+        inner = ast.Visit[predicate](v, e.Inner)
+    }
+    return func(obj map[string]any) bool {
+        raw, ok := obj[listField]
+        if !ok {
+            // Missing field: @none is satisfied (≡ empty list),
+            // @all is vacuously true, everything else is false.
+            return e.Selector == "none" || e.Selector == "all"
+        }
+        items := raw.([]map[string]any)
+        if inner == nil {
+            return len(items) > 0
+        }
+        switch e.Selector {
+        case "all":
+            for _, it := range items { if !inner(it) { return false } }
+            return true
+        case "none":
+            for _, it := range items { if  inner(it) { return false } }
+            return true
+        default:
+            for _, it := range items { if  inner(it) { return true  } }
+            return false
+        }
+    }
+}
+```
+
+The semantics here mirror the `eval` package exactly — implement the table from [the syntax reference](/query/syntax/#selectors) and the visitor "just works."
+
+---
+
+## Custom Adapters
+
+Anything you can express as a function `(AST) → T` fits the visitor pattern. Some sketches:
+
+| Target | `T` | Notes |
+|--------|-----|-------|
+| MongoDB filter | `bson.M` | `AND` → `$and`, comparison → `$eq`/`$gt`/..., wildcard → `$regex` |
+| Elasticsearch DSL | `map[string]any` | `bool/must` / `bool/should`, wildcard → `wildcard` query, range → `range` |
+| React filter chips | `[]ChipProps` | Walk for top-level conjuncts, render each as a chip with a remove handler |
+| TypeScript predicate | `string` | Emit JS source: `(o) => o.state === "draft" && o.total > 50000` |
+
+<Aside type="tip">
+For multi-target adapters, keep state on the visitor (params, register allocator, etc.) rather than threading it through the return type. Each `Visit*` method has direct access to the receiver.
+</Aside>
+
+---
+
+## Round-Trip via `ast.String`
+
+The library also ships a built-in visitor that renders the AST back to the canonical query string:
+
+```go
+expr, _ := query.Parse("a=1 and (b=2 or c=3)")
+ast.String(expr)
+// → "a=1 AND (b=2 OR c=3)"
+```
+
+Use it for logging, pagination cursors, or "share this search" URLs. Keyword case is normalized to uppercase; `IN` and `!>` are expanded to their canonical OR / NOT forms; everything else round-trips verbatim — quoted strings (with escapes), arithmetic precedence, function calls, and selectors.
+
+---
+
+## Walking the AST
+
+For analyses that don't need full code generation — collecting the set of referenced fields, computing query depth, finding the qualifier for a specific field — use `ast.Walk`:
+
+```go
+ast.Walk(expr, func(e ast.Expression) bool {
+    if q, ok := e.(*ast.QualifierExpr); ok {
+        fmt.Printf("%s %s %v\n", q.Field, token.OperatorSymbol(q.Operator), q.Value.Any())
+    }
+    return true   // return false to stop descent
+})
+```
+
+Convenience helpers built on `Walk`:
+
+| Helper | Returns |
+|--------|---------|
+| `ast.Fields(expr)` | `[]FieldPath` — every referenced field |
+| `ast.Qualifiers(expr)` | `[]*QualifierExpr` — every field/value pair |
+| `ast.IsSimple(expr)` | `bool` — single condition, no AND/OR |
+| `ast.Depth(expr)` | `int` — max nesting depth |

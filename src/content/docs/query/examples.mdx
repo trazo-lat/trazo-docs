@@ -1,0 +1,424 @@
+---
+title: Examples Cookbook
+description: Working queries for common search and filter patterns, with the data shape and expected matches for each.
+---
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Image } from 'astro:assets';
+import heroDark from '../../../assets/query-examples-hero.webp';
+import heroLight from '../../../assets/query-examples-hero-light.webp';
+
+<Image src={heroDark}  alt="Five query fragments composing into one assembled expression" class="hero-dark" />
+<Image src={heroLight} alt="Five query fragments composing into one assembled expression" class="hero-light" />
+
+Every snippet on this page is a real query that compiles against the field schemas shown. The runnable equivalents live in [`examples/`](https://github.com/heyllave/query/tree/main/examples) in the query repo — `go run ./examples/<name>` prints the output.
+
+---
+
+## One Query, Three Targets
+
+The same query string drives a parameterized SQL `WHERE`, a self-describing JSON AST, and an in-memory predicate — each emitted by a different `Visitor[T]` implementation from the same parsed tree. This is the core value proposition of the library; below is what it looks like end-to-end for one realistic query.
+
+**Query:** `state=draft AND total>=50000*1.1 AND orders@(status=shipped)`
+
+<Tabs>
+  <TabItem label="SQL">
+```sql
+state = $1 AND total >= ($2 * $3) AND EXISTS (SELECT 1 FROM orders WHERE status = $4)
+```
+
+Bound parameters: `["draft", 50000, 1.1, "shipped"]`. Arithmetic stays inline (it doesn't reference user input); literal operands are parameterized. The selector translates to a correlated `EXISTS` subquery — see [Code Generation](/query/codegen/#selectors--exists--not-exists) for the `@all` / `@none` translations.
+  </TabItem>
+  <TabItem label="JSON">
+```json
+{
+  "type": "binary",
+  "op": "AND",
+  "left": {
+    "type": "binary",
+    "op": "AND",
+    "left": {
+      "type": "qualifier",
+      "op": "=",
+      "field": "state",
+      "value": "draft"
+    },
+    "right": {
+      "type": "qualifier",
+      "op": ">=",
+      "field": "total",
+      "value": { "arith": "*", "left": 50000, "right": 1.1 }
+    }
+  },
+  "right": {
+    "type": "selector",
+    "selector": "any",
+    "base": { "type": "presence", "field": "orders" },
+    "inner": {
+      "type": "qualifier",
+      "op": "=",
+      "field": "status",
+      "value": "shipped"
+    }
+  }
+}
+```
+
+Self-describing tree shape. The frontend can hand-render this back into chips, save it as a pagination cursor, or post it to another service that re-parses it later. Function- and arithmetic-valued operands keep their structure rather than collapsing to a primitive.
+  </TabItem>
+  <TabItem label="Go predicate">
+```go
+matches := ast.Visit[func(map[string]any) bool](&filterVisitor{}, expr)
+
+matches(map[string]any{
+    "state":  "draft",
+    "total":  60000.0,
+    "orders": []map[string]any{{"status": "shipped"}},
+}) // true
+```
+
+A composable closure. Useful for WASM clients, CLI tools, streaming filters, or any context where the records live in memory instead of a database. The same visitor pattern that emits SQL emits Go code — only the `T` parameter changes.
+  </TabItem>
+</Tabs>
+
+The patterns below are listed once; assume each one can be rendered into any of these targets without modification.
+
+---
+
+## Field Config
+
+The examples share this schema unless otherwise noted:
+
+```go
+fields := []validate.FieldConfig{
+    {Name: "state",       Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "name",        Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "description", Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "tags",        Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "year",        Type: validate.TypeInteger, AllowedOps: validate.NumericOps},
+    {Name: "total",       Type: validate.TypeDecimal, AllowedOps: validate.NumericOps},
+    {Name: "active",      Type: validate.TypeBoolean, AllowedOps: validate.BoolOps},
+    {Name: "created_at",  Type: validate.TypeDate,    AllowedOps: validate.DateOps},
+    {Name: "ttl",         Type: validate.TypeText,    AllowedOps: validate.TextOps, Nested: true},
+    {Name: "labels",      Type: validate.TypeText,    AllowedOps: validate.TextOps, Nested: true},
+    {Name: "orders",      Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "status",      Type: validate.TypeText,    AllowedOps: validate.TextOps},
+    {Name: "price",       Type: validate.TypeDecimal, AllowedOps: validate.NumericOps},
+}
+```
+
+---
+
+## Search Bar Patterns
+
+### Filter by state and amount
+
+```
+state=draft AND total>=50000
+```
+
+### Date window
+
+```
+created_at:2026-01-01..2026-03-31
+created_at>=now()-30d
+created_at:daysAgo(30)..now()
+```
+
+### Partial-name search
+
+```
+name=John*                # prefix
+name=*son                 # suffix
+name=*urgent*             # contains
+"customer name"="Acme Corp"   # exact, including spaces
+```
+
+### Multi-value filter
+
+```
+state IN (draft, issued, paid)
+year IN (2024, 2025, 2026)
+state=draft year IN (2025, 2026)          # implicit AND
+```
+
+### Boolean fields
+
+```
+active=true
+NOT active=true                # also matches missing field
+```
+
+---
+
+## Compound Expressions
+
+### AND / OR with precedence
+
+```
+(state=draft OR state=issued) AND total>=50000
+state=draft AND (year=2025 OR year=2026)
+```
+
+### Implicit AND for terse queries
+
+```
+state=draft total>1000 year>=2025         # three implicit ANDs
+NOT cancelled total>1000                  # NOT then implicit AND
+```
+
+### Negation that respects missing fields
+
+```
+total!>50000          # NOT total>50000 — matches when total is missing
+year!>=2020           # NOT year>=2020
+```
+
+---
+
+## Nested Fields
+
+```
+labels.dev=jane
+labels.env=prod
+ttl.duration>1d
+(labels.dev=jane OR labels.env=bar) AND NOT labels.region=eu
+```
+
+The parent field must be configured with `Nested: true` on the `FieldConfig`. Dotted segments after the first do not need their own entries.
+
+<Aside type="caution">
+Nested-field lookup reads the **flat key** `"labels.dev"` from the record. The library does **not** traverse a nested `map[string]any{"labels": {...}}` — that's the consumer's job. If your data shape is genuinely nested, write a `MatchFunc` accessor that walks the dotted path before delegating to the matcher.
+</Aside>
+
+---
+
+## Arithmetic in Value Position
+
+```
+total>=50000*1.1                    # 55000
+total>=(50000+1000)*1.1             # 56100
+created_at>=now()-7d                # last week
+created_at>=now()-7d*2              # last two weeks
+ttl.duration>=4h*3                  # ≥ 12 hours
+```
+
+<Aside type="note">
+Bare field references are not valid arithmetic operands. To scale a field by a factor, register a custom function: `eval.WithFunctions(eval.Func{Name: "scaled", Call: ...})`, then write `scaled(total)>50000`.
+</Aside>
+
+---
+
+## Functions
+
+### As field transforms
+
+```
+lower(name)=john*
+upper(state)=DRAFT
+trim(description)=*urgent*
+len(name)>5
+year(created_at)=2026
+month(created_at) IN (1, 2, 3)            # Q1 only
+```
+
+### As value generators
+
+```
+created_at>=now()
+created_at>=daysAgo(7)
+created_at:daysAgo(30)..now()
+total>=threshold()                         # custom function returning a number
+```
+
+### As boolean predicates
+
+```
+contains(tags, "urgent")
+startsWith(name, prefix)                   # two fields
+endsWith(name, "-doe")
+```
+
+### Ternary / nullish
+
+```
+coalesce(nickname, name)="John"            # picks nickname if non-empty, else name
+if(active, "on", "off")="on"               # ternary
+coalesce(name, "anonymous")=*Doe*          # default value
+```
+
+---
+
+## Selectors over List Fields
+
+Data shape: each record has an `orders` field that is a `[]map[string]any` or a `[]Struct` with `query:"..."` tags.
+
+```
+orders@first                                  # at least one order
+orders@(status=shipped)                       # at least one shipped (EXISTS)
+orders@any(status=shipped)                    # alias of @(...)
+orders@all(price>0)                           # every order is non-zero
+orders@none(status=cancelled)                 # nothing cancelled
+orders@(status=shipped AND qty>=2)            # compound inner
+orders@all(price>0) AND orders@none(status=cancelled)
+NOT line_items@(price>100)                    # outer negation
+```
+
+### Edge cases
+
+| Selector | Empty list | Missing field |
+|----------|-----------|---------------|
+| `@first`, `@last`, `@(...)`, `@any` | `false` | `false` |
+| `@all(...)` | `true` (vacuous truth) | `false` |
+| `@none(...)` | `true` | `true` (treated as empty list) |
+
+---
+
+## Quoted Strings
+
+```
+name="John Doe"
+description="urgent: handle ASAP"
+description="line1\nline2"
+description="a > b"
+name="contains a \"quote\" inside"
+```
+
+The escape set is `\"`, `\\`, `\n`, `\t`, `\r`. Quoted strings work anywhere a value is accepted, including inside function args (`contains(tags, "urgent")`), `IN` lists (`name IN ("John Doe", "Jane")`), and ranges.
+
+---
+
+## Query Sandboxing
+
+When exposing the language to end users (public API, multi-tenant SaaS), restrict what they can do:
+
+```go
+// Public API: only specific fields
+prog, err := eval.Compile(q, fields,
+    eval.WithAllowedFields("state", "total", "year"),
+)
+
+// Read-only: equality and presence only
+prog, err := eval.Compile(q, fields,
+    eval.WithAllowedOps(validate.OpEq, validate.OpNeq, validate.OpPresence),
+)
+
+// DoS protection
+prog, err := eval.Compile(q, fields,
+    eval.WithMaxDepth(3),     // bounds the AST nesting
+    eval.WithMaxLength(256),  // bounds the input string length
+)
+```
+
+Pair with a custom `AstValidator` for per-tenant field allowlists — see the [Syntax Reference](/query/syntax/#custom-rules) section on custom rules.
+
+---
+
+## Struct Binding
+
+For type-safe compilation against a Go struct:
+
+```go
+type Invoice struct {
+    State     string    `query:"state"`
+    Total     float64   `query:"total"`
+    CreatedAt time.Time `query:"created_at"`
+    Internal  string    // no tag → not queryable
+}
+
+prog, err := eval.CompileFor[Invoice]("state=draft AND total>=50000")
+prog.MatchStruct(Invoice{State: "draft", Total: 60000})
+
+// Caught at compile time:
+_, err = eval.CompileFor[Invoice]("total=notanumber")  // type mismatch
+_, err = eval.CompileFor[Invoice]("Internal=secret")   // unknown field
+```
+
+`CompileFor[T]` walks the struct tags once and feeds the field set into the validator, so typos surface during compilation rather than at the first `Match` call.
+
+---
+
+## Complex Multi-Feature Queries
+
+These show what real production queries look like when several features combine. Each one is a single string that parses, validates, and evaluates against the field config at the top of this page.
+
+### Recent high-value invoices, excluding cancelled
+
+```
+state IN (draft, issued, paid) AND total>=50000*1.1 AND created_at>=now()-30d AND NOT state=cancelled
+```
+
+Combines IN shorthand, arithmetic in value position, function in value position, and explicit `NOT`. Returns invoices in any of three states, above an inflation-adjusted threshold, created in the last 30 days, and definitely not cancelled.
+
+### Orders with at least one shipped item, none cancelled, and a recent timestamp
+
+```
+orders@(status=shipped) AND orders@none(status=cancelled) AND created_at:daysAgo(7)..now()
+```
+
+Two selectors composed with `AND`, plus a range with function endpoints on both ends.
+
+### Q1 of a recent year, with names matching a partial pattern
+
+```
+year IN (2024, 2025, 2026) AND month(created_at) IN (1, 2, 3) AND lower(name)=john*
+```
+
+`IN` lists on both a numeric field and a function result, plus a case-insensitive prefix match via `lower()`.
+
+### Either an empty cart or every item is in stock, with a default nickname fallback
+
+```
+orders@all(in_stock=true) AND coalesce(nickname, name)=*Doe*
+```
+
+`@all` over the orders list (which vacuously matches empty carts), composed with a `coalesce`-driven contains match on the fallback name chain.
+
+### Tenant-scoped sandboxed query, only equality and IN, depth-limited
+
+```go
+prog, err := eval.Compile(userInput, fields,
+    eval.WithAllowedFields("state", "year", "tags"),
+    eval.WithAllowedOps(validate.OpEq, validate.OpNeq, validate.OpRange),
+    eval.WithMaxDepth(3),
+    eval.WithMaxLength(256),
+    eval.WithCustomValidator(tenantValidatorFor(tenantID)),
+)
+```
+
+The user-supplied query is constrained by four overlapping sandboxes: a field allowlist, an operator allowlist, depth and length caps for DoS protection, and a per-tenant AST validator for cross-field or per-tenant rules.
+
+### Inflation-adjusted scaled comparison with a custom function
+
+```go
+prog, err := eval.Compile("scaled(total)>=1.1 AND state=draft", fields,
+    eval.WithFunctions(eval.Func{
+        Name: "scaled",
+        Call: func(args ...any) (any, error) {
+            // Normalize by the tenant's regional currency-adjustment factor.
+            v, _ := args[0].(float64)
+            return v / regionFactor, nil
+        },
+    }),
+)
+```
+
+Closes the "no field-ref in arithmetic" gap when you need it: register a function that performs the multiplication and call it as a field transform.
+
+### Date arithmetic with a duration multiplier
+
+```
+created_at>=now()-30d AND (renewed_at>=now()-7d*4 OR renewal_due:now()..now()+30d)
+```
+
+Two date-arithmetic comparisons combined with an OR-of-ranges. `7d*4` is duration-times-number → duration; `now()+30d` is date+duration → date.
+
+---
+
+## What This Doesn't Do
+
+Carved out by design (see [Coverage & Tradeoffs](/query/coverage/) for the full list):
+
+- String concatenation — use a custom function (`fullName(first, last)`).
+- Field references as arithmetic operands — use a custom function (`scaled(total)>1.1`).
+- Hot-path bytecode evaluation — the engine is closure-based; compile once, match many.

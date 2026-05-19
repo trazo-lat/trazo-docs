@@ -39,3 +39,9 @@
   --heyllave-coral: #FF6B5B;
   --heyllave-coral-deep: #E84D3C;
 }
+
+/* Hero image dark/light swap. Pages render both variants and tag them
+   with .hero-dark / .hero-light; this rule hides the inactive variant
+   based on Starlight's data-theme attribute on <html>. */
+:root[data-theme='dark']  .hero-light { display: none; }
+:root[data-theme='light'] .hero-dark  { display: none; }

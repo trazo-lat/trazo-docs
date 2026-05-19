@@ -1,0 +1,50 @@
+---
+title: Playground
+description: Interactive query editor — parses, validates, and previews codegen output for any expression. Powered by the same Go WASM binary that ships in the Web UI.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+import QueryEditor from '../../../components/QueryEditor';
+
+The same `query.wasm` binary that runs in the Heyllave Web UI is loaded into this page. Whatever you type is parsed, validated, and rendered into multiple targets without leaving the browser.
+
+<QueryEditor client:only="react" />
+
+---
+
+## What's wired up
+
+The playground is laid out top-to-bottom as a single search loop:
+
+1. **Toolbar** — example dropdown, Share URL, Edit schema.
+2. **Query** — the textarea you type into. Validation errors highlight the border in coral.
+3. **Schema** (toggle) — per-field editor: rename, change type, toggle allowed operators, add/remove rows.
+4. **Records** — JSON. Paste either a single object `{ ... }` or an array `[{ ... }, ...]`.
+5. **Result** — the match outcome. Banner for a single record (`match` / `no match`), table for an array (`N of M records match`).
+6. **Inspection tabs** — deeper views once the basic search works:
+
+| Tab | What it shows |
+|-----|---------------|
+| **AST** | The parsed expression tree as JSON. Use **Copy** to grab it for a bug report or pagination cursor. |
+| **Round-trip** | `ast.String(parse(q))` — the canonical re-rendering. `IN` desugars to OR, negated comparisons (`!>`) expand to `NOT >`, and keyword case normalizes. |
+| **Errors** | Parse and validation errors against the current schema. Edit the schema to see how validation changes. |
+| **Tokens** | The lexer's output — offset, type, value. Useful for debugging odd whitespace or escape behavior. |
+| **SQL preview** | Output of a small TypeScript port of [`examples/sql/main.go`](https://github.com/heyllave/query/blob/main/examples/sql/main.go). Function- and arithmetic-valued operands render as inline comments rather than bound parameters. |
+
+The **Edit schema** button opens a per-field editor: rename, retype, toggle allowed operators per field, add or remove fields. Validation rebuilds on every change.
+
+**Share URL** copies a link that re-encodes the current query + schema into `?q=` and `?schema=` parameters. Sharing the link reproduces the exact playground state.
+
+<Aside type="tip">
+Click "Try an example…" to load one of the canned queries — they cover every major syntactic feature (equality, comparison, range, arithmetic, IN, selectors, quoted strings, coalesce). All of them are documented on the [Syntax Reference](/query/syntax/) page.
+</Aside>
+
+---
+
+## Performance notes
+
+- The WASM binary is ~3.7 MB before gzip. Astro serves it from `/query/query.wasm` and the browser caches it after first load.
+- Parsing is fast — sub-millisecond for typical queries — so the editor re-parses on every keystroke (debounced 80ms).
+- Validation runs against the in-memory schema; no server round-trip.
+
+If you hit anything that looks like a bug, the **Copy** button under the AST gives you a starting point for a reproducer.
