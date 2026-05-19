@@ -84,6 +84,7 @@ export default defineConfig({
               items: [
                 { label: 'Authentication', slug: 'architecture/authentication' },
                 { label: 'Permissions', slug: 'architecture/permissions' },
+                { label: 'Permission Attributes (ABAC)', slug: 'architecture/permission-attributes' },
                 { label: 'Rate Limiting', slug: 'architecture/rate-limiting' },
               ],
             },
