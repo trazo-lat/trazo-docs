@@ -34,6 +34,13 @@ These codes are defined by the platform core and may be returned by any request.
 | `CORE.CONFLICT.DUPLICATE` | 409 | A resource with conflicting unique fields already exists |
 | `CORE.INTERNAL.DATABASE` | 500 | A database operation failed (query error, constraint violation at the driver level) |
 | `CORE.INTERNAL.UNEXPECTED` | 500 | An unexpected panic or unhandled error occurred |
+| `CORE.QUOTA.EXCEEDED` | 402 | A counter or meter reservation would exceed the limit. Body includes `field` (metric key) and `params` with `current` / `limit` / `requested` / `plan`. See [Billing → Gating](/billing/gating). |
+| `CORE.QUOTA.DISABLED` | 402 | A flag metric is off for the tenant. Body includes `field` (metric key). |
+| `CORE.QUOTA.NO_TENANT` | 500 | A counter / meter operation reached the engine without a tenant in context. |
+| `CORE.CONTRACT.ACTIVE_EXISTS` | 409 | `Contracts.Create` called for a tenant that already has an active contract. |
+| `CORE.CONTRACT.NOT_FOUND` | 404 | The addressed contract public ID does not exist. |
+| `CORE.CONTRACT.NOT_RENEWABLE` | 422 | `Contracts.Renew` called on a cancelled or expired contract. |
+| `CORE.CONTRACT.PLAN_NOT_FOUND` | 404 | Plan slug referenced by `Contracts.Create` or `Contracts.Renew` does not exist. |
 
 ---
 

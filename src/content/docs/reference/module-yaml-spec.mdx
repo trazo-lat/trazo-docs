@@ -622,6 +622,54 @@ metrics:
 
 ---
 
+## Quotas
+
+Declares quota metrics the module owns. At bootstrap, every metric listed here is registered on the quota engine so the module can call `core.Quotas.Reserve`, `Check`, `Release`, `Record`, or `IsEnabled` without any Go-side glue. See the [Quotas and Usage Engine](/architecture/quotas) architecture page for the resolution chain and conditional rules.
+
+```yaml
+quotas:
+  - key: documents.count
+    name: Documents
+    kind: counter
+    unit: documents
+    description: Number of stored documents across the tenant.
+
+  - key: documents.exports
+    name: Document exports
+    kind: meter
+    default_reset: month
+    unit: exports
+    description: Document exports performed during the current billing period.
+
+  - key: feature.documents.signing
+    name: Document e-signing
+    kind: flag
+    description: Enables the e-signature workflow.
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `key` | Yes | string | Globally unique identifier. Convention: `<module>.<metric>` for usage metrics, `feature.<flag>` for capability flags. |
+| `name` | Yes | string | Human-readable display name surfaced in `/billing/usage` snapshots. |
+| `kind` | Yes | `counter` \| `meter` \| `flag` | Storage semantics. See table below. |
+| `default_reset` | Meters only | `day` \| `month` \| `year` | Rolling-window length. Ignored for counters and flags. |
+| `unit` | No | string | Display unit (e.g. `users`, `messages`, `bytes`). |
+| `description` | No | string | Tooltip / API documentation copy. |
+
+| Kind | Storage shape | Semantics |
+|---|---|---|
+| `counter` | absolute value | `Reserve` increments, `Release` decrements, limit caps the absolute total. Example: number of seats. |
+| `meter` | current value within a rolling window | `Reserve` and `Record` add to the window's value; the engine rolls the window forward when expired. Example: API calls per month. |
+| `flag` | boolean (`limit_value` 0 = off, non-zero = on) | `IsEnabled` reads plan + rules; no usage tracking. Example: `feature.whatsapp_channel`. |
+
+The engine forces the `Module` field on every registered metric to match the `name:` at the top of the file — a module's YAML cannot spoof another module's namespace.
+
+<Aside type="caution">
+Only declare metrics your module owns. Cross-cutting platform metrics (`tenant.users.count`, `tenant.modules.enabled`, `tenant.storage.bytes`, `tenant.api_calls`) are registered by the platform itself and should not be redeclared.
+</Aside>
+
+---
+
 ## Errors
 
 Declares module-specific error codes. These are registered globally and can be used with the `ErrorFactory`.

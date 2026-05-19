@@ -1,0 +1,132 @@
+---
+title: Invoicing Module
+description: The tenant-facing invoicing module — invoices, line items, credit notes, payments, billing contracts, and fiscal-numbering series. A domain module enabled per tenant.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+The `invoicing` module is a B2B invoicing tool tenants use to bill **their own customers**. It covers the standard small-business invoicing flow: configure a fiscal-numbering series, draft an invoice with line items, issue it, record payments against it, issue a credit note if needed.
+
+<Aside type="note">
+This is the **tenant-facing** invoicing module. Not to be confused with the platform's [billing](/billing/overview) subsystem, which tracks the commercial relationship between the platform and each tenant (plans, quotas, usage). The two systems share no tables and have disjoint permission namespaces (`invoicing.*` vs `billing.*`).
+</Aside>
+
+## Module classification
+
+| Aspect | Value |
+|---|---|
+| Type | `domain` — opt-in per tenant via `tenant_modules` |
+| Location | `internal/modules/domain/invoicing/` |
+| Dependencies | `documents` (for PDF generation) |
+| Permissions namespace | `invoicing.*` |
+| Migrations | `migrations/modules/invoicing/` |
+| Default locale | Spanish (English mirrored) |
+| Default currency | `COP` (Colombian pesos) |
+| Default tax rate | `0.19` (Colombian IVA) |
+| Default series prefix | `FAC` for invoices, `NC` for credit notes |
+
+The defaults reflect the module's target market — Latin-American SMBs. Every default is a [tenant setting](/architecture/core-struct) that an admin can override per tenant.
+
+## What the module does
+
+| Capability | Endpoint shape |
+|---|---|
+| Configure fiscal-numbering series | `invoicing.series.manage` |
+| Create / edit / void invoices | `invoicing.invoices.create / edit / issue / void` |
+| Record payments against invoices | `invoicing.payments.record` |
+| Create / issue credit notes | `invoicing.credit_notes.create / issue` |
+| Manage recurring billing contracts | `invoicing.contracts.manage` |
+| Export invoices as PDF | `invoicing.invoices.export` (PDF rendering goes through the `documents` module) |
+
+## Invoice state machine
+
+```
+draft ─────issue────▶ issued ─────dispute────▶ disputed
+                       │  │                       │
+                       │  │                       │
+                  void │  │ (payment)             │ reissue
+                       │  │                       │
+                       ▼  ▼                       ▼
+                      void   partially_paid    issued
+                              │       │
+                       (more pay)  (more pay)
+                              │       │
+                              ▼       ▼
+                              paid   paid
+```
+
+| Status | Type | Notes |
+|---|---|---|
+| `draft` | initial | Editable; can be deleted. |
+| `issued` | active | Fiscal-numbered; cannot be edited; payments accepted. |
+| `partially_paid` | active | Some but not all of `total_cents` has been received. |
+| `paid` | terminal | Fully paid. |
+| `void` | terminal | Cancelled. Cannot be reactivated. |
+| `disputed` | active | Customer disputes the invoice; resolvable via `reissue` (returns to issued) or `void`. |
+
+Status transitions are declared in `module.yaml` and enforced by the platform's state-machine engine. System-triggered transitions (`mark_partially_paid`, `mark_paid`) fire automatically when payments are recorded.
+
+## Data model
+
+| Table | Purpose |
+|---|---|
+| `invoice_series` | Fiscal-numbering series. One tenant can have multiple (e.g. one per legal entity). |
+| `invoices` | Headers — customer, currency, totals, state, fiscal_number. Self-FK on `deposit_invoice_id` for invoices that credit an earlier deposit. |
+| `invoice_lines` | Line items — quantity, unit price, tax. |
+| `credit_notes` | Headers for credit memos against an invoice. |
+| `credit_note_lines` | Line items on a credit note. |
+| `payments` | Recorded payments against an invoice. |
+| `billing_contracts` | Recurring agreements with a customer (terms, billing day, defaults). |
+
+All seven tables live per-tenant in `tenant_<slug>` schema — the module is tenant-portable.
+
+## Settings
+
+Configured per-tenant via `PUT /api/v1/settings/{key}`:
+
+| Setting | Type | Default | Purpose |
+|---|---|---|---|
+| `invoice_series_prefix` | string | `FAC` | Prefix for new invoice series. |
+| `credit_note_series_prefix` | string | `NC` | Prefix for new credit-note series. |
+| `default_currency` | string | `COP` | ISO 4217 currency code on new invoices. |
+| `default_tax_rate` | float | `0.19` | Tax rate on line items. |
+| `default_due_days` | integer | `0` | Days from issue to due date. |
+| `auto_issue` | boolean | `false` | Issue invoices immediately on create. |
+| `auto_generate_pdf` | boolean | `true` | Generate PDF when an invoice is issued. |
+
+## Events emitted
+
+Other modules subscribe to these via `EventSubscriber`:
+
+- `invoicing.invoice.created` — new invoice (draft)
+- `invoicing.invoice.issued` — transitioned to issued
+- `invoicing.invoice.paid` — fully paid
+- `invoicing.invoice.voided` — cancelled
+- `invoicing.invoice.overdue` — passed due date without payment
+- `invoicing.credit_note.issued` — credit memo issued
+- `invoicing.payment.recorded` — payment recorded
+
+## Events consumed
+
+The module subscribes to:
+
+- `source.completed` — handler `OnSourceCompleted` (async). Used to materialize an invoice when an upstream source workflow completes.
+- `documents.approved` — handler `OnDocumentApproved` (async). Hooked into the documents module for fiscal-document approval flows.
+
+## Hooks
+
+Tenants can register webhook or expression hooks at these lifecycle points (see [Hooks architecture](/architecture/hooks)):
+
+- `invoicing.before_issue` — fires before an invoice transitions draft → issued. Returned modifications merge into the entity.
+- `invoicing.after_issue` — fires after a successful issue. No modifications applied.
+- `invoicing.before_void` — fires before a void. Returned modifications merge.
+
+## Relocation note
+
+This module is currently in `core-service` as a domain module, but it walks like a plugin: no other module in this repo imports it, its only inbound dep is `documents`, and its defaults (currency, tax, series prefixes) are strongly localized. A future relocation — separate repo vendored via `go.mod`, or moved under `internal/modules/custom/` — would not change its API surface for tenants. Tracked as a follow-up architectural decision; for v1 it stays where it is.
+
+## See also
+
+- [Billing](/billing/overview) — the platform's billing engine, distinct from this module
+- [Module Development → Creating a Module](/guides/creating-a-module) — the general pattern this module follows
+- [Documents module](/architecture/module-system) — the dependency providing PDF generation

@@ -84,6 +84,7 @@ export default defineConfig({
               items: [
                 { label: 'Authentication', slug: 'architecture/authentication' },
                 { label: 'Permissions', slug: 'architecture/permissions' },
+                { label: 'Permission Attributes (ABAC)', slug: 'architecture/permission-attributes' },
                 { label: 'Rate Limiting', slug: 'architecture/rate-limiting' },
               ],
             },
@@ -105,6 +106,27 @@ export default defineConfig({
                 { label: 'File Storage', slug: 'architecture/storage' },
               ],
             },
+          ],
+        },
+        {
+          label: 'Billing',
+          items: [
+            { label: 'Overview', slug: 'billing/overview' },
+            { label: 'Defining Metrics', slug: 'billing/metrics' },
+            { label: 'Gating with the Engine', slug: 'billing/gating' },
+            { label: 'Plans & Overrides', slug: 'billing/plans' },
+            { label: 'Conditional Rules', slug: 'billing/rules' },
+            { label: 'Soft Limits & Thresholds', slug: 'billing/thresholds' },
+            { label: 'Subscription Contracts', slug: 'billing/contracts' },
+            { label: 'Audit Log', slug: 'billing/audit' },
+            { label: 'HTTP API Reference', slug: 'billing/api' },
+            { label: 'Roadmap', slug: 'billing/roadmap' },
+          ],
+        },
+        {
+          label: 'Invoicing',
+          items: [
+            { label: 'Overview', slug: 'invoicing/overview' },
           ],
         },
         {

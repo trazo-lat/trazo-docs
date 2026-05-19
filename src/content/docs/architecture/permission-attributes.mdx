@@ -1,0 +1,158 @@
+---
+title: Permission Attributes (ABAC)
+description: Parameterised permissions — role-level numeric / string / boolean attributes attached to specific permission keys. The ABAC layer on top of the boolean RBAC grant.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Heyllave's base permission system is classic RBAC: each role carries a list of permission strings, and `core.Permission.Can(ctx, "key")` returns a boolean. **Permission attributes** extend that with role-level parameters attached to specific permission keys — the ABAC (Attribute-Based Access Control) layer.
+
+The canonical example: an `attachments.upload` permission that admins hold globally, but admins on the free tier can upload up to 10MB while admins on the pro tier can upload up to 300MB. The capability ("can upload") is RBAC; the parameter ("up to 300MB") is ABAC.
+
+<Aside type="note">
+Permission attributes are **role-bound**, not plan-bound. For plan-tier-varying caps that shouldn't depend on which role the actor holds, use [quotas](/billing/overview) instead. The two systems compose: a role can grant the action, attributes parameterise it, and a quota meters cumulative usage.
+</Aside>
+
+## Storage shape
+
+Each role has a `permission_attributes` JSONB column keyed by permission string, then by attribute name:
+
+```json
+{
+  "attachments.upload": {
+    "max_bytes": 314572800,
+    "max_count": 50,
+    "types_allow": "pdf,png,jpg"
+  },
+  "invoices.create": {
+    "max_total_cents": 100000000
+  }
+}
+```
+
+Stored in `public.roles.permission_attributes`. NULL / missing keys mean "no attribute set" — callers fall back to defaults.
+
+## Reading attributes
+
+The `core.Permission` interface exposes one raw and four typed accessors. All read from context — the auth middleware (or the caller for ad-hoc use) sets the role's attributes via `core.WithPermissionAttributes`.
+
+```go
+type PermissionChecker interface {
+    // ... existing Can / MustCan / ResolveScope / ApplyScope ...
+
+    Attribute(ctx, permission, attribute string) any
+    AttributeInt(ctx, permission, attribute string, fallback int64) int64
+    AttributeString(ctx, permission, attribute string, fallback string) string
+    AttributeBool(ctx, permission, attribute string, fallback bool) bool
+    AttributeFloat(ctx, permission, attribute string, fallback float64) float64
+}
+```
+
+## Use in services
+
+```go
+func (s *Service) Upload(ctx context.Context, in UploadInput) (*Attachment, error) {
+    if err := s.core.Permission.MustCan(ctx, "attachments.upload"); err != nil {
+        return nil, err
+    }
+
+    // The capability check passed. Now read the parameterised cap.
+    maxBytes := s.core.Permission.AttributeInt(ctx,
+        "attachments.upload", "max_bytes", 10*1024*1024) // 10MB default
+
+    if in.SizeBytes > maxBytes {
+        return nil, s.core.Errors.New("ATTACHMENTS", "TOO_LARGE",
+            fmt.Sprintf("attachment %d bytes exceeds role limit %d",
+                in.SizeBytes, maxBytes))
+    }
+
+    // ... persist ...
+}
+```
+
+The fallback in the typed accessor (`10*1024*1024` above) is what's used when:
+- No `permission_attributes` were loaded onto ctx (e.g. test setup didn't wire them)
+- The role has no attributes for this permission key
+- The permission key has no attribute by that name
+
+This pattern lets services ship a safe default while admins layer on role-level overrides.
+
+## Type coercion
+
+JSON numerics decode as `float64` by default. The typed accessors coerce:
+
+```go
+ctx := core.WithPermissionAttributes(ctx, core.JSONB{
+    "attachments.upload": map[string]any{
+        "max_bytes": float64(314572800), // from JSONB
+    },
+})
+
+// AttributeInt sees float64, coerces to int64 cleanly:
+c.AttributeInt(ctx, "attachments.upload", "max_bytes", 0)
+// → 314572800
+```
+
+Supported coercions:
+
+| Accessor | Native | Coerces from |
+|---|---|---|
+| `AttributeInt` | `int64` | `int`, `float32`, `float64` |
+| `AttributeFloat` | `float64` | `float32`, `int`, `int64` |
+| `AttributeString` | `string` | — |
+| `AttributeBool` | `bool` | — |
+
+Unsupported types fall back to the default.
+
+## Setting attributes
+
+`permission_attributes` lives on the role row. Update via the existing roles admin endpoint:
+
+```http
+PATCH /api/v1/tenants/tnt_acme/roles/role_admin
+Content-Type: application/json
+
+{
+  "permission_attributes": {
+    "attachments.upload": {
+      "max_bytes": 314572800
+    }
+  }
+}
+```
+
+The platform doesn't validate which attributes exist for a permission — the schema is open. Convention: document the attributes each module supports on the permission key itself (in `module.yaml` or the module's docs).
+
+## When to use ABAC vs alternatives
+
+| Use case | Right primitive |
+|---|---|
+| "Caps the *count* of things stored in the tenant" | counter quota |
+| "Caps usage across a billing period" | meter quota |
+| "Feature on/off per tenant tier" | flag quota |
+| **"Caps a per-item attribute, varies by role"** | **ABAC attribute** |
+| "Caps a per-item attribute, varies by plan" | quota (any kind); pass the limit as `limit_value` and have the module read it via `Check` without mutating |
+| "Caps a per-item attribute, fixed for everyone" | service-level constant or Huma `validate:"max=..."` tag |
+
+## v1 wiring caveat
+
+The auth middleware sets `core.WithPermissions(ctx, ...)` from the JWT claims today; it does **not** yet set `core.WithPermissionAttributes`. This means out of the box, every `Attribute*` call returns the fallback.
+
+To use ABAC attributes today, services need to load the membership's role and set attributes on ctx themselves:
+
+```go
+membership := core.MembershipFrom(ctx)
+if membership != nil {
+    role, err := rolesSvc.GetByInternalID(ctx, membership.RoleID)
+    if err == nil && role != nil {
+        ctx = core.WithPermissionAttributes(ctx, role.PermissionAttributes)
+    }
+}
+```
+
+The auth-middleware integration (loading attributes alongside permissions on every request) is tracked on the [Roadmap](/billing/roadmap) as a follow-up.
+
+## See also
+
+- [Permissions and Scope](/architecture/permissions) — the underlying RBAC layer
+- [Billing → Overview](/billing/overview) — when to reach for quotas instead

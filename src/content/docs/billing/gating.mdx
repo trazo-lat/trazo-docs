@@ -1,0 +1,302 @@
+---
+title: Gating with the Engine
+description: Calling core.Quotas.Reserve / Release / Record / IsEnabled from a service. Transactional rollback, error handling, and testing with the mock.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Once a metric is [declared in module.yaml](/billing/metrics), the engine is reachable from any service via `core.Quotas`. This page covers the five operations and the patterns for using each one correctly.
+
+## The engine API
+
+```go
+type QuotaEngine interface {
+    Check(ctx, metricKey, amount) (*QuotaDecision, error)   // peek without mutating
+    Reserve(ctx, metricKey, amount) (*QuotaDecision, error) // atomic check + increment
+    Release(ctx, metricKey, amount) error                   // counter decrement
+    Record(ctx, metricKey, amount) error                    // meter increment, no limit check
+    IsEnabled(ctx, metricKey) (bool, error)                 // flag read
+
+    RegisterMetric(metric QuotaMetric)
+    Metric(key string) *QuotaMetric
+    Metrics() []QuotaMetric
+    Snapshot(ctx context.Context) ([]QuotaSnapshot, error)
+}
+```
+
+`core.Quotas` is wired during bootstrap and is **always present** — services call it without a nil guard. The mock in `core.NewMockCore()` wires `QuotasMock` automatically for tests.
+
+## Counter pattern — reserve before insert, release on rollback
+
+The canonical pattern for resource counts: reserve the slot before writing, release it on any failure path that would orphan the reservation.
+
+```go
+func (s *Service) Create(ctx context.Context, input CreateInput) (*Resource, error) {
+    // 1. Reserve the quota slot. Returns *core.Error with HTTP 402 on deny.
+    if _, qErr := s.core.Quotas.Reserve(ctx, billing.MetricUsersCount, 1); qErr != nil {
+        return nil, qErr
+    }
+
+    // 2. Try to create the underlying resource.
+    resource, err := s.repo.Create(ctx, input)
+    if err != nil {
+        // 3. Roll back the reservation when the insert fails — without
+        //    this the counter drifts permanently.
+        _ = s.core.Quotas.Release(ctx, billing.MetricUsersCount, 1)
+        return nil, fmt.Errorf("creating resource: %w", err)
+    }
+    return resource, nil
+}
+
+func (s *Service) Delete(ctx context.Context, id string) error {
+    if err := s.repo.Delete(ctx, id); err != nil {
+        return fmt.Errorf("deleting resource: %w", err)
+    }
+    // Release the slot taken by Create.
+    _ = s.core.Quotas.Release(ctx, billing.MetricUsersCount, 1)
+    return nil
+}
+```
+
+`Reserve` is atomic — the limit check and the increment happen in a single transaction inside the engine. The engine takes a row-level lock (`FOR UPDATE`) on the usage row, so concurrent `Reserve` calls serialize at the metric level.
+
+`Release` is forgiving: the value is clamped to zero (`GREATEST(current - amount, 0)`), so an extra release won't underflow the counter.
+
+<Aside type="caution">
+Don't `defer s.core.Quotas.Release(...)` unconditionally — that releases even on the success path. Release explicitly only in the error branch where the resource creation failed *after* the reservation succeeded.
+</Aside>
+
+## Meter pattern — record after a successful operation
+
+Meters track usage in a rolling window. Two operations exist depending on whether you want enforcement or telemetry.
+
+### With enforcement (Reserve)
+
+`Reserve` checks the limit and increments only if the new value would fit. Use when the meter is a *cap* (e.g. messages per month):
+
+```go
+if _, qErr := s.core.Quotas.Reserve(ctx, "conversations.messages", 1); qErr != nil {
+    return nil, qErr // 402, CORE.QUOTA.EXCEEDED
+}
+
+// proceed to send the message
+```
+
+### Without enforcement (Record)
+
+`Record` increments without checking. Use when the engine is tracking values for reporting only:
+
+```go
+// Always send the message; track usage for analytics.
+if err := s.send(ctx, msg); err != nil {
+    return err
+}
+_ = s.core.Quotas.Record(ctx, "conversations.messages", 1)
+```
+
+Both operations roll the window forward when `period_end` is in the past — there's no separate "reset" job.
+
+## Flag pattern — branch on availability
+
+Flags gate optional features by plan tier. `IsEnabled` reads the effective limit (after rules + overrides + plan) and returns true when the limit is non-zero.
+
+```go
+if on, _ := s.core.Quotas.IsEnabled(ctx, "feature.whatsapp_channel"); !on {
+    return s.core.Errors.Forbidden("whatsapp channel is not enabled for this plan")
+}
+// proceed to call the WhatsApp adapter
+```
+
+For UI gating (e.g. "show this menu item only when the feature is on") the same call is fine — flag reads don't touch the usage table and are cheap.
+
+## Read without mutating — Check
+
+`Check` returns the same `QuotaDecision` as `Reserve` but without incrementing. Useful for previewing a quota state before triggering a write:
+
+```go
+decision, err := s.core.Quotas.Check(ctx, "conversations.messages", 100)
+if err != nil {
+    return nil, err
+}
+if !decision.Allowed {
+    return nil, s.core.Errors.New("CONVERSATIONS", "BULK.WOULD_EXCEED_QUOTA",
+        fmt.Sprintf("bulk send would exceed monthly cap (current=%d, requested=100, limit=%d)",
+            decision.Current, decision.Limit))
+}
+```
+
+`Check` is also what powers the `/billing/usage` snapshot — it iterates every registered metric and resolves the limit + current usage.
+
+## Error handling
+
+`Reserve` returns a `*core.Error` when the limit is exceeded. Wrap or pass it through — never swallow.
+
+| Error code | HTTP | Returned when |
+|---|---|---|
+| `CORE.QUOTA.EXCEEDED` | 402 | Counter or meter limit hit |
+| `CORE.QUOTA.DISABLED` | 402 | Flag metric is off for the tenant |
+| `CORE.QUOTA.NO_TENANT` | 500 | Counter/meter operation without a tenant in context |
+
+The error params include `metric`, `current`, `limit`, `requested`, and `plan` — useful for i18n templates and for the admin UI's quota-exceeded toast.
+
+```go
+// Forwarding the error to the handler is enough — Huma maps it to a 402 response
+// with the structured body automatically.
+if _, qErr := s.core.Quotas.Reserve(ctx, key, amount); qErr != nil {
+    return nil, qErr
+}
+```
+
+### Soft-limit decision fields
+
+When a metric declares `warn_at_pct` (in `module.yaml`) or a matched limit source declares `grace_pct`, every successful Reserve also carries soft-limit state — so the caller can surface a warning *before* a hard 402:
+
+```go
+decision, err := s.core.Quotas.Reserve(ctx, "conversations.messages", 1)
+if err != nil {
+    return nil, err
+}
+// decision.Allowed is true at this point.
+
+if decision.GraceActive {
+    // Usage is between Limit and EffectiveCap. The reservation went through
+    // because of plan/override/rule grace — flag for billing review.
+    s.core.Events.Emit(ctx, core.Event{
+        Name: "conversations.message_sent_in_grace",
+        Payload: map[string]any{
+            "metric_key":    decision.MetricKey,
+            "current":       decision.Current,
+            "limit":         decision.Limit,
+            "effective_cap": decision.EffectiveCap,
+        },
+    })
+} else if decision.Warning {
+    // Crossed warn_at_pct of the limit — surface to the admin UI.
+    s.core.Log.Logger(ctx).WithModule("conversations").Warn(
+        "approaching quota cap",
+        map[string]any{
+            "metric_key":  decision.MetricKey,
+            "current":     decision.Current,
+            "limit":       decision.Limit,
+            "warn_at_pct": decision.WarnAtPct,
+        },
+    )
+}
+```
+
+The full decision shape is documented under [Soft Limits & Thresholds → Decision shape](/billing/thresholds#decision-shape). The engine *also* fires `billing.quota.threshold_crossed` / `.exceeded` / `.period_rolled` on the transactional outbox at the same boundaries — subscribe via `core.Events.SubscribeScoped` if you want notifications fanned out without the calling module knowing about them.
+
+## Transactional rollback inside `core.DB.Tx`
+
+When the resource insert lives inside a transaction, the reservation lives outside it. The engine's `Reserve` opens its own short transaction; the surrounding business `Tx` does not roll back the reservation.
+
+```go
+if _, qErr := s.core.Quotas.Reserve(ctx, key, 1); qErr != nil {
+    return nil, qErr
+}
+
+err := s.core.DB.Tx(ctx, func(tx core.Tx) error {
+    if err := s.repo.CreateTx(ctx, tx, input); err != nil {
+        return err
+    }
+    return s.core.Events.EmitTx(ctx, tx, event)
+})
+if err != nil {
+    // Tx rolled back. Release the reservation.
+    _ = s.core.Quotas.Release(ctx, key, 1)
+    return nil, err
+}
+```
+
+This is intentional — quota usage is tenant-portable state living in `tenant_<slug>.quota_usage`, while the business write might be in a different schema or involve cross-schema reads. Keeping the two transactions independent avoids cross-schema lock entanglement.
+
+## Testing with `MockQuotaEngine`
+
+Every sub-interface on `*core.Core` has a testify mock, including quotas. `core.NewMockCore()` returns a `MockCoreBundle` with `QuotasMock` pre-wired.
+
+```go
+func TestService_Create_QuotaExceeded(t *testing.T) {
+    b := core.NewMockCore()
+
+    // Make Reserve return an error.
+    b.QuotasMock.On("Reserve", mock.Anything, billing.MetricUsersCount, int64(1)).
+        Return(nil, &core.Error{
+            Code:    "CORE.QUOTA.EXCEEDED",
+            Message: "quota exceeded",
+            Status:  402,
+        })
+
+    svc := members.NewService(b.Core, mockRepo, cfg)
+    _, err := svc.Create(ctx, input)
+
+    var coreErr *core.Error
+    require.ErrorAs(t, err, &coreErr)
+    assert.Equal(t, core.ErrorCode("CORE.QUOTA.EXCEEDED"), coreErr.Code)
+
+    // Repo should not have been called.
+    mockRepo.AssertNotCalled(t, "Create")
+}
+
+func TestService_Create_RollsBackOnInsertFailure(t *testing.T) {
+    b := core.NewMockCore()
+    b.QuotasMock.On("Reserve", mock.Anything, billing.MetricUsersCount, int64(1)).
+        Return(&core.QuotaDecision{Allowed: true}, nil)
+    b.QuotasMock.On("Release", mock.Anything, billing.MetricUsersCount, int64(1)).
+        Return(nil)
+
+    mockRepo.On("Create", mock.Anything, mock.Anything).
+        Return(nil, errors.New("db unavailable"))
+
+    svc := members.NewService(b.Core, mockRepo, cfg)
+    _, err := svc.Create(ctx, input)
+    require.Error(t, err)
+
+    // Verify the release happened.
+    b.QuotasMock.AssertCalled(t, "Release",
+        mock.Anything, billing.MetricUsersCount, int64(1))
+}
+```
+
+The mock will fail tests where an unexpected method is called, which catches "forgot to mock the release on the error path" regressions automatically.
+
+## Integration-test fixtures
+
+For tests that hit a real database (build tag `integration`), the engine wants a registered metric definition and at least one plan + plan_quota row. The shared test helpers in `tests/testutil` set up a default `free` plan with sensible caps — most tests just need to:
+
+```go
+//go:build integration
+
+func TestMembersIntegration_QuotaExceeded(t *testing.T) {
+    env := testutil.NewTestEnv(t)
+    defer env.Close()
+
+    // Lower the quota for this test so we hit the cap quickly.
+    env.SetPlanQuota(ctx, "free", billing.MetricUsersCount, 2)
+
+    _, err := env.Members.Create(ctx, /* first member */)
+    require.NoError(t, err)
+    _, err = env.Members.Create(ctx, /* second member */)
+    require.NoError(t, err)
+
+    // Third creation should hit the cap.
+    _, err = env.Members.Create(ctx, /* third member */)
+    require.Error(t, err)
+    require.Equal(t, core.ErrorCode("CORE.QUOTA.EXCEEDED"), err.(*core.Error).Code)
+}
+```
+
+## Common mistakes
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Counter drifts higher than expected | `Release` is missing on a failure path | Add explicit `Release` in every branch where the resource was *not* persisted after `Reserve` returned successfully |
+| Counter drifts lower than expected | Double `Release` (e.g. one in error path, one in `defer`) | Drop the `defer Release` and only release in the explicit error branch |
+| Meter never rolls forward | Direct SQL inserts bypassed the engine | Always go through `Reserve` / `Record` — the engine handles window roll-forward in one place |
+| Flag always returns false | Metric is declared but no plan attaches it | Add a `plan_quotas` row with `limit_value: 1` (or whatever you want as default) |
+| 500 on a service call | `Reserve(counter, …)` called without a tenant in context | Either set the tenant on ctx via `core.WithTenant`, or refactor the call to happen after tenant resolution |
+
+## Next steps
+
+- [Plans and overrides](/billing/plans) — make sure your metric has a default limit
+- [Conditional rules](/billing/rules) — split the limit by runtime attribute
+- [HTTP API reference](/billing/api) — admin endpoints for managing all of the above

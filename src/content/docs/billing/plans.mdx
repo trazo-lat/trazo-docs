@@ -1,0 +1,210 @@
+---
+title: Plans and Overrides
+description: The plan catalog, default seeding, tenant assignment, and per-tenant single-value overrides. When to add a plan vs an override vs a conditional rule.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A **plan** is a named bundle of limits applied to every tenant assigned to it. An **override** is a single-value adjustment on one tenant for one metric. A [conditional rule](/billing/rules) is a higher-priority override gated by a query predicate.
+
+This page covers plans and single-value overrides — the two simplest knobs.
+
+## The plan catalog
+
+Plans live in `public.plans` (global, cross-tenant). Each plan attaches limits per metric in `public.plan_quotas`. Tenants are assigned to a plan via `public.tenant_plans`; tenants without an assignment fall back to the configured `billing.default_plan` slug (default `"free"`).
+
+```sql
+public.plans                  -- catalog: free, pro, enterprise, ...
+public.plan_quotas            -- per-plan limit per metric. PK (plan_id, metric_key)
+public.tenant_plans           -- which plan each tenant is on. PK (tenant_id)
+public.tenant_quota_overrides -- single-value override. PK (tenant_id, metric_key)
+```
+
+## Default seed
+
+A built-in seed populates a starter catalog on first bootstrap. The seed is idempotent — re-running upserts the same plan definitions and limits without dropping existing tenant assignments.
+
+| Plan | Price | Limits |
+|---|---|---|
+| `free` | 0 COP/mo | `users=3`, `modules=3`, `storage=512MB/mo`, `whatsapp=off`, `web_channel=on` |
+| `pro` | 89.900 COP/mo | `users=25`, `modules=10`, `storage=10GB/mo`, both channels on |
+| `enterprise` | 249.900 COP/mo | `users=unlimited`, `modules=unlimited`, `storage=unlimited/mo`, both channels on |
+
+Prices in the bootstrap seed are denominated in **Colombian pesos** (`currency: "COP"`, `billing_interval: "month"`). If your target audience is elsewhere, change the values in `internal/core/billing/seed.go` and redeploy — the seed will upsert the new numbers on the next boot without disturbing tenant assignments.
+
+`billing.SeedDefaults` is called automatically when the core tables are bootstrapped. Edit the seed in `internal/core/billing/seed.go` to change the catalog; on the next deploy the change lands on already-bootstrapped DBs without touching tenant assignments.
+
+### Pricing fields
+
+Every plan carries three pricing fields alongside its limits:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `price_cents` | `BIGINT` | `0` | Headline recurring price in the plan's currency, expressed in **minor units** (e.g. `8990000` = 89.900,00 COP). Non-negative. |
+| `currency` | `TEXT` | `"USD"` | ISO-4217 code. The bootstrap seed sets `"COP"`. |
+| `billing_interval` | `TEXT` | `"month"` | `month` \| `year` \| `one_time`. Documentary today — there's no automatic invoice generation yet (see [Roadmap](/billing/roadmap)). |
+
+These fields are surfaced through the `/billing/quote` endpoint and the plan create/replace API — see [HTTP API → Plans](/billing/api#plans).
+
+<Aside type="tip">
+The seed is the right place for canonical plan definitions. The HTTP API is for one-off catalog edits — anything you'd want to survive a fresh-bootstrap should live in the seed.
+</Aside>
+
+## Assigning a plan to a tenant
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/plan
+Authorization: Bearer <token with billing.assign>
+Content-Type: application/json
+
+{ "plan_slug": "pro" }
+```
+
+The assignment row is upserted into `public.tenant_plans`. The engine's plan cache is invalidated automatically. On the next `Reserve` for this tenant, the `pro` limits apply.
+
+```http
+GET /api/v1/tenants/tnt_acme/billing/plan
+```
+
+Returns the *effective* plan — the assigned one, or the `default_plan` fallback when no assignment exists. `is_default: true` in the response distinguishes the fallback case.
+
+## Editing the catalog
+
+The catalog is exposed via `/billing/plans/*`. See [HTTP API reference](/billing/api#plans) for the full surface. The common operations:
+
+```http
+POST /api/v1/billing/plans                          # create a plan
+PUT  /api/v1/billing/plans/{slug}                   # replace a plan (full body)
+POST /api/v1/billing/plans/{slug}/quotas            # upsert a (metric, limit) line
+DELETE /api/v1/billing/plans/{slug}/quotas/{metric_key}
+```
+
+Every write invalidates the engine's plan cache, so changes take effect on the next request.
+
+## Tenant overrides
+
+Sometimes a single tenant needs a different cap for one metric — a customer on `pro` who needs a higher message cap for the month, an enterprise tenant who needs a stricter cap during onboarding, a trial tenant with a temporary bump. Overrides live in `public.tenant_quota_overrides` and take precedence over the plan.
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/overrides/conversations.messages
+Authorization: Bearer <token with billing.assign>
+Content-Type: application/json
+
+{
+  "limit_value": 15000,
+  "reset_period": "month",
+  "reason": "approved expansion for May launch",
+  "expires_at": "2026-06-01T00:00:00Z"
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `limit_value` | yes | `-1` for unlimited; `0` for hard-zero (disabled); positive caps usage. |
+| `reset_period` | meters only | `none` / `day` / `month` / `year`. |
+| `grace_pct` | no | Integer 0..100. Allows usage up to `limit * (1 + grace_pct/100)` before hard-denying. See [Soft Limits & Thresholds](/billing/thresholds). |
+| `reason` | no | Free-text justification surfaced in admin UI and audit log. |
+| `price_cents` | no | Recurring add-on charge attributed to this override, in the plan's currency (minor units). `0` = courtesy bump (does not appear on the quote). |
+| `description` | no | Customer-facing label used in the [`/billing/quote`](/billing/api#tenant-quote) breakdown. Falls back to `metric_key` when empty. |
+| `expires_at` | no | When set, the override stops applying after this timestamp. The resolver treats expired rows as absent. |
+
+Overrides are addressed by `(tenant_id, metric_key)` — re-PUTting the same path updates the same row. To remove an override, `DELETE` it.
+
+## Override vs rule — which to use?
+
+Both produce the same effect (a different limit for one tenant), but the shape of the configuration differs.
+
+| Use an override when… | Use a [rule](/billing/rules) when… |
+|---|---|
+| The cap is a flat value, no runtime conditions | The cap depends on a runtime attribute (region, role, time of day, plan tier, trial status) |
+| You want a simple expires_at | You want multiple stacked caps with priority |
+| One row per (tenant, metric) is enough | You need different caps for the same metric under different conditions |
+| Audit story is "admin manually approved this bump" | Audit story is "the rule said so" |
+
+Rules sit *above* overrides in the resolution chain — if a tenant has both a matching rule and an override for the same metric, the rule wins. This is intentional: overrides are the "manual escape hatch" and rules are the "declarative policy."
+
+## Lifecycle examples
+
+### Onboarding a paying customer
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/plan
+{ "plan_slug": "pro" }
+```
+
+That's it. The `pro` plan's limits apply on the next `Reserve`.
+
+### Temporary expansion for a launch event
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/overrides/conversations.messages
+{
+  "limit_value": 50000,
+  "reset_period": "month",
+  "reason": "May launch — 3x cap approved by sales",
+  "expires_at": "2026-06-01T00:00:00Z"
+}
+```
+
+The override expires automatically. No follow-up action needed.
+
+### Permanent custom cap for an enterprise account
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/overrides/tenant.users.count
+{ "limit_value": 500, "reason": "enterprise contract — 500 seats" }
+```
+
+No `expires_at` — the override stays until explicitly deleted.
+
+### Disabling a feature for one tenant
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/overrides/feature.whatsapp_channel
+{ "limit_value": 0, "reason": "tenant requested removal" }
+```
+
+`IsEnabled("feature.whatsapp_channel")` returns `false` for this tenant only; everyone else on the same plan keeps the feature.
+
+### Charging a tenant extra for an enabled feature (priced override)
+
+The override row carries both a limit *and* an optional price. Setting both turns the override into a customer-facing upsell:
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/overrides/feature.whatsapp_channel
+{
+  "limit_value": 1,
+  "price_cents": 2000000,
+  "description": "Canal de WhatsApp",
+  "reason": "addon: WhatsApp enabled per sales agreement"
+}
+```
+
+That tenant now sees `feature.whatsapp_channel` enabled *and* the [`/billing/quote`](/billing/api#tenant-quote) endpoint adds a 20.000 COP line to the breakdown. Set `price_cents: 0` (the default) when you're bumping a limit as a courtesy — the override still applies but it doesn't appear on the quote.
+
+### Bootstrap demo data
+
+For a sales demo, `internal/core/billing/seed.go` exports a `DemoOverrides` slice and a `SeedDemoOverridesForTenant(ctx, store, tenantInternalID)` helper that applies three example upsells (WhatsApp channel, +20GB storage, +25 user seats) totalling 50.000 COP/mo. It's not invoked from bootstrap — call it from a CLI or a one-off script when prepping a demo tenant.
+
+### Migrating off a deprecated plan
+
+When you sunset a plan, you can't just delete it — tenants on it would fall back to the default. The migration shape:
+
+1. Add the replacement plan to the catalog.
+2. Reassign every tenant via `PUT /tenants/{id}/billing/plan`.
+3. Mark the old plan `status: "archived"` (don't delete; preserve audit history).
+
+The seed treats `status: "archived"` as a write but not an upsert target — re-running bootstrap won't re-activate the plan.
+
+## Operational notes
+
+- **Plan resolution is cached**. The engine holds resolved `(plan + plan_quotas)` bundles in memory for `billing.plan_cache_ttl` (default 60s). Admin API writes invalidate the cache; direct SQL writes do not. Restart or call `InvalidatePlanCache` after manual SQL.
+- **Overrides never expire silently from the read path** — the resolver checks `expires_at < NOW()` per request and treats expired rows as absent. There's no garbage-collection job (rows just sit dormant); a cleanup admin endpoint may land later.
+- **Deleting a plan with assignments orphans those tenants** to the default fallback. The HTTP API does not block this — be sure to reassign first.
+- **`tenant_plans.tenant_id` is the public ID's *internal UUID***, not the public ID. The resolver looks up by `tenant.InternalID`. Don't try to write directly with the prefixed public ID.
+
+## Next steps
+
+- [Conditional rules](/billing/rules) — when an override isn't expressive enough
+- [HTTP API reference](/billing/api) — every endpoint, full request/response shapes
+- [Defining metrics](/billing/metrics) — make sure a metric is registered before you attach a plan quota

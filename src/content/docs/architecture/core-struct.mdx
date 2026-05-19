@@ -1,6 +1,6 @@
 ---
 title: Core Struct
-description: The central dependency carrier of the Heyllave platform — its 11 sub-interfaces, their methods, and the rules governing how Core is used across the codebase.
+description: The central dependency carrier of the Heyllave platform — its 19 sub-interfaces, the rules governing how Core is used, and where each subsystem is documented in depth.
 ---
 
 The `Core` struct is the single point of access for every platform capability. It is constructed once at startup and passed as a pointer into every module, service, and handler. No global state is used; all shared functionality is accessed through `*Core`.
@@ -12,14 +12,22 @@ type Core struct {
     Session    SessionManager    // Request-scoped identity
     Permission PermissionChecker // Authorization + scope filtering
     Audit      AuditRecorder     // Change tracking
-    Events     EventBus          // Domain events
+    Events     EventBus          // Domain events (transactional outbox)
     Modules    ModuleManager     // Module discovery
     Hooks      HookExecutor      // Extension points
     Storage    StorageManager    // File storage
+    Search     SearchEngine      // Cross-module search
+    Status     StatusEngine      // Declarative state machines
+    Approvals  ApprovalEngine    // Multi-step approval workflows
     DB         DatabaseManager   // Database access
     Config     ConfigProvider    // Configuration
     Errors     ErrorFactory      // Structured errors
     Log        LogProvider       // Contextual logging
+    I18n       Translator        // Locale resolution + key translation
+    AgentTools AgentToolRegistry // LLM tool registry
+    State      StateTracker      // Tenant config snapshots
+    Quotas     QuotaEngine       // Per-tenant feature gating
+    Contracts  ContractEngine    // Subscription contracts (temporal layer)
 }
 ```
 
@@ -27,12 +35,24 @@ type Core struct {
 Always pass and store `*Core` (pointer), never a value copy. The interfaces themselves are already reference types, but passing a value copy would break any field that is modified during the request lifecycle.
 :::
 
+## Where each subsystem is documented
+
+The detailed method-by-method reference for the foundational sub-interfaces lives in the sections below on this page. Newer subsystems have dedicated sidebar sections of their own:
+
+| Sub-interface | Detailed docs |
+|---|---|
+| `Quotas` (`QuotaEngine`) | [Billing → Gating with the Engine](/billing/gating), [Defining Metrics](/billing/metrics) |
+| `Contracts` (`ContractEngine`) | [Billing → Subscription Contracts](/billing/contracts) |
+| `Status`, `Approvals` | [Status Machines guide](/guides/status-machines), [Approval Workflows](/guides/approvals) |
+| `I18n`, `Search`, `AgentTools`, `State` | covered inline in module guides; source under `internal/core/` |
+
 ## Rules
 
 1. `*Core` is always a pointer.
 2. All request-scoped data is accessed via the context passed to each method, not stored on the struct itself.
-3. Every interface has a corresponding mock implementation for use in unit tests.
-4. Services never import other services directly; they communicate through `Core.Events` or `Core.Hooks`.
+3. Every interface has a corresponding mock implementation. `core.NewMockCore()` returns a `MockCoreBundle` with every namespace pre-wired.
+4. Sub-interfaces are wired during bootstrap and **always present** — never guard `s.core.Quotas != nil` or any other namespace with a nil check.
+5. Services never import other services directly; they communicate through `Core.Events`, `Core.Hooks`, or `Core.Modules.Service(name)`.
 
 ---
 

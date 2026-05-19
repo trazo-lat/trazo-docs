@@ -1,0 +1,335 @@
+---
+title: Conditional Rules
+description: Split a plan-level quota across runtime conditions with heyllave/query predicates. Env reference, per-path typing, common patterns, and debugging rules that don't match.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Quota rules let an admin split a plan-level quota across runtime conditions **without forking the plan**. Each rule attaches a priority and a [heyllave/query](https://github.com/heyllave/query) predicate. When `Reserve` runs, the engine evaluates rules `priority DESC` and uses the first one whose predicate is true.
+
+Conditions use the same URL-safe filter syntax as the platform's search bars (`state=draft AND total>50000`). No quotes around enum-like values, no `==`, no `&&` — predicates that read naturally and round-trip through a query string.
+
+## When to use a rule
+
+Use a rule when the cap depends on a **runtime attribute** of the request — something only known when `Reserve` is called, not when the plan was defined:
+
+- Geographic split (EU tenants on `pro` get half the global cap to protect a regional gateway)
+- Role-based caps (admins get the full limit, members get a fraction)
+- Time-of-day throttling (different daily caps during business hours vs nights)
+- Trial bumps that expire at a timestamp
+- Plan-tier overlays (`enterprise` skips a hard cap that `pro` enforces, without touching either plan row)
+
+For "this one tenant needs a flat different cap, no conditions," reach for an [override](/billing/plans#tenant-overrides) instead — simpler row, simpler audit story.
+
+## Resolution order
+
+```
+1. quota_rules   — first enabled rule (priority DESC) whose condition matches
+2. tenant_quota_overrides — non-expired override row
+3. plan_quotas   — plan default
+4. unlimited     — fail-open
+```
+
+Rules sit on top of overrides. If a tenant has both a matching rule and an override for the same metric, the rule wins. This is intentional: overrides are the manual escape hatch, rules are the declarative policy.
+
+## Anatomy of a rule
+
+```http
+POST /api/v1/tenants/tnt_acme/billing/rules
+Content-Type: application/json
+
+{
+  "metric_key": "conversations.messages",
+  "priority": 100,
+  "condition": "tenant.metadata.region=EU",
+  "limit_value": 5000,
+  "reset_period": "month",
+  "label": "EU regional cap"
+}
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `metric_key` | yes | Which metric this rule overrides. Must be a registered metric. |
+| `priority` | no (default 0) | Higher wins. Use 0–10 for catch-all defaults, 50–100 for typical gates, 200+ for emergency overrides. |
+| `condition` | no | A query predicate. Empty = always match. |
+| `limit_value` | yes | `-1` unlimited, `0` hard-zero, positive cap. |
+| `reset_period` | meters only | `none` / `day` / `month` / `year`. |
+| `grace_pct` | no | Integer 0..100. When this rule matches, allows usage up to `limit * (1 + grace_pct/100)` before hard-denying. Overrides any plan-level grace. See [Soft Limits & Thresholds](/billing/thresholds). |
+| `label` | no | Human-readable name; surfaced in `QuotaDecision.rule_label` and the admin UI. |
+| `enabled` | no (default true) | Disable a rule without deleting it. |
+| `metadata` | no | Opaque JSONB; useful for tagging which workflow created the rule. |
+
+Rules are addressed by their public ID (`qrule_…`). `PATCH /rules/{rule_id}` accepts the same body fields as create.
+
+## Query env reference
+
+Every rule predicate sees the same env, populated on every `Reserve` / `Check`. Fields are reached via dotted paths.
+
+| Path | Type | Source | Notes |
+|---|---|---|---|
+| `tenant.id` | text | `core.TenantFrom(ctx)` | Public ID (`tnt_…`). |
+| `tenant.slug` | text | `.Subdomain` | Lowercase subdomain. |
+| `tenant.status` | text | `.Status` | Lifecycle status. |
+| `tenant.name` | text | `.Name` | Display name. |
+| `tenant.metadata.*` | text or datetime | `.Config` JSONB | Per-tenant key-value bag. See [per-path typing](#per-path-typing) below. |
+| `user.id` | text | `core.UserFrom(ctx)` | Public ID; empty outside request scope. |
+| `user.email` | text | `.Email` | |
+| `user.locale` | text | `.Locale` | |
+| `user.timezone` | text | `.Timezone` | |
+| `user.metadata.*` | text or datetime | `.Metadata` JSONB | |
+| `membership.id` | text | `core.MembershipFrom(ctx)` | Public ID; empty outside request scope. |
+| `membership.role` | text | `.RolePublicID` | Role public ID. |
+| `membership.permissions` | text list | `.ExtraPermissions` | |
+| `membership.metadata.*` | text or datetime | `.Metadata` JSONB | |
+| `plan.slug` | text | resolved effective plan | The plan the resolver picked (after the tenant_plans lookup + default fallback). |
+| `plan.name` | text | `.Name` | |
+| `plan.status` | text | `.Status` | |
+| `plan.metadata.*` | text or datetime | `.Metadata` JSONB | |
+| `now.timestamp` | datetime | `time.Now().UTC()` | Wall clock at evaluation. |
+| `now.iso` | text | RFC3339 format | |
+| `now.hour` | integer | 0–23 | |
+| `now.weekday` | integer | 0–6 (0 = Sunday) | |
+| `now.weekday_str` | text | "Monday", "Tuesday", ... | |
+| `now.month` | integer | 1–12 | |
+| `now.day` | integer | 1–31 | |
+| `now.year` | integer | calendar year | |
+
+Missing fields at runtime degrade to "no match" — a rule referencing `membership.role` is safe to write even though it won't match for service-principal contexts without a membership in context.
+
+## Per-path typing
+
+The validator assigns a type per dotted path so admin-written predicates can mix string equality, numeric comparison, and time comparison cleanly.
+
+| Path pattern | Type | Example predicate |
+|---|---|---|
+| `now.timestamp` | datetime | `now.timestamp>some.date_field` |
+| `now.hour` / `now.weekday` / `now.month` / `now.day` / `now.year` | integer | `now.weekday>=1 AND now.weekday<=5` |
+| `now.iso` / `now.weekday_str` | text | `now.weekday_str=Monday` |
+| `tenant.* / user.* / membership.* / plan.*` suffixed `_at` or `_date` | datetime | `tenant.metadata.trial_ends_at>now()` |
+| anything else under those roots | text | `tenant.metadata.region=EU` |
+
+The `_at` / `_date` suffix is the signal that the metadata key holds a date. Without it the value is treated as text and a `>now()` comparison won't validate. The convention is enforced by the rule validator, not by the database — you can store any string in `tenant.metadata.trial_ends_at` and the engine will attempt a date comparison at evaluation time.
+
+<Aside type="caution">
+Boolean metadata isn't a first-class type under the v1 convention. Express booleans as string equality (`tenant.metadata.trial_active=yes`) or as a bare presence check (`tenant.metadata.beta_enrolled`). Direct boolean literals like `tenant.metadata.trial=true` won't validate.
+</Aside>
+
+## Common patterns
+
+### Geographic split
+
+EU tenants on `pro` get half the global cap.
+
+```
+tenant.metadata.region=EU
+```
+
+```http
+POST /api/v1/tenants/tnt_acme/billing/rules
+{
+  "metric_key": "conversations.messages",
+  "priority": 100,
+  "condition": "tenant.metadata.region=EU",
+  "limit_value": 5000, "reset_period": "month",
+  "label": "EU regional cap"
+}
+```
+
+### Role-based cap
+
+Members get a fraction of the message cap that admins get.
+
+```
+membership.role=member
+```
+
+```http
+POST /api/v1/tenants/tnt_acme/billing/rules
+{
+  "metric_key": "conversations.messages",
+  "priority": 100,
+  "condition": "membership.role=member",
+  "limit_value": 1000, "reset_period": "month",
+  "label": "Member-tier cap"
+}
+```
+
+### Trial bump (with auto-expiry)
+
+The canonical "is the trial still active" idiom — `now()` evaluates on each match, so the rule needs no maintenance as time passes.
+
+```
+tenant.metadata.trial_ends_at>now()
+```
+
+```http
+POST /api/v1/tenants/tnt_acme/billing/rules
+{
+  "metric_key": "conversations.messages",
+  "priority": 200,
+  "condition": "tenant.metadata.trial_ends_at>now()",
+  "limit_value": 500, "reset_period": "day",
+  "label": "Trial bump"
+}
+```
+
+When `tenant.metadata.trial_ends_at` (a YYYY-MM-DD or RFC3339 string) is in the future, the rule matches and the tenant gets the bump. When the date passes, the rule stops matching and resolution falls through to the next rule / override / plan.
+
+### Business-hours-only throttle
+
+Different caps during business hours vs nights/weekends.
+
+```
+now.weekday>=1 AND now.weekday<=5 AND now.hour>=9 AND now.hour<=17
+```
+
+```http
+POST /api/v1/tenants/tnt_acme/billing/rules
+{
+  "metric_key": "tenant.api_calls",
+  "priority": 100,
+  "condition": "now.weekday>=1 AND now.weekday<=5 AND now.hour>=9 AND now.hour<=17",
+  "limit_value": 10000, "reset_period": "day",
+  "label": "Business hours cap"
+}
+```
+
+### Plan-tier overlay
+
+Apply a stricter cap on `free` and `pro` only; let `enterprise` skip the rule entirely.
+
+```
+plan.slug=free OR plan.slug=pro
+```
+
+Equivalent shorthand using `IN`:
+
+```
+plan.slug IN (free, pro)
+```
+
+### Multi-condition gate
+
+EU tenants on `pro` during a launch window.
+
+```
+tenant.metadata.region=EU AND plan.slug=pro AND now.month=5
+```
+
+### Negation
+
+Everyone except US tenants.
+
+```
+NOT tenant.metadata.region=US
+```
+
+### Catch-all fallback
+
+A rule with no condition always matches. Place at a low priority behind higher-priority gated rules so it acts as the per-tenant default.
+
+```http
+POST /api/v1/tenants/tnt_acme/billing/rules
+{
+  "metric_key": "conversations.messages",
+  "priority": 10,
+  "limit_value": 250, "reset_period": "day",
+  "label": "Per-tenant default"
+}
+```
+
+## Priority strategy
+
+Use a tiered numbering scheme so you can insert rules between existing tiers without renumbering:
+
+| Range | Use |
+|---|---|
+| `200+` | Emergency overrides ("disable this metric for this tenant right now") |
+| `100–199` | Standard gates (geo / role / plan tier) |
+| `50–99` | Time-of-day or trial layers |
+| `0–49` | Catch-all defaults |
+
+Two rules with the same priority resolve by `created_at ASC` — older rule wins.
+
+## Validation at write time
+
+The engine compiles every predicate before persisting the rule. A malformed predicate returns `400 Bad Request` rather than poisoning runtime resolution.
+
+```http
+POST /api/v1/tenants/tnt_acme/billing/rules
+{ "metric_key": "messages", "condition": "this is not valid", ... }
+
+HTTP/1.1 400 Bad Request
+{ "error": "invalid condition: parse: position 5: unexpected token ..." }
+```
+
+The validator also enforces:
+
+- `metric_key` is registered (otherwise the rule would never resolve to a known kind).
+- Operators are compatible with the field type (`>` on `now.hour` is OK; `>` on `plan.slug` is not).
+- Right-hand side values lex into a type compatible with the left-hand path.
+
+## Debugging rules that don't match
+
+When a rule should fire but doesn't, walk this checklist in order:
+
+### 1. Check the resolved source via `/billing/usage`
+
+```http
+GET /api/v1/tenants/tnt_acme/billing/usage
+```
+
+The snapshot includes `source`, `rule_id`, and `rule_label` per metric. If `source=plan` instead of `source=rule`, the rule isn't matching.
+
+### 2. Confirm the rule is enabled
+
+```http
+GET /api/v1/tenants/tnt_acme/billing/rules
+```
+
+Look for `enabled: true`. A disabled rule is silently skipped.
+
+### 3. Confirm priority order
+
+If two rules target the same metric and the wrong one wins, the higher-priority rule is matching first. Lower the wrong one's priority or tighten its condition.
+
+### 4. Confirm the env actually has the field
+
+Rules referencing `membership.role` won't match for service-principal calls (no membership in context). Rules referencing `tenant.metadata.region` won't match if the tenant's `Config` JSONB doesn't have a `region` key. The runtime accessor returns "no match" for missing paths — there's no error log.
+
+### 5. Confirm value casing and type
+
+`tenant.metadata.region=EU` only matches when the stored value is exactly `"EU"`. Use the same casing as your seed data. For dates, the parser accepts `YYYY-MM-DD` and RFC3339; integers as bare numbers.
+
+### 6. Try a simpler predicate first
+
+If the multi-condition rule won't match, replace it temporarily with a single-condition variant and verify which clause is failing.
+
+```
+# Doesn't match? Try:
+tenant.metadata.region=EU
+
+# Still doesn't match? Try:
+plan.slug=pro
+
+# Iterate down to the failing clause.
+```
+
+### 7. Check the audit log
+
+Every rule write produces an audit entry. The full body (including the predicate) is in the `after` payload — useful when reviewing whether a rule was edited unexpectedly.
+
+## Operational notes
+
+- **Rule eval is not cached per request.** Every `Reserve` call re-compiles (via in-memory program cache) and re-evaluates every rule for that `(tenant, metric)`. The cost is dominated by the DB read for active rules — keep the per-tenant rule count modest (a few dozen).
+- **Predicates are compiled once and cached** in the engine's program cache, keyed by the literal condition string. Two rules with the same predicate share one compiled program.
+- **A runtime error in one rule skips that rule only.** The engine logs the error and continues to the next rule in priority order. This protects the whole tenant from being blocked by a single bad expression.
+- **Rules don't affect flag metrics' usage tracking** — flags have no usage. They affect only the `IsEnabled` result.
+- **Editing the convention requires a deploy.** The `_at` / `_date` suffix convention lives in `internal/core/billing/rules.go`. Add a new suffix or a new path mapping there to extend the validator — no migration needed.
+
+## Next steps
+
+- [HTTP API reference](/billing/api) — full curl examples for creating, listing, updating, deleting rules
+- [Plans and overrides](/billing/plans) — when a simpler override suffices
+- [Defining metrics](/billing/metrics) — every rule references a registered metric
