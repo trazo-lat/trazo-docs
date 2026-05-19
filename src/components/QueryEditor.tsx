@@ -22,7 +22,7 @@ import {
 } from "../lib/query-wasm";
 import { toSql } from "../lib/query-sql";
 
-type Tab = "ast" | "roundtrip" | "errors" | "tokens" | "sql" | "match";
+type Tab = "ast" | "roundtrip" | "errors" | "tokens" | "sql";
 
 interface State {
   query: string;
@@ -38,6 +38,9 @@ interface State {
   recordsText: string;
   recordsError: string | null;
   matchError: string | null;
+  /** True when the records textarea contains a single object (not an array). */
+  recordsSingle: boolean;
+  /** Parallel to the parsed records array. Length-1 when recordsSingle. */
   matched: boolean[];
   tab: Tab;
   showSchema: boolean;
@@ -105,7 +108,6 @@ const PALETTE = {
 };
 
 const TAB_LABELS: Record<Tab, string> = {
-  match: "Match",
   ast: "AST",
   roundtrip: "Round-trip",
   errors: "Errors",
@@ -157,8 +159,9 @@ export default function QueryEditor() {
     recordsText: DEFAULT_RECORDS,
     recordsError: null,
     matchError: null,
+    recordsSingle: false,
     matched: [],
-    tab: "match",
+    tab: "ast",
     showSchema: false,
     copied: null,
   });
@@ -206,27 +209,28 @@ export default function QueryEditor() {
         if (!v.valid && v.errors) validateErrors = v.errors;
       }
 
-      // Match against the records textarea — independent of validation errors,
-      // so a tenant playing with a schema can still see matches against the
-      // base parsed query.
+      // Match the query against the records. Accepts either a single JSON
+      // object (boolean banner result) or a JSON array (table result).
       let recordsError: string | null = null;
       let matchError: string | null = null;
       let matched: boolean[] = [];
+      let recordsSingle = false;
       let records: Array<Record<string, unknown>> = [];
       try {
-        const parsedRecords = JSON.parse(recordsText);
-        if (!Array.isArray(parsedRecords)) {
-          recordsError = "Records must be a JSON array of objects.";
+        const parsed = JSON.parse(recordsText);
+        if (Array.isArray(parsed)) {
+          records = parsed;
+        } else if (parsed && typeof parsed === "object") {
+          records = [parsed as Record<string, unknown>];
+          recordsSingle = true;
         } else {
-          records = parsedRecords;
+          recordsError =
+            "Records must be a JSON object or an array of objects.";
         }
       } catch (e) {
         recordsError = (e as Error).message;
       }
       if (!recordsError && ast && !parseError) {
-        // For matching, we ignore validation errors and call match against the
-        // bare query — eval.Compile re-validates internally and surfaces any
-        // compilation error here.
         const r = api.match(query, fields, records);
         if (r.error) matchError = r.error;
         else matched = r.result?.matched ?? [];
@@ -241,6 +245,7 @@ export default function QueryEditor() {
         tokens: Array.isArray(tokens.result) ? tokens.result : [],
         recordsError,
         matchError,
+        recordsSingle,
         matched,
       }));
     },
@@ -394,6 +399,42 @@ export default function QueryEditor() {
         />
       )}
 
+      <SectionLabel>Records</SectionLabel>
+      <textarea
+        value={state.recordsText}
+        onChange={(e) =>
+          setState((s) => ({ ...s, recordsText: e.target.value }))
+        }
+        spellCheck={false}
+        rows={6}
+        style={{
+          width: "100%",
+          padding: "10px 12px",
+          background: PALETTE.surface,
+          border: `1px solid ${state.recordsError ? PALETTE.coral : PALETTE.borderSubtle}`,
+          borderRadius: 8,
+          color: PALETTE.text,
+          fontFamily:
+            "ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace",
+          fontSize: 12,
+          lineHeight: 1.5,
+          resize: "vertical",
+          outline: "none",
+          marginBottom: 10,
+        }}
+      />
+      {state.recordsError && (
+        <ErrorRow label="Records JSON" message={state.recordsError} />
+      )}
+      {state.matchError && <ErrorRow label="Match" message={state.matchError} />}
+      {!state.recordsError && !state.matchError && (
+        <MatchPanel
+          recordsText={state.recordsText}
+          matched={state.matched}
+          single={state.recordsSingle}
+        />
+      )}
+
       <nav
         style={{
           display: "flex",
@@ -457,50 +498,6 @@ export default function QueryEditor() {
       </nav>
 
       <div style={{ padding: "12px 0", minHeight: 220 }}>
-        {state.tab === "match" && (
-          <Pane>
-            <p style={{ color: PALETTE.muted, fontSize: 12, marginBottom: 6 }}>
-              Records (JSON array). The query is compiled and evaluated against
-              each record; the result column shows whether it matched.
-            </p>
-            <textarea
-              value={state.recordsText}
-              onChange={(e) =>
-                setState((s) => ({ ...s, recordsText: e.target.value }))
-              }
-              spellCheck={false}
-              rows={8}
-              style={{
-                width: "100%",
-                padding: "10px 12px",
-                background: PALETTE.surface,
-                border: `1px solid ${state.recordsError ? PALETTE.coral : PALETTE.border}`,
-                borderRadius: 8,
-                color: PALETTE.text,
-                fontFamily:
-                  "ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace",
-                fontSize: 12,
-                lineHeight: 1.5,
-                resize: "vertical",
-                outline: "none",
-                marginBottom: 10,
-              }}
-            />
-            {state.recordsError && (
-              <ErrorRow label="Records JSON" message={state.recordsError} />
-            )}
-            {state.matchError && (
-              <ErrorRow label="Match" message={state.matchError} />
-            )}
-            {!state.recordsError && !state.matchError && (
-              <MatchTable
-                recordsText={state.recordsText}
-                matched={state.matched}
-              />
-            )}
-          </Pane>
-        )}
-
         {state.tab === "ast" && (
           <Pane
             actions={
@@ -796,28 +793,103 @@ function FieldRow({
   );
 }
 
-function MatchTable({
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div
+      style={{
+        textTransform: "uppercase",
+        letterSpacing: 0.6,
+        fontSize: 11,
+        fontWeight: 600,
+        color: PALETTE.muted,
+        margin: "10px 0 6px",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function MatchPill({
+  matched,
+  big = false,
+}: {
+  matched: boolean;
+  big?: boolean;
+}) {
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        padding: big ? "6px 14px" : "2px 8px",
+        borderRadius: 999,
+        fontSize: big ? 13 : 12,
+        fontWeight: 600,
+        color: matched ? "#1B1A19" : PALETTE.muted,
+        background: matched ? PALETTE.coral : "transparent",
+        border: matched ? "none" : `1px solid ${PALETTE.borderSubtle}`,
+      }}
+    >
+      {matched ? "match" : "no match"}
+    </span>
+  );
+}
+
+function MatchPanel({
   recordsText,
   matched,
+  single,
 }: {
   recordsText: string;
   matched: boolean[];
+  single: boolean;
 }) {
   let records: Array<Record<string, unknown>> = [];
   try {
     const parsed = JSON.parse(recordsText);
     if (Array.isArray(parsed)) records = parsed;
+    else if (parsed && typeof parsed === "object") records = [parsed as Record<string, unknown>];
   } catch {
     return null;
   }
   if (records.length === 0) {
     return <Empty>No records.</Empty>;
   }
+
+  // Single object: show a prominent banner.
+  if (single) {
+    const m = matched[0] ?? false;
+    return (
+      <>
+        <SectionLabel>Result</SectionLabel>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "10px 12px",
+            background: PALETTE.surface,
+            border: `1px solid ${m ? PALETTE.coral : PALETTE.borderSubtle}`,
+            borderRadius: 8,
+          }}
+        >
+          <MatchPill matched={m} big />
+          <span style={{ color: PALETTE.muted, fontSize: 12 }}>
+            Query {m ? "matches" : "does not match"} this record.
+          </span>
+        </div>
+      </>
+    );
+  }
+
+  // Array: show a summary line + table of matched/unmatched per row.
   const matchCount = matched.filter(Boolean).length;
   return (
     <>
+      <SectionLabel>Result</SectionLabel>
       <p style={{ color: PALETTE.muted, fontSize: 12, marginBottom: 6 }}>
-        {matchCount} of {records.length} match.
+        <strong style={{ color: PALETTE.text }}>{matchCount}</strong> of{" "}
+        <strong style={{ color: PALETTE.text }}>{records.length}</strong> records match.
       </p>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
         <thead>
@@ -837,23 +909,10 @@ function MatchTable({
                 <td
                   style={{
                     padding: "5px 8px",
-                    fontWeight: 600,
-                    fontSize: 12,
-                    color: m ? "#1B1A19" : PALETTE.muted,
                     borderBottom: `1px solid ${PALETTE.surface}`,
                   }}
                 >
-                  <span
-                    style={{
-                      display: "inline-block",
-                      padding: "2px 8px",
-                      borderRadius: 999,
-                      background: m ? PALETTE.coral : "transparent",
-                      border: m ? "none" : `1px solid ${PALETTE.border}`,
-                    }}
-                  >
-                    {m ? "match" : "—"}
-                  </span>
+                  <MatchPill matched={m} />
                 </td>
               </tr>
             );

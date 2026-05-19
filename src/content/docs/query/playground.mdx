@@ -14,9 +14,17 @@ The same `query.wasm` binary that runs in the Heyllave Web UI is loaded into thi
 
 ## What's wired up
 
+The playground is laid out top-to-bottom as a single search loop:
+
+1. **Toolbar** — example dropdown, Share URL, Edit schema.
+2. **Query** — the textarea you type into. Validation errors highlight the border in coral.
+3. **Schema** (toggle) — per-field editor: rename, change type, toggle allowed operators, add/remove rows.
+4. **Records** — JSON. Paste either a single object `{ ... }` or an array `[{ ... }, ...]`.
+5. **Result** — the match outcome. Banner for a single record (`match` / `no match`), table for an array (`N of M records match`).
+6. **Inspection tabs** — deeper views once the basic search works:
+
 | Tab | What it shows |
 |-----|---------------|
-| **Match** | The end-to-end search loop. Edit the records JSON, watch the table refresh live — each row shows whether the compiled query matches that record. The eval engine that runs in this tab is the same closure-tree matcher described in [Coverage & Tradeoffs](/query/coverage/#evaluation-model). |
 | **AST** | The parsed expression tree as JSON. Use **Copy** to grab it for a bug report or pagination cursor. |
 | **Round-trip** | `ast.String(parse(q))` — the canonical re-rendering. `IN` desugars to OR, negated comparisons (`!>`) expand to `NOT >`, and keyword case normalizes. |
 | **Errors** | Parse and validation errors against the current schema. Edit the schema to see how validation changes. |
