@@ -22,15 +22,15 @@ The v1 billing engine ships: metrics, plans, overrides, conditional rules, soft 
 
 ## Usage-based pricing (tiered metering)
 
-**Status**: not implemented.
+**Status**: not implemented. **Flat pricing landed** — see [Plans → Pricing fields](/billing/plans#pricing-fields) and [`/billing/quote`](/billing/api#tenant-quote). Plans carry `price_cents / currency / billing_interval` and per-tenant overrides carry an optional `price_cents + description` for upsells. What's missing is the *tiered* / *usage-based* layer.
 
 **What's needed**:
 - Tiered pricing per metric: "first 1000 free, then $0.01/each up to 10000, then $0.005/each beyond." Either as new columns on `plan_quotas` or a separate `pricing_rules` table.
-- Currency + unit price decoupled from cap (existing `limit_value` is units, not money).
 - Usage rollup per billing period — summing `quota_usage` snapshots between `period_start` and `period_end`.
 - Spend cap predicates ("warn / cap at $X projected spend").
+- Fees / taxes / proration on the quote (today the quote is just `plan_cents + sum(override_cents)`).
 
-**Why deferred**: requires the contract foundation (just landed in v1) plus a currency / money model the platform doesn't have yet. The contract's `currency` field is in place; pricing math is the missing layer.
+**Why deferred**: tiered metering needs a billing-period rollup job and a money / proration model the platform doesn't have yet. Flat plan + override pricing is enough to *quote* a customer; you can settle by hand (or via the eventual Stripe adapter) until the rollup ships.
 
 ## Trend dashboards and forecasting
 
@@ -102,7 +102,7 @@ The v1 billing engine ships: metrics, plans, overrides, conditional rules, soft 
 | Gap | Why it's not in v1 | What's blocking |
 |---|---|---|
 | Stripe adapter | needs real keys + webhook infra | environment-specific config |
-| Usage pricing | needs contracts (now shipped) + currency model | currency / money types |
+| Tiered / usage-based pricing | needs rollup job + money / proration model | builds on flat pricing (shipped) and contracts |
 | Trend dashboards | UI work in a separate repo | n/a — core API is sufficient |
 | Long-lived reservations | specialised engineering | demand from a real use case |
 | Distributed quotas | multi-region not active | multi-region rollout |
@@ -118,4 +118,5 @@ This list is the honest gap audit, not a commitment to ship any specific item. P
 
 - [Overview](/billing/overview) — what *is* shipping in v1
 - [Contracts](/billing/contracts) — the foundation usage-based pricing will build on
+- [`/billing/quote` endpoint](/billing/api#tenant-quote) — the customer-facing pricing summary that today's flat-pricing model already supports
 - [Audit log](/billing/audit) — the source data trend dashboards will read

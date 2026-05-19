@@ -24,13 +24,27 @@ public.tenant_quota_overrides -- single-value override. PK (tenant_id, metric_ke
 
 A built-in seed populates a starter catalog on first bootstrap. The seed is idempotent — re-running upserts the same plan definitions and limits without dropping existing tenant assignments.
 
-| Plan | Tier | Defaults |
+| Plan | Price | Limits |
 |---|---|---|
-| `free` | default fallback | `users=3`, `modules=3`, `storage=512MB/mo`, `whatsapp=off`, `web_channel=on` |
-| `pro` | mid-tier | `users=25`, `modules=10`, `storage=10GB/mo`, both channels on |
-| `enterprise` | unlimited | `users=unlimited`, `modules=unlimited`, `storage=unlimited/mo`, both channels on |
+| `free` | 0 COP/mo | `users=3`, `modules=3`, `storage=512MB/mo`, `whatsapp=off`, `web_channel=on` |
+| `pro` | 89.900 COP/mo | `users=25`, `modules=10`, `storage=10GB/mo`, both channels on |
+| `enterprise` | 249.900 COP/mo | `users=unlimited`, `modules=unlimited`, `storage=unlimited/mo`, both channels on |
+
+Prices in the bootstrap seed are denominated in **Colombian pesos** (`currency: "COP"`, `billing_interval: "month"`). If your target audience is elsewhere, change the values in `internal/core/billing/seed.go` and redeploy — the seed will upsert the new numbers on the next boot without disturbing tenant assignments.
 
 `billing.SeedDefaults` is called automatically when the core tables are bootstrapped. Edit the seed in `internal/core/billing/seed.go` to change the catalog; on the next deploy the change lands on already-bootstrapped DBs without touching tenant assignments.
+
+### Pricing fields
+
+Every plan carries three pricing fields alongside its limits:
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `price_cents` | `BIGINT` | `0` | Headline recurring price in the plan's currency, expressed in **minor units** (e.g. `8990000` = 89.900,00 COP). Non-negative. |
+| `currency` | `TEXT` | `"USD"` | ISO-4217 code. The bootstrap seed sets `"COP"`. |
+| `billing_interval` | `TEXT` | `"month"` | `month` \| `year` \| `one_time`. Documentary today — there's no automatic invoice generation yet (see [Roadmap](/billing/roadmap)). |
+
+These fields are surfaced through the `/billing/quote` endpoint and the plan create/replace API — see [HTTP API → Plans](/billing/api#plans).
 
 <Aside type="tip">
 The seed is the right place for canonical plan definitions. The HTTP API is for one-off catalog edits — anything you'd want to survive a fresh-bootstrap should live in the seed.
@@ -90,6 +104,8 @@ Content-Type: application/json
 | `reset_period` | meters only | `none` / `day` / `month` / `year`. |
 | `grace_pct` | no | Integer 0..100. Allows usage up to `limit * (1 + grace_pct/100)` before hard-denying. See [Soft Limits & Thresholds](/billing/thresholds). |
 | `reason` | no | Free-text justification surfaced in admin UI and audit log. |
+| `price_cents` | no | Recurring add-on charge attributed to this override, in the plan's currency (minor units). `0` = courtesy bump (does not appear on the quote). |
+| `description` | no | Customer-facing label used in the [`/billing/quote`](/billing/api#tenant-quote) breakdown. Falls back to `metric_key` when empty. |
 | `expires_at` | no | When set, the override stops applying after this timestamp. The resolver treats expired rows as absent. |
 
 Overrides are addressed by `(tenant_id, metric_key)` — re-PUTting the same path updates the same row. To remove an override, `DELETE` it.
@@ -149,6 +165,26 @@ PUT /api/v1/tenants/tnt_acme/billing/overrides/feature.whatsapp_channel
 ```
 
 `IsEnabled("feature.whatsapp_channel")` returns `false` for this tenant only; everyone else on the same plan keeps the feature.
+
+### Charging a tenant extra for an enabled feature (priced override)
+
+The override row carries both a limit *and* an optional price. Setting both turns the override into a customer-facing upsell:
+
+```http
+PUT /api/v1/tenants/tnt_acme/billing/overrides/feature.whatsapp_channel
+{
+  "limit_value": 1,
+  "price_cents": 2000000,
+  "description": "Canal de WhatsApp",
+  "reason": "addon: WhatsApp enabled per sales agreement"
+}
+```
+
+That tenant now sees `feature.whatsapp_channel` enabled *and* the [`/billing/quote`](/billing/api#tenant-quote) endpoint adds a 20.000 COP line to the breakdown. Set `price_cents: 0` (the default) when you're bumping a limit as a courtesy — the override still applies but it doesn't appear on the quote.
+
+### Bootstrap demo data
+
+For a sales demo, `internal/core/billing/seed.go` exports a `DemoOverrides` slice and a `SeedDemoOverridesForTenant(ctx, store, tenantInternalID)` helper that applies three example upsells (WhatsApp channel, +20GB storage, +25 user seats) totalling 50.000 COP/mo. It's not invoked from bootstrap — call it from a CLI or a one-off script when prepping a demo tenant.
 
 ### Migrating off a deprecated plan
 
