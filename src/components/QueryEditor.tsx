@@ -369,77 +369,103 @@ export default function QueryEditor() {
         )}
       </header>
 
-      <textarea
-        value={state.query}
-        onChange={(e) => setState((s) => ({ ...s, query: e.target.value }))}
-        spellCheck={false}
-        rows={2}
+      {/* Two-column grid: query (and schema) on the left, records + result on
+          the right. Collapses to a single column on narrow screens via
+          minmax(0, ...). */}
+      <div
         style={{
-          width: "100%",
-          padding: "10px 12px",
-          background: PALETTE.surface,
-          border: `1px solid ${state.parseError ? PALETTE.coral : PALETTE.border}`,
-          borderRadius: 8,
-          color: PALETTE.text,
-          fontFamily: "ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace",
-          fontSize: 14,
-          lineHeight: 1.5,
-          resize: "vertical",
-          outline: "none",
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
+          gap: 14,
+          alignItems: "start",
         }}
-      />
+      >
+        {/* Left column: Query + Schema editor */}
+        <section style={{ minWidth: 0 }}>
+          <SectionLabel>Query</SectionLabel>
+          <textarea
+            value={state.query}
+            onChange={(e) =>
+              setState((s) => ({ ...s, query: e.target.value }))
+            }
+            spellCheck={false}
+            rows={3}
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              padding: "10px 12px",
+              background: PALETTE.surface,
+              border: `1px solid ${state.parseError ? PALETTE.coral : PALETTE.borderSubtle}`,
+              borderRadius: 8,
+              color: PALETTE.text,
+              fontFamily:
+                "ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace",
+              fontSize: 14,
+              lineHeight: 1.5,
+              resize: "vertical",
+              outline: "none",
+            }}
+          />
+          {state.showSchema && (
+            <SchemaEditor
+              fields={state.fields}
+              onUpdate={updateField}
+              onRemove={removeField}
+              onAdd={addField}
+              onReset={resetSchema}
+            />
+          )}
+        </section>
 
-      {state.showSchema && (
-        <SchemaEditor
-          fields={state.fields}
-          onUpdate={updateField}
-          onRemove={removeField}
-          onAdd={addField}
-          onReset={resetSchema}
-        />
-      )}
-
-      <SectionLabel>Records</SectionLabel>
-      <textarea
-        value={state.recordsText}
-        onChange={(e) =>
-          setState((s) => ({ ...s, recordsText: e.target.value }))
-        }
-        spellCheck={false}
-        rows={6}
-        style={{
-          width: "100%",
-          padding: "10px 12px",
-          background: PALETTE.surface,
-          border: `1px solid ${state.recordsError ? PALETTE.coral : PALETTE.borderSubtle}`,
-          borderRadius: 8,
-          color: PALETTE.text,
-          fontFamily:
-            "ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace",
-          fontSize: 12,
-          lineHeight: 1.5,
-          resize: "vertical",
-          outline: "none",
-          marginBottom: 10,
-        }}
-      />
-      {state.recordsError && (
-        <ErrorRow label="Records JSON" message={state.recordsError} />
-      )}
-      {state.matchError && <ErrorRow label="Match" message={state.matchError} />}
-      {!state.recordsError && !state.matchError && (
-        <MatchPanel
-          recordsText={state.recordsText}
-          matched={state.matched}
-          single={state.recordsSingle}
-        />
-      )}
+        {/* Right column: Records + Result */}
+        <section style={{ minWidth: 0 }}>
+          <SectionLabel>Records</SectionLabel>
+          <textarea
+            value={state.recordsText}
+            onChange={(e) =>
+              setState((s) => ({ ...s, recordsText: e.target.value }))
+            }
+            spellCheck={false}
+            rows={6}
+            placeholder="Single object {...} or array [{...}, ...]"
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              padding: "10px 12px",
+              background: PALETTE.surface,
+              border: `1px solid ${state.recordsError ? PALETTE.coral : PALETTE.borderSubtle}`,
+              borderRadius: 8,
+              color: PALETTE.text,
+              fontFamily:
+                "ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace",
+              fontSize: 12,
+              lineHeight: 1.5,
+              resize: "vertical",
+              outline: "none",
+              marginBottom: 10,
+            }}
+          />
+          {state.recordsError && (
+            <ErrorRow label="Records JSON" message={state.recordsError} />
+          )}
+          {state.matchError && (
+            <ErrorRow label="Match" message={state.matchError} />
+          )}
+          {!state.recordsError && !state.matchError && (
+            <MatchPanel
+              recordsText={state.recordsText}
+              matched={state.matched}
+              single={state.recordsSingle}
+            />
+          )}
+        </section>
+      </div>
 
       <nav
         style={{
           display: "flex",
-          gap: 4,
-          marginTop: 14,
+          gap: 16,
+          marginTop: 16,
           borderBottom: `1px solid ${PALETTE.borderSubtle}`,
         }}
       >
@@ -462,7 +488,7 @@ export default function QueryEditor() {
                   ? `2px solid ${PALETTE.coral}`
                   : "2px solid transparent",
                 color: active ? PALETTE.text : PALETTE.muted,
-                padding: "8px 10px",
+                padding: "8px 0",
                 marginBottom: -1, // overlap the nav's border-bottom
                 cursor: "pointer",
                 fontFamily: "inherit",
@@ -615,14 +641,18 @@ function Button({
       disabled={disabled}
       style={{
         background: PALETTE.surface,
-        border: `1px solid ${PALETTE.border}`,
+        border: `1px solid ${PALETTE.borderSubtle}`,
         color: PALETTE.text,
         borderRadius: 6,
-        padding: "6px 10px",
+        padding: "0 10px",
+        height: 28,
+        boxSizing: "border-box",
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.5 : 1,
         fontSize: 12,
         fontFamily: "inherit",
+        lineHeight: "26px",
+        whiteSpace: "nowrap",
       }}
     >
       {children}
@@ -648,16 +678,27 @@ function ExampleDropdown({
       defaultValue=""
       style={{
         background: PALETTE.surface,
-        border: `1px solid ${PALETTE.border}`,
+        border: `1px solid ${PALETTE.borderSubtle}`,
         color: PALETTE.text,
         borderRadius: 6,
-        padding: "6px 8px",
+        padding: "0 26px 0 10px",
+        height: 28,
+        boxSizing: "border-box",
         fontSize: 12,
         fontFamily: "inherit",
+        lineHeight: "26px",
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.5 : 1,
-        width: 160,
-        maxWidth: 200,
+        width: 180,
+        // Strip the browser-native chrome and draw a custom caret via SVG bg.
+        appearance: "none",
+        WebkitAppearance: "none",
+        MozAppearance: "none",
+        backgroundImage:
+          "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6' fill='none' stroke='%23B7B4AD' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'><polyline points='1,1 5,5 9,1'/></svg>\")",
+        backgroundRepeat: "no-repeat",
+        backgroundPosition: "right 8px center",
+        backgroundSize: "10px 6px",
       }}
     >
       <option value="" disabled>
