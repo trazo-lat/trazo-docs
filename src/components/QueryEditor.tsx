@@ -558,11 +558,24 @@ export default function QueryEditor() {
         {state.tab === "errors" && (
           <Pane>
             {state.parseError && (
-              <ErrorRow label="Parse error" message={state.parseError} />
+              <ErrorRow
+                label="Parse error"
+                message={state.parseError}
+                query={state.query}
+              />
             )}
-            {state.validateErrors.map((msg, i) => (
-              <ErrorRow key={i} label="Validation" message={msg} />
-            ))}
+            {state.validateErrors.flatMap((msg, i) =>
+              // The bridge currently concatenates multiple validate errors
+              // with "; ". Split them so each gets its own row + caret.
+              msg.split(/;\s+/).map((part, j) => (
+                <ErrorRow
+                  key={`${i}-${j}`}
+                  label="Validation"
+                  message={part}
+                  query={state.query}
+                />
+              )),
+            )}
             {!state.parseError && state.validateErrors.length === 0 && (
               <Empty>No errors. Query parses and validates clean.</Empty>
             )}
@@ -985,12 +998,33 @@ function Empty({ children }: { children: ReactNode }) {
   return <p style={{ color: PALETTE.muted, fontSize: 13 }}>{children}</p>;
 }
 
-function ErrorRow({ label, message }: { label: string; message: string }) {
+// parseErrorPosition extracts a leading "position N: " prefix from a
+// validator / parser error message. Returns the offset and the remaining
+// message body, or null if no position prefix is found.
+function parseErrorPosition(
+  msg: string,
+): { offset: number; body: string } | null {
+  // Errors can carry an optional prefix ("parse: ", "validate: ") before
+  // "position N:". Strip that, then look for the position.
+  const m = msg.match(/^(?:[a-z]+:\s*)?position (\d+):\s*(.*)$/i);
+  if (!m) return null;
+  const offset = parseInt(m[1], 10);
+  return Number.isFinite(offset) ? { offset, body: m[2] } : null;
+}
+
+function ErrorRow({
+  label,
+  message,
+  query,
+}: {
+  label: string;
+  message: string;
+  query?: string;
+}) {
+  const parsed = query ? parseErrorPosition(message) : null;
   return (
     <div
       style={{
-        display: "flex",
-        gap: 10,
         padding: "8px 10px",
         background: "rgba(255, 107, 91, 0.08)",
         border: `1px solid ${PALETTE.coral}`,
@@ -998,17 +1032,75 @@ function ErrorRow({ label, message }: { label: string; message: string }) {
         marginBottom: 6,
       }}
     >
-      <span
-        style={{
-          color: PALETTE.coral,
-          fontWeight: 600,
-          fontSize: 12,
-          minWidth: 80,
-        }}
-      >
-        {label}
-      </span>
-      <code style={{ fontSize: 13, color: PALETTE.text }}>{message}</code>
+      <div style={{ display: "flex", gap: 10 }}>
+        <span
+          style={{
+            color: PALETTE.coral,
+            fontWeight: 600,
+            fontSize: 12,
+            minWidth: 80,
+          }}
+        >
+          {label}
+        </span>
+        <code style={{ fontSize: 13, color: PALETTE.text }}>{message}</code>
+      </div>
+      {parsed && query && (
+        <ErrorCaret query={query} offset={parsed.offset} />
+      )}
+    </div>
+  );
+}
+
+// ErrorCaret renders the offending query line below the message with a
+// coral `^` marker positioned directly under the offset, plus the column
+// number for keyboard-driven navigation. Uses a monospaced font so the
+// caret aligns character-by-character.
+function ErrorCaret({
+  query,
+  offset,
+}: {
+  query: string;
+  offset: number;
+}) {
+  // Clamp the offset to a valid string index. Multi-line queries break this
+  // simple scheme; render against the line containing the offset.
+  const lines = query.split("\n");
+  let lineStart = 0;
+  let line = lines[0] ?? "";
+  let col = offset;
+  for (const candidate of lines) {
+    if (col <= candidate.length) {
+      line = candidate;
+      break;
+    }
+    col -= candidate.length + 1; // +1 for the consumed newline
+    lineStart += candidate.length + 1;
+  }
+  const safeCol = Math.max(0, Math.min(col, line.length));
+  return (
+    <div
+      style={{
+        marginTop: 8,
+        padding: "6px 8px",
+        background: PALETTE.surface,
+        border: `1px solid ${PALETTE.borderSubtle}`,
+        borderRadius: 4,
+        fontFamily:
+          "ui-monospace, 'SFMono-Regular', 'JetBrains Mono', Menlo, monospace",
+        fontSize: 12,
+        lineHeight: 1.4,
+        whiteSpace: "pre",
+        overflow: "auto",
+      }}
+    >
+      <div style={{ color: PALETTE.text }}>{line || " "}</div>
+      <div style={{ color: PALETTE.coral }}>
+        {" ".repeat(safeCol) + "^"}
+      </div>
+      <div style={{ color: PALETTE.muted, fontSize: 11, marginTop: 2 }}>
+        column {offset + 1}{lineStart > 0 ? ` (line ${lines.indexOf(line) + 1})` : ""}
+      </div>
     </div>
   );
 }
