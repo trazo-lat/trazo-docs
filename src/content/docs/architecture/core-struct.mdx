@@ -1,6 +1,6 @@
 ---
 title: Core Struct
-description: The central dependency carrier of the Heyllave platform — its 20 sub-interfaces, the rules governing how Core is used, and where each subsystem is documented in depth.
+description: The central dependency carrier of the Heyllave platform — its 19 sub-interfaces, the rules governing how Core is used, and where each subsystem is documented in depth.
 ---
 
 The `Core` struct is the single point of access for every platform capability. It is constructed once at startup and passed as a pointer into every module, service, and handler. No global state is used; all shared functionality is accessed through `*Core`.
@@ -27,7 +27,6 @@ type Core struct {
     AgentTools AgentToolRegistry // LLM tool registry
     State      StateTracker      // Tenant config snapshots
     Quotas     QuotaEngine       // Per-tenant feature gating
-    Policies   PolicyEngine      // Write-time entity invariants
     Contracts  ContractEngine    // Subscription contracts (temporal layer)
 }
 ```
@@ -43,7 +42,6 @@ The detailed method-by-method reference for the foundational sub-interfaces live
 | Sub-interface | Detailed docs |
 |---|---|
 | `Quotas` (`QuotaEngine`) | [Billing → Gating with the Engine](/billing/gating), [Defining Metrics](/billing/metrics) |
-| `Policies` (`PolicyEngine`) | [Billing → Policies](/billing/policies) |
 | `Contracts` (`ContractEngine`) | [Billing → Subscription Contracts](/billing/contracts) |
 | `Status`, `Approvals` | [Status Machines guide](/guides/status-machines), [Approval Workflows](/guides/approvals) |
 | `I18n`, `Search`, `AgentTools`, `State` | covered inline in module guides; source under `internal/core/` |

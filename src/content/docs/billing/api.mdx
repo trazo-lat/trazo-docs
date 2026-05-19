@@ -423,7 +423,6 @@ Errors follow the platform's structured-error format. The HTTP status comes from
 | `CORE.CONTRACT.NOT_FOUND` | 404 | Contract public ID does not exist. |
 | `CORE.CONTRACT.NOT_RENEWABLE` | 422 | `Contracts.Renew` called on a cancelled or expired contract. |
 | `CORE.CONTRACT.PLAN_NOT_FOUND` | 404 | Plan slug referenced by a contract create/renew does not exist. |
-| Policy violations | (caller-defined) | When `core.Policies.Check` returns a deny match, the calling module translates the violation to its own `*core.Error` using the policy's `violation_code`. See [Policies](/billing/policies). |
 | `CORE.AUTHORIZATION.FORBIDDEN` | 403 | Caller lacks one of the `billing.*` permissions. |
 | `CORE.NOT_FOUND.PLAN` | 404 | Plan slug doesn't exist (on GET/PATCH/DELETE/PUT). |
 | `CORE.NOT_FOUND.RULE` | 404 | Rule public ID doesn't exist for the addressed tenant. |

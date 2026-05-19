@@ -1,14 +1,14 @@
 ---
 title: Core Interfaces
-description: Reference for the 20 platform sub-interfaces and the ContextLogger — the contracts that all Heyllave modules interact with to access platform services.
+description: Reference for the 19 platform sub-interfaces and the ContextLogger — the contracts that all Heyllave modules interact with to access platform services.
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-Every Heyllave module receives a `Core` struct at startup that exposes 20 sub-interfaces. These interfaces are the only coupling between a module and the platform — they can all be replaced by mock implementations in tests.
+Every Heyllave module receives a `Core` struct at startup that exposes 19 sub-interfaces. These interfaces are the only coupling between a module and the platform — they can all be replaced by mock implementations in tests.
 
 <Aside type="note">
-The platform-level Go types referenced below (`Session`, `AuditEntry`, `Event`, …) live in `package core`, split across focused files by domain: `types_identity.go`, `types_audit.go`, `types_events.go`, `types_hooks.go`, `types_notify.go`, `types_permissions.go`, `types_storage.go`, `types_db.go`, `types_module.go`, `types_errors.go`, `types_logger.go`, `types_pagination.go`, `types_agent.go`, `types_approvals.go`, `types_state.go`, `types_statemachine.go`, `types_search.go`, `types_quotas.go`, `types_policies.go`, `types_contracts.go`, `types_metrics.go`, and `types_instance.go`. They all resolve identically — the per-file split is purely organizational.
+The platform-level Go types referenced below (`Session`, `AuditEntry`, `Event`, …) live in `package core`, split across focused files by domain: `types_identity.go`, `types_audit.go`, `types_events.go`, `types_hooks.go`, `types_notify.go`, `types_permissions.go`, `types_storage.go`, `types_db.go`, `types_module.go`, `types_errors.go`, `types_logger.go`, `types_pagination.go`, `types_agent.go`, `types_approvals.go`, `types_state.go`, `types_statemachine.go`, `types_search.go`, `types_quotas.go`, `types_contracts.go`, `types_metrics.go`, and `types_instance.go`. They all resolve identically — the per-file split is purely organizational.
 </Aside>
 
 ```go
@@ -31,7 +31,6 @@ type Core struct {
     AgentTools AgentToolRegistry
     State      StateTracker
     Quotas     QuotaEngine
-    Policies   PolicyEngine
     Contracts  ContractEngine
 }
 ```
@@ -42,7 +41,6 @@ This page details the foundational sub-interfaces. The newer subsystems below ha
 | Sub-interface | Detailed docs |
 |---|---|
 | `Quotas` (`QuotaEngine`) | [Billing → Gating](/billing/gating), [Defining Metrics](/billing/metrics) |
-| `Policies` (`PolicyEngine`) | [Billing → Policies](/billing/policies) |
 | `Contracts` (`ContractEngine`) | [Billing → Subscription Contracts](/billing/contracts) |
 | `Status`, `Approvals` | [Status Machines](/guides/status-machines), [Approval Workflows](/guides/approvals) |
 

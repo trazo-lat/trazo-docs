@@ -116,7 +116,6 @@ export default defineConfig({
             { label: 'Plans & Overrides', slug: 'billing/plans' },
             { label: 'Conditional Rules', slug: 'billing/rules' },
             { label: 'Soft Limits & Thresholds', slug: 'billing/thresholds' },
-            { label: 'Policies', slug: 'billing/policies' },
             { label: 'Subscription Contracts', slug: 'billing/contracts' },
             { label: 'Audit Log', slug: 'billing/audit' },
             { label: 'HTTP API Reference', slug: 'billing/api' },

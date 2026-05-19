@@ -42,10 +42,6 @@ These codes are defined by the platform core and may be returned by any request.
 | `CORE.CONTRACT.NOT_RENEWABLE` | 422 | `Contracts.Renew` called on a cancelled or expired contract. |
 | `CORE.CONTRACT.PLAN_NOT_FOUND` | 404 | Plan slug referenced by `Contracts.Create` or `Contracts.Renew` does not exist. |
 
-<Aside type="note">
-Policy violations don't have fixed `CORE.*` codes — each policy defines its own `violation_code` and the calling module translates the result into a `*core.Error` using that code. See [Billing → Policies](/billing/policies).
-</Aside>
-
 ---
 
 ## Module Error Codes
