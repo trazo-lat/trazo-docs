@@ -1,0 +1,56 @@
+---
+title: Entity Search
+description: Full-text search and structured filtering across entity instances using the heyllave query DSL.
+---
+
+The entities module exposes a search endpoint that combines two complementary lookup modes:
+
+- **`q`** — JSONB substring match across the entire entity payload (loose, useful for free-text exploration).
+- **`filter`** — a structured expression in the [heyllave query](/query/overview/) syntax that compiles to typed SQL against the entity's schema fields.
+
+Both parameters can be used together. They are ANDed in the final query.
+
+## Search Entities
+
+**`GET /api/v1/tenants/{tenant_id}/i/{instance}/search`**
+
+| Query parameter | Type | Description |
+|---|---|---|
+| `type` | string | Entity type to search within. Required when `filter` is set so fields can be validated against the type's schema. |
+| `q` | string | Free-text query — matches anywhere inside the entity's JSONB payload. |
+| `filter` | string | Structured filter expression (heyllave query DSL). See examples below. |
+| `limit` | integer | Maximum results per page. |
+| `offset` | integer | Records to skip for pagination. |
+
+## Filter Examples
+
+Given an entity type `vehicle` with fields `make` (text), `year` (integer), `price` (decimal), `available` (boolean), and `purchased_at` (date):
+
+```http
+# All Toyotas
+GET /search?type=vehicle&filter=make=toyota
+
+# Recent models above a price floor
+GET /search?type=vehicle&filter=year>=2020 AND price>15000
+
+# In-stock vehicles bought this year
+GET /search?type=vehicle&filter=available=true AND purchased_at>=2026-01-01
+
+# Combined with full-text
+GET /search?type=vehicle&q=hybrid&filter=year>2022
+```
+
+The filter expression is parsed, validated against the type's field schema (unknown fields and operators incompatible with a field's type are rejected with `400`), and compiled to a parameterized JSONB SQL clause — no string interpolation, no injection risk.
+
+## Validation Errors
+
+| Code | When |
+|---|---|
+| `400 filter parse: ...` | Expression is not valid query DSL. |
+| `400 filter validate: ...` | Field is not declared on the entity type, or operator is not allowed for the field's type. |
+| `400 filter requires \`type\`` | `filter` was supplied without a `type` to resolve fields against. |
+
+## See Also
+
+- [Query language overview](/query/overview/) — full DSL syntax reference.
+- [Query examples](/query/examples/) — composing complex expressions.
